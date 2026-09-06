@@ -5,8 +5,9 @@ not ship -- a serial port with a box on it, a running acquisition console, the l
 repository -- are reported as SKIPPED when it is absent, never as FAIL.
 
 What it covers today: the package imports, the version declarations agree, the three lower
-layers stay free of Qt, the module layout is complete, and lab-directory resolution behaves.
-Tasks add sections as they land code.
+layers stay free of Qt, the module layout is complete, lab-directory resolution behaves, a
+method document round-trips, and the MIPS sender drives a simulated box through a table load,
+a TBLRPT round trip, arming and a rejection. Tasks add sections as they land code.
 
 Run:  uv run tools/check_public.py
 """
@@ -139,6 +140,50 @@ def main() -> int:
         check_true("an incomplete method document is rejected", False)
     except method.MethodError:
         check_true("an incomplete method document is rejected", True)
+
+    section("MIPS serial")
+    from clockwork import mips
+
+    fake = mips.FakeBox(name="check_public-box")
+    box = mips.Box(transport=fake, name="fake")
+    check_true(f"a simulated box answers GVER ({box.version()})", bool(box.version()))
+    check_true("and GNAME", box.box_name() == "check_public-box")
+
+    example = "STBLDAT;25:[A:10,10:A:1,25:A:0:5:34.5,100:];"
+    load = box.send_table(example)
+    check_true(
+        f"a table loads and is ACKed ({load.bytes_sent} bytes, "
+        f"{load.predicted.byte_size} on the box)",
+        load.prediction_error is None,
+    )
+    check_true("TBLRPT reads back the table that was sent", box.verify_table(load) == [])
+
+    # A long table has to be chunked: the box's 4096-byte input buffer drops
+    # what overruns it without saying so (docs/mips-wire-format.md §1).
+    long_events = ",".join(f"{tick}:A:1" for tick in range(100, 2000, 2))
+    long_table = f"STBLDAT;0:[A:1,{long_events},4000:];"
+    long_load = box.send_table(long_table)
+    check_true(
+        f"a table of {len(long_table)} bytes streams without losing characters",
+        fake.dropped_bytes == 0 and box.verify_table(long_load) == [],
+    )
+
+    box.arm()
+    box.trigger()
+    seen = box.drain(0.05)
+    check_true(
+        "arming and a pass report TBLRDY, TBLTRIG, TBLCMPLT and the re-arm ("
+        + ", ".join(event.name for event in seen) + ")",
+        seen == [mips.TableEvent.TRIGGERED, mips.TableEvent.COMPLETE, mips.TableEvent.READY],
+    )
+    try:
+        box.command("NOSUCHCMD")
+        check_true("a bad command is rejected with the box's own error code", False)
+    except mips.BoxRejected as exc:
+        check_true(
+            f"a bad command is rejected with the box's own error code ({exc.code})",
+            exc.code == 1,
+        )
 
     section("hardware")
     skip("a MIPS box answers GVER", "no serial hardware in a self-check; lab record, task 04")

@@ -65,32 +65,122 @@ command protocol.
   string must therefore stream in without multi-second stalls, or the
   load fails with a token-timeout error.
 
+### The 4096-byte input ring buffer
+
+Received characters go into a fixed 4096-byte ring buffer
+(`Serial.h: RB_BUF_SIZE`) before the tokenizer sees them. Two properties
+of it constrain how a host may send a long table:
+
+- **Overflow is silent.** `RB_Put()` returns a full-buffer indication
+  that `PutCh()` discards, so once the buffer is full every further
+  character is dropped without any response. A table string truncated
+  this way does not NAK cleanly; it fails somewhere downstream of the
+  loss, or parses into a table that is not the one that was sent.
+- **The buffer drains a token at a time but fills all at once.** Each
+  pass of `NextToken()` consumes one token and then calls
+  `ReadAllSerial()`, which moves *everything* the USB stack has waiting
+  into the ring buffer. A host writing a long table in one call can
+  therefore run the buffer up faster than the parser empties it.
+
+So the two failure modes pull in opposite directions: sending too slowly
+trips the 3-second token timeout, and sending too fast overruns 4096
+bytes. A sender should write a long table in chunks well under 4096
+bytes with no deliberate delay between them, letting the USB CDC link's
+own flow control set the pace, and treat any table string approaching
+4 KB as needing a measured check on the box rather than an assumption.
+
+Neither number is fixed by the firmware, because both depend on how fast
+the host's USB stack delivers relative to how fast the parser tokenizes,
+so both are bench measurements (§7).
+
 ### Responses
+
+Byte-exact, from the `SendACK` / `SendACKonly` / `SendNAK` macros
+(`include/Serial.h`) and the `CMDstr` / `CMDint` arms of `ExecuteCommand`
+(`src/Serial.cpp`). Note that the set-style ACK's terminator is **LF then
+CR**, while every value or status line the firmware prints goes through
+Arduino `Print::println` and so ends **CR then LF**:
 
 | Response | Bytes | Meaning |
 |---|---|---|
-| ACK | `0x06` `\n` `\r` | Command accepted (set-style commands) |
-| ACK + value | `0x06` then value + `\n` | Get-style commands: ACK byte, then the value on the same line |
-| NAK | `0x15` `?` `\n` `\r` | Command rejected; query `GERR` for the last error code |
+| ACK | `06 0A 0D` (`\x06\n\r`) | Command accepted (set-style commands) |
+| ACK + value | `06`, then the value, then `0D 0A` | Get-style commands: a bare ACK byte with no terminator of its own, then the value as a `println` line |
+| NAK | `15 3F 0A 0D` (`\x15?\n\r`) | Command rejected; query `GERR` for the last error code |
 
+- The `?` is part of the NAK sequence, not a separate error line. The
+  firmware has no other `?`-prefixed error form on the table path (the
+  lone `println("?")` in `src/ARB.cpp` is an unrelated ARB query reply).
 - `MUTE,ON` suppresses all responses; `ECHO,TRUE` switches the ACK-only
   string from `\x06` to `,\x06` (echo mode). The sequencer should leave
   both at defaults and treat `0x06`/`0x15` as the accept/reject bytes.
+- A host tokenizer that drops every `\r`, splits the rest on `\n`, treats
+  `0x06` and `0x15` as standalone tokens and discards empty lines reduces
+  all of the terminator conventions above (and the doubled ones in the
+  next section) to a single stream of ACK / NAK / text tokens. That is
+  the only framing a sequencer needs.
+- **Command termination:** the input ring buffer maps `\r` to `\n`
+  (`Serial.cpp: RB_Get()`), and a stray `\n` in the command state is
+  skipped, so `\n`, `\r` and `\r\n` are all accepted terminators.
+- **Two-pass dispatch:** a command and its arguments are consumed on one
+  call of `ProcessCommand()` and the function itself runs on the next,
+  when the terminator token arrives. This is why `STBLDAT`'s payload
+  parser (§2) starts reading at the token *after* the first `;`: that
+  semicolon is what triggered the dispatch.
+
+### Error codes
+
+`GERR` returns the last error as an integer and **never clears it**, so
+it is only meaningful read immediately after a NAK. Codes are defined in
+`include/Errors.h`: 1-29 shared with AMPS, 101-126 MIPS-specific. The
+ones a sequencer will actually meet:
+
+| Code | Meaning |
+|---|---|
+| 1 | Invalid command |
+| 2 | Invalid argument |
+| 4 | Already in TBL mode |
+| 5 | No tables loaded |
+| 6 | Not in table mode |
+| 7 | Table not ready |
+| 8 | Timed out waiting for a token (the 3-second `STBLDAT` timeout) |
+| 9 | Expected a `:` |
+| 10 | Table too big |
+| 19 | Expected a `,` |
+| 20 | Table nesting too deep |
+| 21 | `]` without a matching `[` |
+| 27 | Not in LOC mode |
 
 ### Asynchronous table-status messages
 
 While in table mode the box emits unsolicited lines (unless disabled
-with `STBLREPLY,FALSE`):
+with `STBLREPLY,FALSE`). All but one go through `println` with a `\n`
+already inside the string, so they arrive as the text, then `\n\r\n`:
+a host that discards empty lines sees one line per event.
 
-| Message | When |
-|---|---|
-| `TBLRDY` | Entered table mode / re-armed and waiting for trigger |
-| `TBLTRIG` | Trigger received, table running |
-| `TBLCMPLT` | Table finished |
-| `ABORTED` | Table mode aborted (command, front-panel button, or low input voltage) |
-| `Table stoped by user` | `TBLSTOP` processed (sic — misspelling is in firmware) |
+| Message | Bytes on the wire | When |
+|---|---|---|
+| `TBLRDY` | `TBLRDY\n\r\n` | Entered table mode, or re-armed, and waiting for a trigger |
+| `TBLTRIG` | `TBLTRIG\n\r\n` | Trigger received, table running |
+| `TBLCMPLT` | `TBLCMPLT\n\r\n` | Table finished |
+| `ABORTED by user` | `ABORTED by user\n\r\n` | Front-panel button held down |
+| `ABORTED` | `ABORTED\n` | `TBLABRT`, or input voltage below 10 V |
+| `Table stoped by user` | `Table stoped by user\r\n` | `TBLSTOP` processed (sic, the misspelling is in the firmware) |
 
-A host parser must tolerate these lines interleaved with command
+The two abort forms come from different points in `Table.cpp`'s service
+loop and are not interchangeable: the button path prints `ABORTED by
+user` and leaves table mode, while `TBLABRT` and the low-voltage check
+set the status to `ABORTED` and write the bare word with a single `\n`.
+A parser keyed on the exact string `ABORTED` misses the button abort, so
+match on the prefix.
+
+**Re-arming is automatic under an external trigger.** With `STBLTRG` set
+to `EDGE`, `POS` or `NEG`, the loop emits `TBLCMPLT` and then `TBLRDY`
+again without any host command, and stays in table mode for the next
+edge. Only under `SW` does it fall out of the inner loop after each pass.
+A sequencer that re-arms per frame must therefore expect `TBLRDY` it did
+not ask for, and must not treat a second `TBLRDY` as a protocol error.
+
+A host parser must tolerate all of these interleaved with command
 responses. `GTBLSTA` polls the same state machine and returns one of
 `IDLE`, `READY`, `TRIGGERED`, `ABORTED`.
 
@@ -179,6 +269,14 @@ two comparisons in a row AND together (`>:25:<:30:7:43.2`). In `P`
 mode digital outputs are not usable; channels 40/41/42 above become
 available.
 
+**Discrepancy note (`a` takes a value):** the channel table above, and
+the vendor doc, give `a` no value. The v1.263 parser disagrees: `a` sits
+in `ParseEntry()`'s character group but not in its integer sub-group, so
+it runs `ExpectColon()` and then stores the *first character of the next
+token* as the entry's value. Omitting the value makes the parser consume
+whatever follows as `a`'s argument and desynchronise the rest of the
+table. Emit `a:1`; the value itself is never read at run time.
+
 **Polarity note (`t` = 0 / -1):** the vendor doc says value `0` sets the
 trigger output *low* and `-1` sets it *high*; the firmware
 (`DIO.cpp: ProcessTriggerOut()`) writes pin HIGH for `0` and LOW for
@@ -237,8 +335,29 @@ typedef struct {          // one per Channel:Value pair
   ISR can stream it straight to the DAC); RF and ARB values store raw
   IEEE-754 float bits; DIO values store the ASCII character
   (`'0'`/`'1'`); `t`/`b`/`d`/`p`/conditionals store the int.
+- **DC bias channels are stored zero-based.** A `1`-`32` token is written
+  as `Chan = n - 1`, so DCB channel 1 appears in the dump as `Chan = 0`.
+  Every other channel class stores its token as written: RF `33`-`36`,
+  ARB `101`-`108`, and the character channels as their ASCII codes.
 - Loop-closing `]` is stored as a TableEntry (`Chan = ']'`) and
   interpreted at run time against a 5-deep nesting stack.
+- **A leading offset costs a whole table.** `offset:[...` with a non-zero
+  offset emits an extra unnamed TableHeader (`TableName = 0xFF`,
+  `RepeatCount = 1`, `MaxCount = offset`) carrying one TableEntryHeader
+  with `NumChans = 0`, ahead of the named loop's own header. A host that
+  predicts the compiled size, in order to ask `TBLRPT` for the right
+  number of bytes, has to account for it.
+- **The end-of-tables marker is one byte.** After the last table the
+  firmware writes a TableHeader whose `TableName` is `0x00` and leaves
+  the remaining 12 bytes of that header untouched, so only the marker
+  byte itself is meaningful, and the bytes after it are whatever the
+  previous table left in the buffer. A comparison against a predicted
+  layout must stop at the marker.
+- **DC bias values cannot be predicted off-box.** The parser converts
+  volts through `DCbiasValue2Counts()` and the board's channel-to-DAC
+  map, both of which depend on that module's stored calibration. A host
+  can verify the structure of a DCB entry and its `Chan`, but its
+  `Value` is only meaningful to the box that produced it.
 - Storage: up to **5 independent table buffers** (`STBLNUM` selects,
   1–5), each grown by `realloc` in 1000-byte increments — table size is
   bounded only by Due RAM (96 KB total, shared), not by a fixed limit.
@@ -396,10 +515,54 @@ Grouped from `MIPScommands.txt` + dispatch table in `Serial.cpp`
 | `STBLRMPENA` | `TRUE\|FALSE,freq` | Enable ISR-based ramping at freq Hz |
 | `STBLVDLT`/`GTBLVDLT` | `TRUE\|FALSE` | Enable table-based (conditional-loop) ramping |
 | `TBLCHK` | — | On-box timing-violation check (prints human-readable report) |
-| `TBLRPT` | count | Debug: dump table buffer bytes as hex |
+| `TBLRPT` | count | Debug: dump `count + 1` table-buffer bytes as hex, with a five-line preamble and **no ACK** (see below) |
 | `SEXTFREQ`/`GEXTFREQ` | Hz | Declare external clock frequency |
 | `STBLTSKS`/`GTBLTSKS`, `TBLTSKENA` | `TRUE\|FALSE` | Run system tasks in table idle time (needs `SEXTFREQ` on ext clock; use with care) |
 | `STBLUSBTST`/`GTBLUSBTST` | `TRUE\|FALSE` | USB link test during table loop |
+
+Two commands in this table behave in ways the row cannot carry, and both
+matter to a sequencer:
+
+**`STBLDAT` can take three seconds to say no.** On a parse error the
+firmware flushes the rest of the command by calling `NextToken()` until
+it times out, and only then sends the NAK
+(`Table.cpp: ParseTableCommand()`). A NAK for a bad table therefore
+arrives roughly 3 seconds after the last byte, not promptly, and a host
+read timeout shorter than that will report a timeout where the box was
+about to report a parse error. The same flush runs when `STBLDAT`
+arrives in table mode while the status is not `READY`, so an ill-timed
+load costs 3 seconds as well. Give the load a read timeout of at least
+the token timeout plus the streaming time, and read `GERR` afterwards to
+find out which it was.
+
+**`TBLRPT` sends no ACK.** It is dispatched as a plain function
+(`Serial.cpp` command table, `CMDfunction` with one argument), and
+`ReportTable()` writes only its output, so a host waiting for `0x06`
+before reading the dump waits forever. The output is a five-line
+preamble followed by one byte per line:
+
+```
+TestNesting = <int>
+TablesLoaded = <int>
+Size of TableHeader = 13
+Size of TableEntryHeader = 5
+Size of TableEntry = 5
+<hex>
+<hex>
+...
+```
+
+Each byte is `printf("%x\n")`: lowercase, no `0x`, **not** zero-padded,
+so a zero byte is the single character `0`. Exactly `count + 1` byte
+lines follow the preamble, counted from the start of the active buffer,
+and the argument is a byte offset rather than an entry count. The three
+`Size of` lines are `sizeof` on the box and are the cheapest available
+confirmation that the packing assumed in §2 matches the firmware that is
+actually running.
+
+`ReportTable()` is called nowhere else; the call inside the successful
+`STBLDAT` path is commented out, so a dump only ever happens because the
+host asked for one.
 
 General commands the sequencer will also need: `GVER` (version),
 `GERR` (last error code), `GNAME`/`SNAME` (box identity), `MUTE`,
@@ -865,7 +1028,20 @@ exists, rather than a one-off manual check:
   channels + DIO per time point) — derive from the per-channel budgets
   above, then have a test sweep spacing and check `TBLCHK`/response
   behavior.
-- Maximum practical `STBLDAT` length on our link (RAM-bounded; the
-  3-second inter-token timeout is the real constraint for slow links)
-  — have a test sweep table-string size per transport and check for
-  failure/timeout.
+- Maximum practical `STBLDAT` length on our link, and the chunk size to
+  send it in. Two limits bracket it and neither is a constant: the
+  3-second inter-token timeout punishes sending too slowly, and the
+  silent 4096-byte ring-buffer overflow (§1) punishes sending too fast.
+  Sweep table-string size and chunk size per transport, and check the
+  result with `TBLRPT` rather than with the absence of a NAK, because
+  overflow does not necessarily NAK.
+- Whether the compiled layout a host predicts from the table string
+  agrees with what the box parsed. `TBLRPT` makes this checkable byte by
+  byte, except for DC-bias values, which are calibration-dependent (§2).
+  The three `Size of` lines in the dump also confirm the struct packing
+  assumed in §2 against the firmware actually running.
+- Round-trip latency of a get-style command (`GVER`) and the wall-clock
+  cost of streaming a real trainee table, per transport. Both are inputs
+  to the sequencer's read timeouts, and the load timeout in particular
+  has to exceed the streaming time plus the 3-second flush a parse error
+  costs before its NAK (§4).
