@@ -116,6 +116,30 @@ def main() -> int:
     except ValueError:
         check_true("lab_dir rejects an unknown directory name", True)
 
+    section("method file")
+    from clockwork import method
+
+    sample = (
+        "schema_version = 1\n\n"
+        '[metadata]\nname = "check_public-sample"\ncreated = 2026-09-06\n\n'
+        "[acquisition]\nframes = 1\nscans = 100\naccumulations = 10\n"
+        'file_stem = "check_public-sample"\n\n'
+        '[[boxes]]\nname = "box1"\nport = "COM3"\nstrings = ["STBLCLK,EXT"]\n'
+    )
+    m = method.loads(sample)
+    check_true("a sample method document loads", m.metadata.name == "check_public-sample")
+    check_true("dumps then loads round-trips the method", method.loads(method.dumps(m)) == m)
+    stamp = method.stamp(m, console_version="0.0.0-check")
+    check_true(
+        "stamp() carries a hash, text and versions",
+        stamp["method_hash"] and stamp["method_text"] and stamp["clockwork_version"],
+    )
+    try:
+        method.loads("schema_version = 1\n")
+        check_true("an incomplete method document is rejected", False)
+    except method.MethodError:
+        check_true("an incomplete method document is rejected", True)
+
     section("hardware")
     skip("a MIPS box answers GVER", "no serial hardware in a self-check; lab record, task 04")
     skip("the acquisition console answers info", "no console in a self-check; lab record, task 03")
