@@ -82,18 +82,25 @@ class TableLoad:
     string: str
     bytes_sent: int
     write_seconds: float
+    """Wall clock for the whole string."""
+
+    slowest_chunk_seconds: float
+    """Wall clock for the single slowest `write`, which is what the box's
+    timeout actually measures: it gives up when 3 seconds pass without a
+    token, not when a load takes 3 seconds in total."""
+
     reply_seconds: float
     predicted: _table.Compiled | None = None
     prediction_error: str | None = None
 
     @property
     def stall_margin(self) -> float:
-        """Seconds of slack between the slowest chunk and the token timeout.
+        """Seconds between the worst stall and the box abandoning the table.
 
-        Only meaningful once measured against a real box; against the
-        in-process fake the write costs nothing and the margin is the timeout.
+        Only meaningful measured against a real box; against the in-process
+        fake a write costs nothing and the margin is the whole timeout.
         """
-        return TOKEN_TIMEOUT_S - self.write_seconds
+        return TOKEN_TIMEOUT_S - self.slowest_chunk_seconds
 
 
 @dataclass(slots=True)
@@ -326,8 +333,11 @@ class Box:
         payload += b"\n"
 
         started = time.monotonic()
+        slowest = 0.0
         for at in range(0, len(payload), chunk_bytes):
+            chunk_started = time.monotonic()
             self.transport.write(payload[at : at + chunk_bytes])
+            slowest = max(slowest, time.monotonic() - chunk_started)
         write_seconds = time.monotonic() - started
 
         reply_timeout = timeout
@@ -339,6 +349,7 @@ class Box:
             string=table_string,
             bytes_sent=len(payload),
             write_seconds=write_seconds,
+            slowest_chunk_seconds=slowest,
             reply_seconds=time.monotonic() - replied,
             predicted=predicted,
             prediction_error=prediction_error,
@@ -348,10 +359,15 @@ class Box:
         """`TBLRPT`: dump `count + 1` bytes of the table buffer.
 
         There is no ACK (§4), so this reads lines until it has the preamble and
-        every byte it asked for.
+        every byte it asked for. A dump is one line per byte and a real table
+        runs to thousands of them, so the default timeout grows with the size
+        of the dump rather than staying at the per-command one; a short timeout
+        here would report silence in the middle of a reply that was arriving.
         """
         wanted = 5 + count + 1
-        deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
+        if timeout is None:
+            timeout = self.timeout + 0.01 * wanted
+        deadline = time.monotonic() + timeout
         self.transport.write(f"TBLRPT,{count}\n".encode("ascii"))
         lines: list[str] = []
         while len(lines) < wanted:
