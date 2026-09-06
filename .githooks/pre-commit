@@ -1,0 +1,74 @@
+#!/bin/bash
+# pre-commit -- refuse to let a bulk data file or a UIMF acquisition into
+# history.
+#
+# Why: this repo's history is not to be rewritten, which makes an accidentally
+# committed acquisition (tens to hundreds of MB)
+# the one mistake with no clean undo. So the rule gets a hook rather than a line
+# in prose -- same reasoning as commit-msg.
+#
+# Rejects rather than rewrites, because unlike a trailer there is no correct
+# automatic fix: either the path belongs under an ignored directory or the
+# limit is genuinely wrong for it.
+#
+# Two checks:
+#   1. any staged file over LIMIT_KB;
+#   2. any staged `.uimf` file, whatever its size -- sample data live in the
+#      lab repo, never here, and a small excerpt would slip under the size
+#      limit on its own.
+#
+# bash rather than sh (unlike commit-msg): the NUL-delimited read that keeps
+# non-ASCII paths intact is a bash builtin extension, not POSIX.
+#
+# Requires `git config core.hooksPath .githooks`, per-clone and not tracked.
+# Override for one commit with `git commit --no-verify`.
+
+LIMIT_KB=5120                   # 5 MiB. Every tracked file today is far under.
+
+if git rev-parse --verify HEAD >/dev/null 2>&1; then
+    against=HEAD
+else
+    against=$(git hash-object -t tree /dev/null)
+fi
+
+# Added/copied/modified/renamed paths only -- deletions have no blob to size.
+big=$(git diff --cached --name-only --diff-filter=ACMR -z "$against" |
+      while IFS= read -r -d '' path; do
+          kb=$(( ($(git cat-file -s ":$path" 2>/dev/null || echo 0) + 1023) / 1024 ))
+          [ "$kb" -gt "$LIMIT_KB" ] && printf '  %6d KiB  %s\n' "$kb" "$path"
+      done)
+
+raw=$(git diff --cached --name-only --diff-filter=ACMR -z "$against" |
+      while IFS= read -r -d '' path; do
+          case "$path" in
+              *.uimf|*.UIMF) printf '  %s\n' "$path" ;;
+          esac
+      done)
+
+[ -z "$big" ] && [ -z "$raw" ] && exit 0
+
+if [ -n "$big" ]; then
+cat >&2 <<EOF
+pre-commit: staged file(s) over ${LIMIT_KB} KiB:
+
+$big
+
+EOF
+fi
+if [ -n "$raw" ]; then
+cat >&2 <<EOF
+pre-commit: staged UIMF acquisition file(s):
+
+$raw
+
+EOF
+fi
+cat >&2 <<EOF
+This repo keeps bulk data and acquisitions out of git. Sample files live in the
+lab repo (data/README.md is the inventory); PNNL test excerpts are fetched into
+the gitignored external/ by tools/fetch_testdata.py.
+
+Unstage it (git restore --staged <path>), or --no-verify if the size is genuinely
+warranted.
+EOF
+exit 1

@@ -1,0 +1,20 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.claude/
+CLAUDE.local.md
+# Build output.
+dist/
+build/
+*.egg-info/
+# No acquisition ever enters the code repo: sample files live in the lab repo,
+# and the pre-commit hook refuses the path as well.
+*.uimf
+*.uimf-journal
+*.uimf-wal
+*.uimf-shm
+# Vendor manuals (GAA Custom Electronics PDFs) are proprietary and live in the
+# lab repo's vendor/. Only facts derived from them are committed here, in docs/.
+*.pdf

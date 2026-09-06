@@ -1,0 +1,25 @@
+#!/bin/sh
+# commit-msg -- enforce this project's attribution trailer.
+#
+# Convention, set 2026-08-20: `Assisted-by: <name>`, hyphenated so git parses
+# it as a real trailer (`git log --format='%(trailers:key=Assisted-by)'`), and
+# with NO email address. It replaces the default
+# `Co-Authored-By: <name> <noreply@anthropic.com>`.
+#
+# Why a hook and not just a line in CLAUDE.md: the old form is baked into the
+# tooling that writes most of this repo's commits, so a convention recorded
+# only in prose drifts back the first time someone works from habit. The hook
+# rewrites rather than rejects, so that habit costs nobody a retry.
+#
+# Idempotent -- a message already in the correct form passes through unchanged.
+#
+# Requires `git config core.hooksPath .githooks`, which is per-clone and not
+# tracked. A fresh clone must run it once; see CLAUDE.md.
+
+msg="$1"
+tmp="$msg.trailer-tmp"
+
+sed -e 's/^Co-Authored-By: \(.*\) <[^>]*>[[:space:]]*$/Assisted-by: \1/I' \
+    -e 's/^Co-Authored-By:[[:space:]]*\(.*\)$/Assisted-by: \1/I' \
+    -e 's/^Assisted[ -][Bb]y:[[:space:]]*/Assisted-by: /' \
+    "$msg" > "$tmp" && mv "$tmp" "$msg"

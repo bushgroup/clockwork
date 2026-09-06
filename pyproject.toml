@@ -1,0 +1,58 @@
+[project]
+name = "clockwork"
+version = "0.1.0"
+description = "Control software for SLIMPHONY-style ion mobility mass spectrometers: MIPS pulse sequences, SA220P acquisition, UIMF output."
+readme = "README.md"
+requires-python = "==3.12.*"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+dependencies = [
+    "numpy~=2.5.2",
+    "pyserial~=3.5",
+    "pyzmq~=27.2",
+    "protobuf~=7.36",
+    "python-snappy~=0.7.3",
+    "PySide6~=6.11.2",
+    "pyqtgraph~=0.14.0",
+]
+
+[project.scripts]
+clockwork = "clockwork.app:main"
+
+[project.urls]
+Repository = "https://github.com/bushgroup/clockwork"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/clockwork"]
+
+[tool.uv]
+package = true
+
+[dependency-groups]
+dev = [
+    "pytest~=9.1",
+    "pytest-qt~=4.5",
+    "ruff~=0.16",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests", "tools"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

@@ -1,0 +1,5 @@
+# The working tree is LF throughout (written by Python/agent tooling, read by
+# gfortran under MSYS2 and by PowerShell, both of which are LF-tolerant).
+# Pin that so a Windows checkout does not rewrite every file to CRLF and
+# produce a whole-tree spurious diff.
+* text=auto eol=lf
