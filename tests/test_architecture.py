@@ -13,7 +13,8 @@ PROBE = """
 import importlib, sys
 for name in {names!r}:
     importlib.import_module(name)
-leaked = sorted(m for m in sys.modules if m.startswith(("PySide6", "PyQt", "pyqtgraph", "shiboken")))
+prefixes = ("PySide6", "PyQt", "pyqtgraph", "shiboken")
+leaked = sorted(m for m in sys.modules if m.startswith(prefixes))
 print(",".join(leaked))
 """
 

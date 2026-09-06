@@ -103,7 +103,8 @@ def main() -> int:
     section("lab-directory resolution")
     lab = clockwork.lab_dir()
     if lab is None:
-        skip("lab repo resolves", "no lab checkout beside this clone; a public clone is expected to lack it")
+        skip("lab repo resolves",
+             "no lab checkout beside this clone; a public clone is expected to lack it")
     else:
         check_true(f"lab repo resolves to a task system ({lab})",
                    os.path.isfile(os.path.join(lab, "tasks", "README.md")))
