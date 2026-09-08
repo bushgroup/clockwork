@@ -1,18 +1,18 @@
-# MIPS wire format — pulse-sequence Tables, timing/trigger model, Twave, and ARB
+# MIPS wire format: pulse-sequence Tables, timing/trigger model, Twave, and ARB
 
 Single source of truth for how Clockwork talks to MIPS boxes. Both
 the `clockwork` package must conform to this file
 rather than encoding protocol knowledge locally. Scope: serial framing,
 the Table (pulse sequence) wire format and execution model,
 trigger/clock semantics, the Twave command set, and the ARB module
-(§6 — on this instrument the ARB modules, not Twave, drive all TW
+(§6; on this instrument the ARB modules, not Twave, drive all TW
 regions). Remaining module-specific command sets (DCbias, RF driver,
 DIO beyond what tables need) get added as needed.
 
 ## Provenance
 
 Derived by reading the MIPS firmware source, cross-checked against GAA
-Custom Electronics vendor documents (the lab repo's `vendor/README.md` is the manifest):
+Custom Electronics vendor documents, inventoried in the lab's vendor-document manifest:
 
 - **Firmware:** `github.com/GordonAnderson/MIPS`, commit `bd32aae`
   (2026-06-30), firmware version string `1.263, June 20, 2026`.
@@ -21,7 +21,7 @@ Custom Electronics vendor documents (the lab repo's `vendor/README.md` is the ma
   `src/ARB.cpp`, `src/ARBcompressor.cpp`, `include/ARB.h`,
   `MIPScommands.txt`.
 - **ARB module firmware:** `github.com/GordonAnderson/ARB`, commit
-  `1e8a149` (2024-12-07), version 1.24 — the ARB module's own on-board
+  `1e8a149` (2024-12-07), version 1.24: the ARB module's own on-board
   firmware (the other end of the controller↔module link). Note the
   caveat in §6.4: this clone predates the alternate-waveform feature.
 - **Vendor docs:** primarily *Pulse sequence generation*
@@ -32,7 +32,7 @@ Custom Electronics vendor documents (the lab repo's `vendor/README.md` is the ma
 
 **Repo question resolved:** both `GordonAnderson/MIPS-Arduino` and
 `GordonAnderson/MIPS` exist. They are the same codebase; `MIPS` is the
-current, canonical one — a PlatformIO restructure (`src/` + `include/`)
+current, canonical one, a PlatformIO restructure (`src/` + `include/`)
 that is more recently maintained (v1.263 vs. MIPS-Arduino's last commit
 2026-04-10) and matches the version the vendor Operations Manual is
 written against (v1.262+). `MIPS-Arduino` is the older flat Arduino-IDE
@@ -211,7 +211,7 @@ responses. `GTBLSTA` polls the same state machine and returns one of
 
 ---
 
-## 2. Table (pulse sequence) wire syntax — `STBLDAT`
+## 2. Table (pulse sequence) wire syntax: `STBLDAT`
 
 A table is an ASCII string of *events* referenced to a shared clock:
 
@@ -225,15 +225,15 @@ STBLDAT;<sequence>;
 Count:Channel:Value[:Channel:Value...]
 ```
 
-- `Count` — time of the event in **clock ticks** (int), counted from
+- `Count`: time of the event in **clock ticks** (int), counted from
   table release (trigger). Multiple `Channel:Value` pairs may share one
   `Count`.
 - Events are comma-separated. Time values within a (sub)table must be
   **ascending**.
 - A **negative** `Count` marks the time point as *dynamic*: the firmware
   uses `abs(Count) + TimeDelta`, where `TimeDelta` is accumulated by the
-  `d` (increment) and `p` (set) channel commands — this is how swept
-  delays are built (e.g. shift a gate 1 tick per loop iteration).
+  `d` (increment) and `p` (set) channel commands. This is how swept
+  delays are built, for example shifting a gate 1 tick per loop iteration.
 
 ### Loops
 
@@ -241,11 +241,11 @@ Count:Channel:Value[:Channel:Value...]
 [name:cycles,event1,event2,...,length:]
 ```
 
-- `name` — single character naming the (sub)table.
-- `cycles` — repeat count; **0 = repeat forever** (until `TBLSTOP` /
-  abort / re-trigger config stops it).
-- `length:` — a final bare `Count:` sets the loop period in ticks (it is
-  the sub-table's MaxCount, i.e. the RC compare value).
+- `name`: single character naming the (sub)table.
+- `cycles`: repeat count; **0 = repeat forever** (until `TBLSTOP`,
+  abort, or re-trigger config stops it).
+- `length:`: a final bare `Count:` that sets the loop period in ticks
+  (it is the sub-table's MaxCount, i.e. the RC compare value).
 - Loops nest to a **maximum depth of 5** (`MaxNesting`).
 - Multiple loops/sequences can be concatenated in series; a leading
   `offset:[...` delays the loop start. Example, two-event loop, 10
@@ -268,11 +268,11 @@ From `Table.cpp` (authoritative) and vendor Table 1:
 | `s` | ARB sync line | `0` or `1` |
 | `d` | `TimeDelta += value` (dynamic time points) | Ticks, signed |
 | `p` | `TimeDelta = value` | Ticks, signed |
-| `101`–`104` (aka `e`–`h`; see note below — emit numerals) | ARB module 1–4 AUX output voltage | Volts (±50) |
+| `101`–`104` (aka `e`–`h`; see note below, emit numerals) | ARB module 1–4 AUX output voltage | Volts (±50) |
 | `105`, `106` (aka `i`, `j`) | ARB module **1** offset **A**, offset **B** | Volts (±50) |
 | `107`, `108` (aka `k`, `l`) | ARB module **2** offset **A**, offset **B** | Volts (±50) |
-| `W` | No-op placeholder (parser skips; use to define a bare time point) | — |
-| `a` | Arm "stop on RC and wait for next trigger" for this pass (with retrigger + `STBLEVY`) | — |
+| `W` | No-op placeholder (parser skips; use to define a bare time point) | none |
+| `a` | Arm "stop on RC and wait for next trigger" for this pass (with retrigger + `STBLEVY`) | none |
 | `=` `>` `<` | Conditional test of loop counter (named-`P` loops only) | Compare value |
 | `40` / `41` / `42` | (`P`-loop mode) trigger ADC record / trigger-out high / trigger-out low | Ignored |
 
@@ -286,7 +286,7 @@ ramping, `65` initial). Details:
   `<freq>` Hz steps the DAC between time points.
 - **Table-based ramping** (`STBLVDLT,TRUE`): max 8 channels; `INITIAL`
   (64+chan) sets the start value, `RAMP` (128+chan) adds a delta per
-  execution — used inside loops, incl. conditional `P` loops.
+  execution, used inside loops, including conditional `P` loops.
 
 Conditional (`P`-named) loops: a `=:n:`, `>:n:` or `<:n:` prefix gates
 only the immediately following `Channel:Value` pair on the loop counter;
@@ -305,7 +305,7 @@ table. Emit `a:1`; the value itself is never read at run time.
 **Polarity note (`t` = 0 / -1):** the vendor doc says value `0` sets the
 trigger output *low* and `-1` sets it *high*; the firmware
 (`DIO.cpp: ProcessTriggerOut()`) writes pin HIGH for `0` and LOW for
-`-1` — i.e. the MIPS trigger-output BNC is inverted relative to the
+`-1`, i.e. the MIPS trigger-output BNC is inverted relative to the
 processor pin. Trust the vendor doc for BNC-level behavior, but verify
 on hardware before relying on the static levels.
 
@@ -320,9 +320,9 @@ doc's Table 1 (and the firmware's own comment block at the top of
 v1.263 parser has no letter branch for them: anything that isn't one of
 the explicitly handled characters falls through to
 `sscanf(TK,"%d",&i)` (`Table.cpp: ParseEntry()`), and a literal `e`
-converts nothing — the channel byte is then written from an
+converts nothing, so the channel byte is then written from an
 *uninitialized* local (undefined behavior, silently corrupt table).
-The working wire encoding is the **numeric channel number 101–108** —
+The working wire encoding is the **numeric channel number 101–108**,
 which are simply the ASCII codes of `e`–`l`, so run-time dispatch
 (`Chan` in 101–108) and debug dumps are letter-compatible even though
 the parser is not. The compiler must emit numerals. See §6.5 for these
@@ -332,7 +332,7 @@ channels' execution semantics.
 
 The ASCII string is parsed **on the box at `STBLDAT` time** into packed
 structs in RAM (this is what `STBLVLT`/`STBLCNT` patch and `TBLRPT`
-dumps). The host never sends binary — but the sequencer compiler should
+dumps). The host never sends binary, but the sequencer compiler should
 understand this layout because it defines the real semantics and limits:
 
 ```c
@@ -384,7 +384,7 @@ typedef struct {          // one per Channel:Value pair
   can verify the structure of a DCB entry and its `Chan`, but its
   `Value` is only meaningful to the box that produced it.
 - Storage: up to **5 independent table buffers** (`STBLNUM` selects,
-  1–5), each grown by `realloc` in 1000-byte increments — table size is
+  1–5), each grown by `realloc` in 1000-byte increments; table size is
   bounded only by Due RAM (96 KB total, shared), not by a fixed limit.
   A single `STBLDAT` may also contain several concatenated sub-tables
   played in sequence; with table-advance (`STBLADV,ON`) the active
@@ -410,11 +410,11 @@ by host software and not even primarily by firmware software:
    emitted.
 3. On trigger, the counter runs. When the counter hits RA, the timer's
    TIOA output pin **toggles in hardware**, generating the LDAC latch
-   that applies pre-loaded DAC values and DIO states — output edge
+   that applies pre-loaded DAC values and DIO states. Output edge
    timing is set by silicon, not an ISR.
 4. The RA-match interrupt then fires and *pre-loads* the next event:
    streams the next DAC frames over SPI, stages DIO image registers,
-   writes the next RA/RC — all before the next compare. The RC match
+   writes the next RA/RC, all before the next compare. The RC match
    handles loop wrap / table advance / stop.
 5. `TBLCMPLT` on completion; depending on mode/trigger the box re-arms
    (`TBLRDY` again) or drops back to LOC.
@@ -456,7 +456,7 @@ Clock sources (`STBLCLK`):
   `Table.cpp: ISRclk()`); prefer `EXT`/`EXTN` over `EXTS`.
 
 Trigger sources (`STBLTRG`): `SW` (command `TBLSTRT`), `POS`/`NEG`/
-`EDGE` — rising/falling/any edge on the **R input BNC**, wired to the
+`EDGE`: rising/falling/any edge on the **R input BNC**, wired to the
 timer's external-event trigger so release latency is hardware-level.
 
 Re-trigger behavior:
@@ -469,7 +469,7 @@ Re-trigger behavior:
   after release).
 - `STBLEVY,TRUE` + retrigger + an `a` channel event: the table stops at
   each (sub)table boundary (stop on RC) and **waits for the next
-  trigger edge to continue** — this is the mechanism for advancing a
+  trigger edge to continue**. This is the mechanism for advancing a
   sequence trigger-by-trigger rather than free-running.
 - Exotic trigger paths exist and are table-adjacent but out of core
   scope: trigger-on-ADC-change with dynamic gate-time adjustment
@@ -481,13 +481,13 @@ Re-trigger behavior:
 Nothing in the protocol synchronizes boxes to each other except what
 you wire: distribute a **common external clock** (Q inputs, `STBLCLK,
 EXT`) and a **common trigger** (R inputs) and boxes stay phase-locked
-indefinitely — tick n means the same instant on every box, and drift is
+indefinitely. Tick n means the same instant on every box, and drift is
 eliminated by construction. If instead each box free-runs its internal
 clock from its own 84 MHz crystal, alignment is only as good as the
 crystals' relative accuracy (order 10⁻⁵), i.e. tens of µs drift per
-second of table time — unacceptable for long experiments. **Clockwork
-should assume common-clock + common-trigger wiring** (consistent with
-the TOF-pusher-derived trigger already in `architecture.md`).
+second of table time. That is unacceptable for long experiments.
+**Clockwork should assume common-clock + common-trigger wiring**
+(consistent with the TOF-pusher-derived trigger design, lab record).
 
 ### Timing limits (compiler constraints)
 
@@ -504,7 +504,7 @@ From `TableCheck()` constants and the vendor guideline:
   validate this; `TBLCHK` on the box re-checks (needs `SEXTFREQ` first
   when on external clock).
 - All time points within a (sub)table ascending; dynamic (`d`/`p`)
-  shifts must not reorder or collide events — firmware does not guard
+  shifts must not reorder or collide events; firmware does not guard
   against it.
 - Loop period (`length`/MaxCount) must be ≥ the last event tick plus the
   setup time of the first event of the next iteration.
@@ -522,11 +522,11 @@ Grouped from `MIPScommands.txt` + dispatch table in `Serial.cpp`
 | `STBLCLK` | `EXT\|EXTN\|EXTS\|42000000\|10500000\|2625000\|656250` | Clock source (LOC mode only) |
 | `STBLTRG` | `SW\|POS\|NEG\|EDGE` | Trigger source (LOC mode only) |
 | `SMOD` | `LOC\|TBL\|ONCE\|<n>` | Mode: enter/leave table mode; `ONCE`/`<n>` auto-exit |
-| `TBLSTRT` | — | Software trigger (TBL mode) |
-| `TBLSTOP` | — | Graceful stop, stays in table mode |
-| `TBLABRT` | — | Abort table mode |
-| `GTBLSTA` | — | `IDLE\|READY\|TRIGGERED\|ABORTED` |
-| `GTBLFRQ` | — | Current internal clock frequency (Hz) |
+| `TBLSTRT` | none | Software trigger (TBL mode) |
+| `TBLSTOP` | none | Graceful stop, stays in table mode |
+| `TBLABRT` | none | Abort table mode |
+| `GTBLSTA` | none | `IDLE\|READY\|TRIGGERED\|ABORTED` |
+| `GTBLFRQ` | none | Current internal clock frequency (Hz) |
 | `STBLNUM`/`GTBLNUM` | `1..5` | Active table buffer |
 | `STBLADV`/`GTBLADV` | `ON\|OFF` | Auto-advance buffer after each trigger |
 | `STBLVLT`/`GTBLVLT` | `count,chan[,volts]` | Patch/read a loaded DC-bias entry in place (no re-upload) |
@@ -539,7 +539,7 @@ Grouped from `MIPScommands.txt` + dispatch table in `Serial.cpp`
 | `SOFTLDAC` | `TRUE\|FALSE` | Force software LDAC generation |
 | `STBLRMPENA` | `TRUE\|FALSE,freq` | Enable ISR-based ramping at freq Hz |
 | `STBLVDLT`/`GTBLVDLT` | `TRUE\|FALSE` | Enable table-based (conditional-loop) ramping |
-| `TBLCHK` | — | On-box timing-violation check (prints human-readable report) |
+| `TBLCHK` | none | On-box timing-violation check (prints human-readable report) |
 | `TBLRPT` | count | Debug: dump `count + 1` table-buffer bytes as hex, with a five-line preamble and **no ACK** (see below) |
 | `SEXTFREQ`/`GEXTFREQ` | Hz | Declare external clock frequency |
 | `STBLTSKS`/`GTBLTSKS`, `TBLTSKENA` | `TRUE\|FALSE` | Run system tasks in table idle time (needs `SEXTFREQ` on ext clock; use with care) |
@@ -629,8 +629,8 @@ General commands the sequencer will also need: `GVER` (version),
 > an inventory check.
 
 Twave hardware: up to 2 Twave modules per box (rev 1–5 boards), each
-with 4 analog channels — pulse voltage, resting voltage, guard 1,
-guard 2 — plus a clock ("velocity", Hz) and an 8-bit output-sequence
+with 4 analog channels (pulse voltage, resting voltage, guard 1,
+guard 2), plus a clock ("velocity", Hz) and an 8-bit output-sequence
 pattern that defines the traveling wave. `<mod>` below is 1 or 2.
 
 ### Core waveform commands
@@ -648,13 +648,13 @@ pattern that defines the traveling wave. `<mod>` below is 1 or 2.
 | `STWINV` | `<mod>,TRUE\|FALSE` | Invert waveform |
 
 Note: Twave rev ≥ 4 generates its clock/sequence in a CPLD driven over
-SPI; rev 3 and below bit-bang. This is invisible on the wire — the
+SPI; rev 3 and below bit-bang. This is invisible on the wire; the
 commands above are the interface either way.
 
 ### Compressor commands
 
 The compressor alternates the second Twave module between "normal" and
-"compress" behavior on a schedule, optionally driving a gate switch —
+"compress" behavior on a schedule, optionally driving a gate switch. This is
 its own little sequencer, separate from the Table engine (it runs off
 a dedicated timer, `TMR_TwaveCmp`, and can be triggered from a Table
 via the `c` channel with value `T`, by external input, or by `TWCTRG`).
@@ -668,7 +668,7 @@ via the `c` channel with value `T`, by external input, or by `TWCTRG`).
 | `STWCTC` | ms | Compress time per cycle |
 | `STWCTN` | ms | Normal time per compress cycle |
 | `STWCTNC` | ms | Non-compressed cycle time |
-| `TWCTRG` | — | Software compressor trigger |
+| `TWCTRG` | none | Software compressor trigger |
 | `STWCSW`/`GTWCSW` | `Open\|Close` | Gate switch state |
 
 ### Compression table mini-language (`STWCTBL`)
@@ -700,7 +700,7 @@ Default table is `"C"` (one compressed pass).
 ### Sweep commands (older shared Twave/ARB sweep system)
 
 `STWSSTRT`/`STWSSTP` (start/stop frequency), `STWSSTRTV`/`STWSSTPV`
-(start/stop voltage), `STWSTM` (sweep time, s) — all `<mod>,<value>`
+(start/stop voltage), `STWSTM` (sweep time, s), all `<mod>,<value>`
 with `G` variants; `STWSGO` / `STWSHLT` start/halt, `GTWSTA` status.
 Newer ARB-side sweeps have their own commands in the ARB section of
 `MIPScommands.txt` (out of scope here).
@@ -714,8 +714,8 @@ for every TW region on this instrument, so this section defines the
 capability vocabulary Layer 1 compiles to: direction flips,
 traveling ↔ stationary transitions, gating, amplitude/frequency steps.
 Derived from `ARB.cpp`/`ARBcompressor.cpp`/`include/ARB.h` in the MIPS
-firmware, the ARB module's own firmware (lab repo `vendor/ARB/`, v1.24 —
-see the version caveat in §6.4), and `ARB_Module.pdf`.
+firmware, the ARB module's own firmware (version 1.24, see Provenance
+and the version caveat in §6.4), and `ARB_Module.pdf`.
 
 ### 6.1 Hardware and control model
 
@@ -727,9 +727,9 @@ see the version caveat in §6.4), and `ARB_Module.pdf`.
   drive two identical 8-channel sets, A and B, with independently
   offsettable A/B outputs (`SARBOFFA`/`SARBOFFB`, ±10 V).
 - Two operating modes per module (`SARBMODE,<mod>,TWAVE|ARB`):
-  **TWAVE** — the 8 channels replay one waveform cycle (PPP points,
+  **TWAVE**, where the 8 channels replay one waveform cycle (PPP points,
   default 32) with a 45° phase step channel-to-channel, producing a
-  continuous traveling wave; **ARB** — classic one-shot/looped
+  continuous traveling wave; **ARB**, classic one-shot/looped
   arbitrary-buffer playback (up to 8000 samples). TW regions run in
   TWAVE mode; ARB-mode buffer commands (`SARBBUF`, `SARBNUM`,
   `SARBCHS`, `SARBCH`, `SACHRNG`, `SARBSINE`) are out of scope here.
@@ -744,7 +744,7 @@ see the version caveat in §6.4), and `ARB_Module.pdf`.
   is a MIPS command that the controller re-encodes as TWI writes. The
   module's own serial command set (see the `ARB/` clone,
   `Serial.ino`) is reachable only through the `TWITALK,<board>,<addr>`
-  passthrough — treat it as factory/debug access, not wire protocol,
+  passthrough. Treat it as factory/debug access, not wire protocol,
   so its TWI constants are deliberately not tabulated here.
 - Module firmware version gates features (§6.4). `GARBVER,<mod>`
   returns it; a deploy-time check belongs in Layer 3 (§7).
@@ -758,9 +758,9 @@ current value. From the dispatch table in `Serial.cpp` and
 | Command | Args | Notes |
 |---|---|---|
 | `SARBMODE`/`GARBMODE` | `<mod>,TWAVE\|ARB` | Operating mode |
-| `SWFREQ`/`GWFREQ` | `<mod>,<hz>` | Waveform frequency; max 1.28 MHz/PPP (TWAVE), 1 MHz (ARB). Actual may differ from requested — read back |
+| `SWFREQ`/`GWFREQ` | `<mod>,<hz>` | Waveform frequency; max 1.28 MHz/PPP (TWAVE), 1 MHz (ARB). Actual may differ from requested; read it back |
 | `SWFVRNG`/`GWFVRNG` | `<mod>,<volts>` | Output range, p-p volts for full-scale DAC (0–100) |
-| `SWFVOFF`/`GWFVOFF` | `<mod>,<volts>` | Offset, ±50 V, applied to all 8 channels + AUX; **not** folded into reported values — host must track |
+| `SWFVOFF`/`GWFVOFF` | `<mod>,<volts>` | Offset, ±50 V, applied to all 8 channels + AUX; **not** folded into reported values, host must track |
 | `SWFVAUX`/`GWFVAUX` | `<mod>,<volts>` | AUX output, ±50 V (same target as table channels 101–104) |
 | `SWFDIR`/`GWFDIR` | `<mod>,FWD\|REV` | TW direction = sign of the 45° channel-to-channel phase step. Serial-paced; for tick-accurate flips use the alternate waveform `REV` (§6.4) or a SLIM Reverser |
 | `SWFTYP`/`GWFTYP` | `<mod>,SIN\|RAMP\|TRI\|PULSE\|ARB` | Waveform type; `ARB` = the user waveform below |
@@ -768,7 +768,7 @@ current value. From the dispatch table in `Serial.cpp` and
 | `SWFENA` / `SWFDIS` | `<mod>` | Start / stop waveform generation (software trigger) |
 | `SWFVRAMP`/`GWFVRAMP` | `<mod>,<v/s>` | Amplitude slew limit for range changes; 0 = step immediately |
 | `SARBOFFA`/`B`, `GARBOFFA`/`B` | `<mod>,<volts>` | Dual-output-board A/B set offsets, ±10 V (same targets as table channels 105–108) |
-| `SARBREVA` / `CLRARBRV` | `<mod>,<volts>` / `<mod>` | AUX voltage automatically applied while direction is reversed / clear that behavior |
+| `SARBREVA` / `CLRARBRV` | `<mod>,<volts>` / `<mod>` | AUX voltage automatically applied while direction is reversed, or clear that behavior |
 | `SARBCCLK` | `<mod>,TRUE\|FALSE` | Use the common (controller-generated) clock. **Required on every module that must stay phase-coherent with others** |
 | `SARBEXT` | `<mod>,MIPS\|EXT` | Common-clock source: controller or external clock-in BNC (box must have the external ARB clock option) |
 | `SARBPPP`/`GARBPPP` | `<mod>,<8–128>` | Points per waveform period; reboot after changing |
@@ -776,9 +776,9 @@ current value. From the dispatch table in `Serial.cpp` and
 | `SARBDBRD` | `<mod>,TRUE\|FALSE` | Declare dual-output board (factory setup) |
 | `SARBADD`/`GARBADD` | `<mod>,<addr>` | Module TWI address (factory setup) |
 | `GARBVER` | `<mod>` | Module firmware version (feature gate, §6.4) |
-| `ARBSYNC` | — | Software sync: TWI-enables sync on all modules, pulses the sync line, disables again (`ARB.cpp: ARBmoduleSync()`) |
+| `ARBSYNC` | none | Software sync: TWI-enables sync on all modules, pulses the sync line, disables again (`ARB.cpp: ARBmoduleSync()`) |
 
-Sweep commands exist in two flavors — controller-based (`STWS*`
+Sweep commands exist in two flavors: controller-based (`STWS*`
 `STWSGO`/`STWSHLT`/`GTWSTA`, §5's table, modules 1–2 only, works with
 common clock) and module-based (`SARBSGO`/`SARBSHLT`/`GARBSTA` +
 `CLRSPTTBL`/`ADDSPPNT` piecewise-linear table, any module, faster
@@ -786,25 +786,25 @@ rates, requires the module's own clock, i.e. `SARBCCLK,…,FALSE`).
 Out of Layer 1 v1 scope; noted for completeness.
 
 Power-up state: modules on a common clock are **not** phase-aligned
-until synced — issue `ARBSYNC` (or pulse the sync line) after enabling
+until synced. Issue `ARBSYNC` (or pulse the sync line) after enabling
 waveforms and before anything timing-sensitive.
 
-### 6.3 The two broadcast lines — `r`/`s` table channels and fan-out limits
+### 6.3 The two broadcast lines: `r`/`s` table channels and fan-out limits
 
 The time-critical signals do not travel over TWI. The controller has
 exactly **two digital lines fanned out in parallel to every ARB module
 in the box** (`include/ARB.h`: Due pin 9 "ARBsync", Due pin 48
 "ARBmode"/compress; `ARB_Module.pdf` p.29 confirms "two hardware
-lines"). Everything fast — phase sync, compress entry/exit, alternate-
-waveform triggering — is a level or pulse on one of these two lines.
+lines"). Everything fast (phase sync, compress entry/exit, alternate-
+waveform triggering) is a level or pulse on one of these two lines.
 
 Table engine connection (`Table.cpp`):
 
 - `s:<0|1>` sets the sync line, `r:<0|1>` sets the compress line. Both
   are direct `digitalWrite`s executed by `ProcessTableQueue()` inside
   the timer-compare ISR at LDAC time
-  (`Table.cpp: ProcessCompress()/ProcessSync()`, `RAmatch_Handler()`)
-  — **tick-accurate** to ISR latency (µs-scale), unlike the TWI-staged
+  (`Table.cpp: ProcessCompress()/ProcessSync()`, `RAmatch_Handler()`),
+  **tick-accurate** to ISR latency (µs-scale), unlike the TWI-staged
   ARB channels in §6.5.
 - `c:A` triggers the ARB compression table (§6.6) at LDAC time.
 
@@ -812,7 +812,7 @@ Module-side interpretation (module firmware `ARB.ino`, v1.24 baseline):
 
 - **Sync**, rising edge, if the module's sync enable is set: in TWAVE
   mode the module snaps its waveform phase back to the start of the
-  cycle — every listening module re-aligns to the same instant, which
+  cycle. Every listening module re-aligns to the same instant, which
   is how multi-module (multi-region) TW phase coherence is established;
   in ARB mode the same edge is the play trigger.
 
@@ -822,7 +822,7 @@ Module-side interpretation (module firmware `ARB.ino`, v1.24 baseline):
   via the front-panel UI (`ARB.cpp` polling loop; stored in module
   EEPROM via the UI Save). `ARBSYNC` enables it transiently for the
   pulse. So for a module to follow table `s` events, its UI Sync input
-  must be configured — even though the table path drives the line
+  must be configured, even though the table path drives the line
   directly and never uses that input. Verify per module (§7). The UI
   "Dir input" is analogous: a front-panel-only DI attachment that flips
   TW direction on an input change (TWI-paced, not tick-accurate).
@@ -835,19 +835,19 @@ Module-side interpretation (module firmware `ARB.ino`, v1.24 baseline):
 **Per-module line-role mapping.** Each module is told which physical
 line is its sync and which its compress: `SARBSYNLN,<mod>,1|2`
 (default 1) and `SARBCMPLN,<mod>,1|2` (default 2). Both roles may even
-share one line — sync is a narrow pulse, compress a level, and the
+share one line, since sync is a narrow pulse, compress a level, and the
 module firmware distinguishes them (vendor manual, advanced-config
 section). The alternate-waveform hardware trigger (§6.4) also rides
 the compress line by default.
 
 **Fan-out constraint (hard limit for Layer 1):** two physical lines
 per box, each seen by every module. Grouping is by per-module opt-in
-flags, not by addressing — so a box supports **at most two
+flags, not by addressing, so a box supports **at most two
 independently signaled ARB groups** over the broadcast lines (e.g.
 "sync these four modules" and "compress/switch those two"). Any finer
 independent, tick-accurate control requires wiring a Table DIO output
 (`A`–`P`) from the rear panel back into a digital input (Q–X)
-configured as that module's trigger (§6.4) — one loopback cable per
+configured as that module's trigger (§6.4), one loopback cable per
 extra independent group.
 
 **Discrepancy note (line naming is crossed between firmwares):** MIPS
@@ -860,7 +860,7 @@ configuration, not fixed wiring. Treat "line 1"/"line 2" as physical
 identities and verify each module's actual `SARBSYNLN`/`SARBCMPLN`
 config on our boxes (§7) before relying on defaults.
 
-### 6.4 Alternate-waveform system — tick-accurate wave-state switching
+### 6.4 Alternate-waveform system: tick-accurate wave-state switching
 
 This is the mechanism Layer 1 wave-state transitions compile to: each
 module can hold one pre-configured **alternate waveform** and switch
@@ -870,7 +870,7 @@ between primary and alternate on a command or a hardware signal.
 `CUR` type needs ARB ≥ 2.21 and MIPS ≥ 1.227. TWAVE mode only.
 
 > **Provenance caveat:** the cloned module firmware
-> (lab repo `vendor/ARB/`, v1.24, Dec 2022) **predates this feature** — the
+> (version 1.24, Dec 2022; see Provenance) **predates this feature**: the
 > alternate-waveform TWI commands (0x3A–0x4B in the MIPS-side
 > `include/ARB.h`) are absent from its `ARB.h`. Module-side behavior
 > below is derived from the MIPS controller source plus
@@ -883,7 +883,7 @@ between primary and alternate on a command or a hardware signal.
 
 | Type | Meaning | Layer 1 use |
 |---|---|---|
-| `COMP` | Default. Freeze at the final value of one primary cycle — the compression waveform | CRIMP-style compression |
+| `COMP` | Default. Freeze at the final value of one primary cycle (the compression waveform) | CRIMP-style compression |
 | `REV` | Primary waveform with the phase step reversed | **Direction flip** |
 | `ARB` | The user's 32-point waveform (`SWFARB`) | Custom wave state |
 | `FIX` | Static per-electrode voltage profile from `SALTFVAL` | **Stationary hold / gating** |
@@ -892,14 +892,14 @@ between primary and alternate on a command or a hardware signal.
 **Switch timing:** on trigger (either direction, alternate→primary
 included, even for `FIX`), the module **finishes the current waveform
 cycle first**, then switches. Switching latency is therefore up to one
-waveform period (1/f — e.g. 100 µs at 10 kHz) after the trigger
+waveform period (1/f, e.g. 100 µs at 10 kHz) after the trigger
 arrives. Layer 1's timing model must carry this as the switching
 granularity on top of table-tick accuracy.
 
 **Trigger paths:**
 
 1. **Software:** `SALTENA,<mod>,TRUE|FALSE` switches to/from the
-   alternate waveform over serial+TWI — ms-scale, not tick-accurate.
+   alternate waveform over serial+TWI, ms-scale, not tick-accurate.
 2. **Hardware level/edge:** `SALTTRG,<mod>,Q..W|NA` attaches a
    MIPS-side pin-change ISR on the chosen rear-panel digital input that
    *repeats the input's state onto the compress broadcast line*
@@ -907,29 +907,29 @@ granularity on top of table-tick accuracy.
    `SARBALTTS,TRUE`). It is one global signal: configure it once (last
    module argument wins); each module then opts in with
    `SALTHWD,<mod>,TRUE` and interprets it per `SALTTMODE,<mod>,…`:
-   - `LEVEL` — alternate waveform while the line is high;
-   - `POS`/`NEG` — on that edge, wait `SALTDLY,<mod>,<ms>` (float),
+   - `LEVEL`: alternate waveform while the line is high;
+   - `POS`/`NEG`: on that edge, wait `SALTDLY,<mod>,<ms>` (float),
      apply the alternate waveform for `SALTPLY,<mod>,<ms>`, then
      revert. Delay/duration are timed **on the module**, so they are
      ms-precision, asynchronous to table ticks.
 3. **From a Table** (the Layer 1 path): drive the compress line
-   directly with `r:1`/`r:0` events — with modules configured
+   directly with `r:1`/`r:0` events. With modules configured
    `SALTHWD,TRUE` + `SALTTMODE,LEVEL`, the wave state follows the `r`
    channel tick-accurately (± one waveform period, above). For more
    than the two broadcast groups, wire a DIO output (`A`–`P`) back
-   into the `SALTTRG` input instead — same semantics, one cable per
+   into the `SALTTRG` input instead: same semantics, one cable per
    independent group.
 
 **Overrides while the alternate waveform is active:**
 
-- `SALTRENA,<mod>,TRUE|FALSE` + `SALTRNG,<mod>,<0–100 V p-p>` —
+- `SALTRENA,<mod>,TRUE|FALSE` + `SALTRNG,<mod>,<0–100 V p-p>`:
   alternate output range, applied automatically on switch.
-- `SALTFENA,<mod>,TRUE|FALSE` + `SALTFRQ,<mod>,<1000–160000 Hz>` —
+- `SALTFENA,<mod>,TRUE|FALSE` + `SALTFRQ,<mod>,<1000–160000 Hz>`:
   alternate frequency (firmware-validated bounds).
 
 **Fixed profile:** `SALTFVAL,<mod>,<index 0–7>,<value>` sets electrode
 `index` of the `FIX` profile to `value` percent (±100) of the *current*
-p-p range — ±100 % maps to ± half the p-p range on the output.
+p-p range. ±100 % maps to ± half the p-p range on the output.
 
 **Command reference** (all have `G` counterparts returning the set
 value): `SALTENA`, `SALTTRG`, `SALTHWD`, `SALTTMODE`, `SALTWFM`,
@@ -943,14 +943,14 @@ so Layer 3 can verify module state at arm time instead of trusting it.
 **Discrepancy note (`SALTTRG` input range):** firmware accepts inputs
 `Q` through `X`; the command help text and manual say Q–W. Also, the
 manual's example 2 says "you only need to issue the SALTHWD command one
-time" — its own reference section (and the firmware) show the shared
+time." Its own reference section (and the firmware) show the shared
 one-time command is `SALTTRG`, while `SALTHWD` is the per-module
 opt-in. Firmware wins on both.
 
 **SLIM Reverser (adjacent hardware, not an ARB feature):** an external
 16-pole bidirectional analog switch that passes a TW signal set through
 straight or electrode-order-reversed, selected by an isolated 0–5 V
-control input — i.e. a direction flip implemented downstream of the
+control input, i.e. a direction flip implemented downstream of the
 waveform generator. Protocol impact is nil: the control input is just a
 Table DIO output (`A`–`P`) or any other logic source. It is the
 alternative to `REV` when a region must flip direction independently of
@@ -971,14 +971,14 @@ is queued. At the event's LDAC the queued `ProcessARB()` sends
 values into hardware. Consequences for the compiler:
 
 - The staging TWI traffic happens in the **preceding inter-event gap**;
-  the ~50 µs function-channel budget (§3 timing limits) is real here —
-  leave room before any event carrying these channels.
+  the ~50 µs function-channel budget (§3 timing limits) is real here,
+  so leave room before any event carrying these channels.
 - The commit itself is soft: if the TWI bus is busy at LDAC the load is
   re-queued and can slip past the tick (`ProcessARB()` re-queues on a
   busy bus). Treat 101–108 as "near-tick-accurate, not guaranteed" and
   don't use them where µs alignment matters.
 - Values are volts (±50 aux; A/B offsets are board-bias values), sent
-  as floats; no parse-time range check — the compiler must validate.
+  as floats; no parse-time range check, so the compiler must validate.
 
 **Direct pin writes at LDAC (`r`, `s`) and compressor start (`c:A`):**
 tick-accurate as described in §6.3. `c:A` calls
@@ -987,7 +987,7 @@ tick-accurate as described in §6.3. `c:A` calls
 compression-table state machine of §6.6 (`c:T` starts the Twave one,
 §5).
 
-### 6.6 ARB compressor (`c:A` target — future CRIMP support)
+### 6.6 ARB compressor (`c:A` target: future CRIMP support)
 
 Deferred capability for Layer 1 v1 (current experiments don't use
 compression), documented because `c:A` is a table channel and the
@@ -1013,17 +1013,17 @@ gates off *n−1* of every *n* waveform cycles on the compress module
 | `SARBCTC`/`GARBCTC` | ms | Compress time per cycle |
 | `SARBCTN`/`GARBCTN` | ms | Normal time per compress cycle |
 | `SARBCTNC`/`GARBCTNC` | ms | Non-compressed cycle time |
-| `TARBTRG` | — | Software compressor trigger |
+| `TARBTRG` | none | Software compressor trigger |
 | `SARBCSW`/`GARBCSW` | `Open\|Close` | Gate switch output state |
 | `SARBCDIS`/`GARBCDIS` | `TRUE\|FALSE` | Disable the compression table engine |
 | `SARBCMP` | `TRUE\|FALSE` | Compressor-mode-enabled config flag |
 
 Compression-table ops (`ARBcompressor.cpp:
-ARBgetNextOperationFromTable()`): the Twave set (§5) — `N`/`C` passes,
+ARBgetNextOperationFromTable()`): the Twave set (§5), `N`/`C` passes,
 `D` delay, `O` order, `V`/`v` module 1/2 voltage, `F` frequency,
 `c`/`n`/`t` times, `s`/`r` clock stop/restart, `S` switch, `o`/`g`/`G`
 gate times, `M` amplitude mode, `K`/`k` order ramp (Cramp) rate/step,
-`[`…`]`*n* loops — plus ARB-only ops: `W`*n*/`w`*n* waveform type for
+`[`…`]`*n* loops, plus ARB-only ops: `W`*n*/`w`*n* waveform type for
 module 1/2 (1=SIN…5=ARB), `L`/`l` module 3/4 voltage, `B`/`b`/`E`/`e`
 module 1–4 amplitude ramp rates (V/s), `m`*n*`N|C` per-module
 normal/compress mode, `J`*n**order* per-module compression order,
@@ -1031,49 +1031,49 @@ normal/compress mode, `J`*n**order* per-module compression order,
 `H`*<input>* halt-until-trigger (uppercase input = rising edge,
 lowercase = falling). Numeric arguments may be floats where the
 quantity is a time/voltage. Unknown characters are skipped without
-error — the table is not syntax-checked on load.
+error; the table is not syntax-checked on load.
 
 ---
 
 ## 7. Open items / to verify on hardware
 
-Items needing a physical check (asked of the lab directly — scope/board
+Items needing a physical check (asked of the lab directly: scope/board
 inspection, not scriptable):
 
-- Trigger-output (`t` channel, values 0/-1) BNC polarity — vendor doc
+- Trigger-output (`t` channel, values 0/-1) BNC polarity. Vendor doc
   and firmware pin writes disagree in sign; assume the vendor doc's
   BNC-level description, verify with a scope.
 - Which Twave board revs we have (affects wave-frequency range limits;
-  determined by reading the board, not the protocol) — likely moot if
+  determined by reading the board, not the protocol). Likely moot if
   the inventory confirms no Twave modules (§5 scope note).
 - Whether any DIO-output→digital-input loopback cables are installed
   (needed for more than two independent ARB trigger groups per box,
-  §6.3/§6.4) — part of the pending lab wiring inspection.
+  §6.3/§6.4). Part of the pending lab wiring inspection.
 - Scope-check the alternate-waveform switch latency (§6.4 says up to
   one waveform period, from the manual; the module firmware that
   implements it isn't public) if Layer 1 timing budgets come to depend
   on the exact value.
 
-Items that are plain protocol-level pass/fail probes — deferred to the
+Items that are plain protocol-level pass/fail probes, deferred to the
 `clockwork` hardware-in-the-loop test suite once it
 exists, rather than a one-off manual check:
 
-- Current firmware version per box (`GVER`; protocol above is v1.263)
-  — capture as a fixture/setup step that logs each box's version.
+- Current firmware version per box (`GVER`; protocol above is v1.263).
+  Capture as a fixture/setup step that logs each box's version.
 - ARB module firmware version per module (`GARBVER,<mod>`; alternate
-  waveform needs ≥ 2.1, `CUR` ≥ 2.21 — §6.4) — same fixture.
+  waveform needs ≥ 2.1, `CUR` ≥ 2.21, §6.4). Same fixture.
 - Each module's actual sync/compress line-role config
   (`SARBSYNLN`/`SARBCMPLN`; defaults 1/2, but see the §6.3 crossed-
-  naming discrepancy) plus `SARBCPEX`/`SARBHISR`/`SALTHWD` states —
-  query and log at arm time rather than assuming defaults.
-- Each module's UI "Sync input" config — required for the module to
+  naming discrepancy) plus `SARBCPEX`/`SARBHISR`/`SALTHWD` states.
+  Query and log at arm time rather than assuming defaults.
+- Each module's UI "Sync input" config, required for the module to
   follow table `s` events (§6.3 config gotcha), but front-panel-only,
   so it must be inspected/set at the box and persisted with Save.
-- Whether `101`–`108` (ARB aux/offset) events land on-tick under load —
-  the TWI commit can slip (§6.5); a test should stress event spacing
+- Whether `101`–`108` (ARB aux/offset) events land on-tick under load.
+  The TWI commit can slip (§6.5); a test should stress event spacing
   against these channels.
 - Exact usable event-rate ceiling for our typical event shapes (few DCB
-  channels + DIO per time point) — derive from the per-channel budgets
+  channels + DIO per time point). Derive from the per-channel budgets
   above, then have a test sweep spacing and check `TBLCHK`/response
   behavior.
 - **Answered for one box, 2026-09-07** (lab record, task 04): maximum

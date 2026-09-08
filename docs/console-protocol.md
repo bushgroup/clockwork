@@ -39,7 +39,7 @@ Frames are plain strings; a command with an argument is two frames.
 | `acquire frame`, `<snappy(UimfRequestMessage)>` | Starts acquiring one frame into the named UIMF file; returns immediately | `ack` |
 | `stop`, `acquire` | Stops the running acquisition and tears down the acquisition chain | `ack` |
 | `stop`, `<anything else>` | Stops the running frame, keeps the chain for the next `acquire frame` | `ack` |
-| `trig class`, `trig source`, `mode`, `config digitizer`, `post samples`, `pre samples`, `setup array`, `reset timestamps` | Accepted and ignored (TODO in the source); `setup array` replies `ack` | — |
+| `trig class`, `trig source`, `mode`, `config digitizer`, `post samples`, `pre samples`, `setup array`, `reset timestamps` | Accepted and ignored (TODO in the source); `setup array` replies `ack` | none |
 
 The order the console's own test client uses: `init`, `horizontal`, `vertical`, `invert`, then
 `acquire`; then per frame `acquire frame`; then `stop acquire`.

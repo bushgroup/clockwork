@@ -37,8 +37,8 @@ you are reading this file *without* that import, you have a public clone — the
 - **Windows first.** The instrument PCs run Windows 11 LTSC; the installer is the primary
   deliverable. Nothing should *break* elsewhere, but nothing else is tested.
 - **Lab-side paths resolve through `clockwork.lab_dir()`**: `$CLOCKWORK_LAB`, then this root, then
-  the sibling `../clockwork-lab`. Code in `src/` refers to lab material only in opaque form ("lab
-  record, task NN"), never by a path that only resolves lab-side.
+  the sibling `../clockwork-lab`. Nothing in this repo, code or docs, refers to lab material except
+  in opaque form ("lab record, task NN"); never by a path that only resolves lab-side.
 - **Public commit messages are self-contained statements of the change.** Task IDs may appear as
   opaque references at most. Trailer is `Assisted-by: <model name>`, no email — never
   `Co-Authored-By:`. `.githooks/commit-msg` rewrites, `.githooks/pre-commit` rejects staged files

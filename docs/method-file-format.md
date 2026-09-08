@@ -38,7 +38,7 @@ strings = ["STBLCLK,EXT", "STBLDAT;0:[A:10,50:A:1,100:];"]
   written.
 - `acquisition` carries `frames`, `scans` and `accumulations` for the run, and `file_stem`, the
   base name the UIMF file is written under. It says nothing about what a scan or an accumulation
-  means on the wire; that is `../clockwork-lab/notes/accumulations.md`'s question, not this
+  means on the wire; that is a question for the lab record on accumulation semantics, not this
   document's.
 - `[[boxes]]` is an array of tables, one per box, in the order clockwork sends them. Each entry
   names the box, its COM port, and the exact command strings sent to it in send order: the two
