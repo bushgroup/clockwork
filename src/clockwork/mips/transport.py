@@ -12,7 +12,16 @@ value, the `\\x15?` of a NAK, the doubled newline after an asynchronous status
 line. It does not reproduce timing, and it answers `TBLRPT` by re-encoding the
 same prediction `table.compile_table` makes, so a round trip against the fake
 proves the framing and the plumbing and proves nothing at all about whether
-that prediction matches a real box's parser. Only a bench box can settle that.
+that prediction matches a real box's parser.
+
+One consequence of having no clock is worth stating, because the bench has now
+measured the thing it cannot model. On a real box the limit on a table load is
+a *rate*: written with no pause between chunks, a string much past 4 KB loses
+its tail, and written with a 10 ms pause, 17572 bytes arrive intact (§1). The
+fake sees only sizes, so it drops the tail of any single write larger than the
+whole ring buffer and lets everything else through. A sender that paces
+correctly and one that does not both pass here. Only a bench box separates
+them.
 
 pyserial is imported inside `open_serial` rather than at module scope, so
 importing `clockwork.mips` costs nothing and needs nothing on a machine that
@@ -49,12 +58,13 @@ class SerialTransport:
     port, which is CDC, so the rate is not a real line rate (`wire.py`).
     """
 
-    __slots__ = ("_port", "port_name")
+    __slots__ = ("_baudrate", "_port", "port_name")
 
     def __init__(self, port: str, *, baudrate: int = DEFAULT_BAUDRATE) -> None:
         import serial  # deferred: see the module docstring
 
         self.port_name = port
+        self._baudrate = baudrate
         self._port = serial.Serial(port, baudrate, timeout=0.05)
 
     def write(self, data: bytes) -> None:
@@ -71,6 +81,35 @@ class SerialTransport:
 
     def close(self) -> None:
         self._port.close()
+
+    def reset_link(self, settle: float = 3.0) -> None:
+        """Make the box reset its USB port, the only way back from a wedge.
+
+        A table written faster than the box can tokenize does not just fail:
+        it can leave the serial interface silent indefinitely, with no NAK and
+        no output (§1). Dropping DTR after it has been asserted makes the
+        firmware reset its own USB port, so closing and reopening the port
+        recovers the box. The device re-enumerates, which takes it off the bus
+        for a moment, so reopening retries until it is back.
+
+        Nothing calls this automatically. A sender that paces its writes never
+        needs it, and a caller that has just wedged a box is better placed than
+        this module to decide whether resetting is the right answer.
+        """
+        import serial  # deferred: see the module docstring
+
+        self._port.close()
+        deadline = time.monotonic() + settle + 10.0
+        last: Exception | None = None
+        time.sleep(min(settle, 1.0))
+        while time.monotonic() < deadline:
+            try:
+                self._port = serial.Serial(self.port_name, self._baudrate, timeout=0.05)
+                return
+            except Exception as exc:  # pyserial raises several unrelated types
+                last = exc
+                time.sleep(0.5)
+        raise OSError(f"{self.port_name} did not come back after a link reset") from last
 
 
 def open_serial(port: str, *, baudrate: int = DEFAULT_BAUDRATE) -> SerialTransport:

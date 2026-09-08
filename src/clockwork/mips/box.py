@@ -13,12 +13,14 @@ the middle of a command's reply. Everything read here goes through one framer
 per box, and a status line is routed to `events` wherever it turns up rather
 than being read as the answer to whatever was asked.
 
-*A table load cannot stall.* The box abandons a table string if any 3 seconds
-pass without a token, and drops characters silently if the host outruns its
-4 KB input buffer. `send_table` writes in chunks below that size with nothing
-between them, so the link's own flow control sets the pace, and reports how
-long the write took so that the margin against the timeout is a measurement
-rather than an assumption.
+*A table load cannot stall, and cannot outrun the box either.* The box
+abandons a table string if any 3 seconds pass without a token, and drops
+characters silently if the host outruns its 4 KB input buffer. There is no
+flow control on the link to hold the host back: writing at full speed loses
+the tail of any table much past 4 KB, which is a bench measurement and not a
+worry (§1). `send_table` therefore writes in small chunks with a short pause
+after each, and reports how long the write took so that the margin against the
+timeout is a measurement rather than an assumption.
 
 Blocking, and deliberately so: every read waits on a deadline. Nothing here may
 be called from the UI thread.
@@ -33,6 +35,7 @@ from dataclasses import dataclass, field
 from . import table as _table
 from .transport import Transport, open_serial
 from .wire import (
+    ERR_ALREADY_LOCAL,
     TOKEN_TIMEOUT_S,
     Kind,
     ResponseReader,
@@ -45,10 +48,23 @@ from .wire import (
 DEFAULT_TIMEOUT_S = 2.0
 """Long enough for any command that is not a table load, on a USB link."""
 
-DEFAULT_CHUNK_BYTES = 512
-"""Well under the box's 4096-byte input buffer, and a whole number of USB
-bulk packets. The value that actually survives on our link is a bench
-measurement (§7); this is the conservative starting point."""
+DEFAULT_CHUNK_BYTES = 256
+"""Bench-measured (lab record, task 04), and a whole number of USB bulk
+packets. Every rate from 3.1 kB/s to 39.7 kB/s loaded an 8572-byte table
+correctly at this chunk size, so the choice is not delicate; what matters is
+that a chunk is far below the box's 4096-byte input buffer and that
+`DEFAULT_CHUNK_GAP_S` separates the writes."""
+
+DEFAULT_CHUNK_GAP_S = 0.010
+"""The pause after each chunk, which is what actually makes a long table load.
+
+The box has no flow control (§1): `ReadAllSerial()` moves everything the USB
+stack is holding into the 4096-byte ring buffer in one pass, and `RB_Put()`
+drops silently once that is full, so a host writing at full speed loses the
+tail of anything past about 4 KB. A pause hands the processor back to
+`GetToken()` between deliveries. 10 ms against the 3-second token timeout
+spends three parts in a thousand of the margin and carried 17572 bytes on the
+bench, where the same table written with no pause failed."""
 
 
 class MipsError(Exception):
@@ -197,6 +213,45 @@ class Box:
         self.events.clear()
         return collected
 
+    def resync(
+        self, settle: float = 1.0, limit: float = TOKEN_TIMEOUT_S * 3
+    ) -> list[TableEvent]:
+        """Wait out a failed table load and drop whatever it left on the wire.
+
+        A table the box cannot parse is NAKed only after the parser has flushed
+        the rest of the string, which costs it the inter-token timeout (§4), so
+        a host that gave up waiting can still have that NAK arrive afterwards.
+        Left alone it would be read as the *next* command's answer, and every
+        reply after it would be off by one.
+
+        Reads until the box has said nothing for `settle` seconds, or `limit`
+        elapses, then keeps the status lines and discards the rest. Draining to
+        silence rather than for a fixed time is what makes this reliable: a
+        table that overran the ring buffer leaves its tail in the box, which
+        then reads that tail as commands and NAKs each one, so how long the
+        noise lasts scales with how far the table overshot and is not a
+        constant.
+
+        Returns the status lines seen, which is how an abort that arrived late
+        stays visible instead of being thrown away with the rest.
+        """
+        started = time.monotonic()
+        last_heard = started
+        while True:
+            now = time.monotonic()
+            if now - last_heard >= settle or now - started >= limit:
+                break
+            data = self.transport.read_some(min(0.1, settle))
+            if data:
+                self._tokens.extend(self._reader.feed(data))
+                last_heard = time.monotonic()
+        self._sift()
+        self._tokens.clear()
+        self._reader = ResponseReader()
+        collected = list(self.events)
+        self.events.clear()
+        return collected
+
     def wait_for(self, *events: TableEvent, timeout: float | None = None) -> TableEvent:
         """Block until one of `events` arrives, and return which.
 
@@ -295,8 +350,18 @@ class Box:
         self.command("TBLABRT")
 
     def local(self) -> None:
-        """`SMOD,LOC`, which a table load needs unless the box is READY."""
-        self.command("SMOD,LOC")
+        """`SMOD,LOC`, which a table load needs unless the box is READY.
+
+        Idempotent, though the command itself is not: a box already in LOC mode
+        NAKs with `ERR_LOCALREADY` (§4). The only reason to call this is to be
+        sure of the mode, and that answer says the mode is already right, so it
+        is success. Every other rejection is real and propagates.
+        """
+        try:
+            self.command("SMOD,LOC")
+        except BoxRejected as exc:
+            if exc.code != ERR_ALREADY_LOCAL:
+                raise
 
     # -- loading a table ---------------------------------------------------
 
@@ -305,15 +370,20 @@ class Box:
         table_string: str,
         *,
         chunk_bytes: int = DEFAULT_CHUNK_BYTES,
+        chunk_gap: float = DEFAULT_CHUNK_GAP_S,
         timeout: float | None = None,
     ) -> TableLoad:
         """Stream one `STBLDAT` string and wait for the box to accept it.
 
-        The string is written in chunks with no delay between them: small
-        enough not to overrun the box's input buffer, large enough that the
-        gaps stay far below the 3-second token timeout. The reply is waited for
-        with at least that timeout on top of however long the write took, since
-        a box that means to reject the table flushes the rest of it first.
+        The string is written in chunks with a short pause after each, because
+        the box has no flow control and a host writing at full speed silently
+        overruns its 4096-byte input buffer (§1). Both numbers are bench
+        measurements; `chunk_gap=0` reproduces the unpaced behaviour, which
+        loses the tail of any table much past 4 KB.
+
+        The reply is waited for with at least the token timeout on top of
+        however long the write took, since a box that means to reject the
+        table flushes the rest of it first.
 
         Raises `BoxRejected` if the box NAKs, after asking `GERR` why.
         """
@@ -332,25 +402,30 @@ class Box:
             raise ValueError("a table string must end with ';' or the box waits for one")
         payload += b"\n"
 
-        started = time.monotonic()
+        # perf_counter, not monotonic: on Windows `time.monotonic()` ticks at
+        # about 15.6 ms, which is coarser than a whole table write, so it
+        # quantises exactly the number the stall margin is computed from.
+        started = time.perf_counter()
         slowest = 0.0
         for at in range(0, len(payload), chunk_bytes):
-            chunk_started = time.monotonic()
+            chunk_started = time.perf_counter()
             self.transport.write(payload[at : at + chunk_bytes])
-            slowest = max(slowest, time.monotonic() - chunk_started)
-        write_seconds = time.monotonic() - started
+            slowest = max(slowest, time.perf_counter() - chunk_started)
+            if chunk_gap and at + chunk_bytes < len(payload):
+                time.sleep(chunk_gap)
+        write_seconds = time.perf_counter() - started
 
         reply_timeout = timeout
         if reply_timeout is None:
             reply_timeout = max(self.timeout, TOKEN_TIMEOUT_S + write_seconds) + 1.0
-        replied = time.monotonic()
+        replied = time.perf_counter()
         self._await_reply("STBLDAT", timeout=reply_timeout)
         return TableLoad(
             string=table_string,
             bytes_sent=len(payload),
             write_seconds=write_seconds,
             slowest_chunk_seconds=slowest,
-            reply_seconds=time.monotonic() - replied,
+            reply_seconds=time.perf_counter() - replied,
             predicted=predicted,
             prediction_error=prediction_error,
         )

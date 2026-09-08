@@ -84,14 +84,38 @@ of it constrain how a host may send a long table:
 
 So the two failure modes pull in opposite directions: sending too slowly
 trips the 3-second token timeout, and sending too fast overruns 4096
-bytes. A sender should write a long table in chunks well under 4096
-bytes with no deliberate delay between them, letting the USB CDC link's
-own flow control set the pace, and treat any table string approaching
-4 KB as needing a measured check on the box rather than an assumption.
+bytes. Bench measurement settles where the boundary lies (lab record,
+task 04). Written as fast as the host's USB stack accepts it, a table
+string survives to 4090 bytes and fails at 4108, which is the 4096-byte
+buffer rather than any limit on table size. Pausing 10 ms between
+256-byte writes carried 8572 bytes and 17572 bytes, both verified byte
+for byte through `TBLRPT`, whereas the same 8572-byte table written with
+no pause failed. The USB CDC link therefore offers the box no flow
+control: a host that writes a long table at full speed loses the tail of
+it silently.
 
-Neither number is fixed by the firmware, because both depend on how fast
-the host's USB stack delivers relative to how fast the parser tokenizes,
-so both are bench measurements (§7).
+**An overrun does not merely fail the load, it stops the interface.**
+Written with no pause, an 8573-byte table drew no ACK, no NAK and no
+output of any kind, and the box then ignored `GVER` for 73 seconds on
+the same connection (lab record, task 04). Waiting is not the recovery.
+Resetting the box's USB port is: dropping DTR after it has been asserted
+makes `USBportTest()` call `SerialPortReset()`, the device re-enumerates
+in about 0.4 s, and the box answers again with `GERR` reporting 8, the
+token timeout, as the record of the load that failed. Closing the host
+port does exactly that, so `SerialTransport.reset_link()` is the way
+back. Note that the same mechanism fires on any ordinary close, so a
+host that opens and closes the port around each operation makes the box
+re-enumerate every time; open once and keep it.
+
+A sender must pace deliberately, and the pause can be small. Delivery
+rates from 3.1 kB/s to 39.7 kB/s all loaded an 8572-byte table
+correctly, so only writing with no pause at all fails, and a 10 ms pause
+against a 3-second token timeout spends three parts in a thousand of the
+margin. Note that both numbers depend on how fast the host's USB stack
+delivers relative to how fast the parser tokenizes, so a box on
+different firmware or a host with a different USB stack wants the
+measurement repeated. `clockwork.mips.DEFAULT_CHUNK_BYTES` and
+`DEFAULT_CHUNK_GAP_S` carry the values measured here.
 
 ### Responses
 
@@ -138,6 +162,7 @@ ones a sequencer will actually meet:
 |---|---|
 | 1 | Invalid command |
 | 2 | Invalid argument |
+| 3 | Already in LOC mode |
 | 4 | Already in TBL mode |
 | 5 | No tables loaded |
 | 6 | Not in table mode |
@@ -520,8 +545,23 @@ Grouped from `MIPScommands.txt` + dispatch table in `Serial.cpp`
 | `STBLTSKS`/`GTBLTSKS`, `TBLTSKENA` | `TRUE\|FALSE` | Run system tasks in table idle time (needs `SEXTFREQ` on ext clock; use with care) |
 | `STBLUSBTST`/`GTBLUSBTST` | `TRUE\|FALSE` | USB link test during table loop |
 
-Two commands in this table behave in ways the row cannot carry, and both
-matter to a sequencer:
+Three commands in this table behave in ways the row cannot carry, and
+all three matter to a sequencer:
+
+**`SMOD` refuses the mode it is already in.** `SetTableMode()`
+(`Table.cpp`) tests the current mode before doing anything: `SMOD,LOC`
+NAKs with `ERR_LOCALREADY` (3) when the box is already local, and
+`SMOD,TBL`/`SMOD,ONCE` NAK with `ERR_TBLALREADY` (4) when it is already
+in table mode or `ERR_NOTBLLOADED` (5) when the active buffer holds no
+tables. **None of them is idempotent.** This matters because `STBLDAT`
+requires LOC mode, so a host naturally sends `SMOD,LOC` to *ensure* the
+box is local before a load, and on an idle box that NAKs every time. A
+sequencer must treat error 3 from `SMOD,LOC` as success, not as a
+failure. Confirmed on the bench (lab record, task 04).
+
+Note also that the mode change is not complete when the ACK arrives: the
+`LOC` arm sends the ACK and then sets `LOCrequest`, which the table
+service loop acts on afterwards.
 
 **`STBLDAT` can take three seconds to say no.** On a parse error the
 firmware flushes the rest of the command by calling `NextToken()` until
@@ -563,6 +603,14 @@ actually running.
 `ReportTable()` is called nowhere else; the call inside the successful
 `STBLDAT` path is commented out, so a dump only ever happens because the
 host asked for one.
+
+**Not every command above exists on every firmware.** `GTBLSTA` is
+absent from v1.163t (Nov 2019), where it NAKs as an invalid command
+(1), and present in the v1.263 this document is written against. A
+host that polls table status must either require a firmware new enough
+to have it or fall back to the asynchronous status lines, which every
+version emits. Observed on the bench box (lab record, task 04); the
+version in which it appeared has not been bisected.
 
 General commands the sequencer will also need: `GVER` (version),
 `GERR` (last error code), `GNAME`/`SNAME` (box identity), `MUTE`,
@@ -1028,20 +1076,23 @@ exists, rather than a one-off manual check:
   channels + DIO per time point) — derive from the per-channel budgets
   above, then have a test sweep spacing and check `TBLCHK`/response
   behavior.
-- Maximum practical `STBLDAT` length on our link, and the chunk size to
-  send it in. Two limits bracket it and neither is a constant: the
-  3-second inter-token timeout punishes sending too slowly, and the
-  silent 4096-byte ring-buffer overflow (§1) punishes sending too fast.
-  Sweep table-string size and chunk size per transport, and check the
-  result with `TBLRPT` rather than with the absence of a NAK, because
-  overflow does not necessarily NAK.
-- Whether the compiled layout a host predicts from the table string
-  agrees with what the box parsed. `TBLRPT` makes this checkable byte by
-  byte, except for DC-bias values, which are calibration-dependent (§2).
-  The three `Size of` lines in the dump also confirm the struct packing
-  assumed in §2 against the firmware actually running.
-- Round-trip latency of a get-style command (`GVER`) and the wall-clock
-  cost of streaming a real trainee table, per transport. Both are inputs
+- **Answered for one box, 2026-09-07** (lab record, task 04): maximum
+  practical `STBLDAT` length is set by the send rate, not by the table
+  size. Unpaced, the ceiling is the 4096-byte ring buffer; with a pause
+  between chunks, 17572 bytes loaded and verified. §1 carries the
+  numbers. Measured on firmware 1.163t rather than the v1.263 this
+  document describes, so repeat it on a SLIMPHONY box.
+- **Answered, 2026-09-07** (lab record, task 04): the compiled layout a
+  host predicts from the table string is the layout the box parsed. A
+  bench box reported `sizeof` 13, 5 and 5 for the three structs and
+  round-tripped a probe table through `TBLRPT` with no difference from
+  the prediction, including the extra table a leading offset costs and
+  the zero-based DC-bias channel numbering. DC-bias values stay
+  unpredictable by construction (§2). Confirmed on firmware 1.163t, one
+  box, one table shape.
+- Round-trip latency of a get-style command (`GVER`) measured 16 ms on
+  USB CDC, and the wall-clock cost of streaming a real trainee table is
+  still unmeasured, per transport. Both are inputs
   to the sequencer's read timeouts, and the load timeout in particular
   has to exceed the streaming time plus the 3-second flush a parse error
   costs before its NAK (§4).

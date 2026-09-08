@@ -139,7 +139,16 @@ def table_event(line: str) -> TableEvent | None:
 
 
 TABLE_STATES = ("IDLE", "READY", "TRIGGERED", "ABORTED")
-"""What `GTBLSTA` can answer."""
+"""What `GTBLSTA` can answer.
+
+Not on every box: `GTBLSTA` is absent from firmware 1.163t and NAKs there
+as an invalid command (§4). Code that needs the state on any firmware has
+to follow the asynchronous status lines instead.
+"""
+
+ERR_ALREADY_LOCAL = 3
+"""`SMOD,LOC` answering "the box was already local", which is a success
+for any caller that sent it to be sure of the mode. §4."""
 
 
 ERROR_CODES: dict[int, str] = {

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from .box import (
     DEFAULT_CHUNK_BYTES,
+    DEFAULT_CHUNK_GAP_S,
     DEFAULT_TIMEOUT_S,
     Box,
     BoxRejected,
@@ -63,6 +64,7 @@ from .table import (
 from .transport import FakeBox, SerialTransport, Transport, open_serial
 from .wire import (
     ACK,
+    ERR_ALREADY_LOCAL,
     NAK,
     RING_BUFFER_BYTES,
     TOKEN_TIMEOUT_S,
@@ -77,7 +79,9 @@ from .wire import (
 __all__ = [
     "ACK",
     "DEFAULT_CHUNK_BYTES",
+    "DEFAULT_CHUNK_GAP_S",
     "DEFAULT_TIMEOUT_S",
+    "ERR_ALREADY_LOCAL",
     "NAK",
     "RING_BUFFER_BYTES",
     "TOKEN_TIMEOUT_S",

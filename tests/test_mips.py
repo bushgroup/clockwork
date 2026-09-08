@@ -13,6 +13,10 @@ import time
 import pytest
 
 from clockwork.mips import (
+    DEFAULT_CHUNK_BYTES,
+    DEFAULT_CHUNK_GAP_S,
+    RING_BUFFER_BYTES,
+    TOKEN_TIMEOUT_S,
     Box,
     BoxRejected,
     BoxTimeout,
@@ -313,6 +317,61 @@ def test_a_rejection_carries_the_reason_the_box_gave() -> None:
     assert "invalid command" in str(caught.value)
 
 
+def test_going_local_is_idempotent_though_the_command_is_not() -> None:
+    """§4: `SMOD,LOC` NAKs with error 3 on a box that is already local.
+
+    Measured on the bench box, which NAKed every `SMOD,LOC` sent to make sure
+    of the mode before a load. `local()` exists to establish the mode, so that
+    answer is a success.
+    """
+    fake = FakeBox()
+    assert fake.mode == "LOC"
+    box = Box(transport=fake)
+    box.local()
+    box.local()
+    assert fake.mode == "LOC"
+
+
+def test_going_local_still_reports_a_rejection_that_is_not_that_one() -> None:
+    fake = FakeBox()
+    box = Box(transport=fake)
+    box.send_table(EXAMPLE)
+    box.arm()
+    fake.mode = "TBL"
+    # The fake ACKs a real LOC transition, so force a different rejection to
+    # be sure only error 3 is being swallowed.
+    fake._do_smod = lambda argument: fake._nak(27)  # noqa: SLF001
+    with pytest.raises(BoxRejected) as caught:
+        box.local()
+    assert caught.value.code == 27
+
+
+def test_an_uncleared_late_nak_becomes_the_next_reply() -> None:
+    """The failure `resync` exists to prevent, stated as a test."""
+    box = Box(transport=ScriptedTransport(b"\x15?\n\r"), timeout=0.05)
+    with pytest.raises(BoxRejected):
+        box.version()
+
+
+def test_resync_drops_a_late_nak_so_the_next_reply_is_its_own() -> None:
+    """§4: a table the box cannot parse is NAKed only after a 3-second flush.
+
+    A host that gave up waiting has that NAK still in flight. Left queued it
+    becomes the answer to the next command, as the test above shows, and every
+    reply after it is off by one -- which is what made the rows after a failure
+    meaningless in the first bench sweep.
+    """
+    box = Box(transport=ScriptedTransport(b"\x15?\n\r"), timeout=0.05)
+    box.resync(settle=0.02)
+    with pytest.raises(BoxTimeout):
+        box.version()
+
+
+def test_resync_keeps_the_status_lines_it_finds() -> None:
+    box = Box(transport=ScriptedTransport(b"ABORTED\n", b"\x15?\n\r"))
+    assert box.resync(settle=0.05) == [TableEvent.ABORTED]
+
+
 def test_arming_without_a_table_is_rejected() -> None:
     box = Box(transport=FakeBox())
     with pytest.raises(BoxRejected) as caught:
@@ -344,6 +403,36 @@ def test_a_long_table_is_written_in_chunks_the_box_can_swallow() -> None:
     assert max(len(chunk) for chunk in fake.written) <= 512
     assert fake.dropped_bytes == 0
     assert box.verify_table(load) == []
+
+
+def test_a_load_paces_itself_because_the_box_has_no_flow_control() -> None:
+    """§1: the pause between chunks is what carries a table past 4 KB.
+
+    Asserted as a lower bound on elapsed time, because the point is that the
+    writes are separated at all, not how accurately Python sleeps.
+    """
+    fake = FakeBox()
+    box = Box(transport=fake)
+    points = ",".join(f"{100 + 2 * i}:A:{i % 2}" for i in range(400))
+    table = f"STBLDAT;0:[A:1,{points},900:];"
+    started = time.monotonic()
+    load = box.send_table(table, chunk_bytes=256, chunk_gap=0.005)
+    elapsed = time.monotonic() - started
+    assert len(fake.written) > 4
+    assert elapsed >= (len(fake.written) - 1) * 0.005 * 0.5
+    assert load.bytes_sent == len(table) + 1
+    assert not box.verify_table(load)
+
+
+def test_an_unpaced_load_is_still_available_for_the_bench() -> None:
+    box = Box(transport=FakeBox())
+    load = box.send_table(EXAMPLE, chunk_gap=0)
+    assert not box.verify_table(load)
+
+
+def test_the_default_chunk_is_far_below_the_boxs_input_buffer() -> None:
+    assert DEFAULT_CHUNK_BYTES * 4 <= RING_BUFFER_BYTES
+    assert 0 < DEFAULT_CHUNK_GAP_S < TOKEN_TIMEOUT_S / 100
 
 
 def test_writing_a_long_table_in_one_go_loses_its_tail() -> None:
