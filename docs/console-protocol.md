@@ -8,7 +8,8 @@ has created, and publishes a live summary of each batch of scans. Clockwork is s
 document is what a client has to know, derived from the console's source at its 2025-12-12 head
 (`aqmd3_console.cpp`, `server.cpp`, `message.proto`, `config.txt`, `libaqmd3/`, `UIMFWriter/`).
 It is not a specification the console's authors wrote; where it says "hardcoded", the value is in
-the console's source and changes only by rebuilding it.
+the console's source and changes only by rebuilding it. Six of those values are read from a file
+by the fork this project runs, and are listed under Configuration.
 
 ## Sockets
 
@@ -29,17 +30,19 @@ Frames are plain strings; a command with an argument is two frames.
 | `num instruments` | Counts VISA resources matching `PXI?*::INSTR` | The count |
 | `info` | Model, serial, firmware, console version and commit | One descriptive string |
 | `firmware`, `serial` | The single field | The string |
-| `init` | Trigger source `External1`, level 2.0 V, rising edge, post-trigger delay from config (default 10 µs) | `ack` |
+| `init` | Trigger source `External1`, level 2.0 V †, rising edge †, post-trigger delay from config (default 10 µs) | `ack` |
 | `horizontal`, `<seconds per sample>` | Sample rate = 1/value (0.5 ns → 2 GS/s) | `ack` |
-| `vertical`, `<offset V>` | Channel 1, full scale **0.5 V** (hardcoded), given offset, DC coupling | `ack` |
+| `vertical`, `<offset V>` | Channel 1, full scale **0.5 V** †, given offset, DC coupling | `ack` |
 | `invert`, `true`/`false` | Channel 1 data inversion | `ack` |
-| `enable io port`, `<n>` / `disable io port`, `<n>` | Sets Control I/O **2** (the argument is ignored) to `In-TriggerEnable` or `Disabled` | `ack` |
+| `enable io port`, `<n>` / `disable io port`, `<n>` | Sets Control I/O **2** † (the argument is ignored) to `In-TriggerEnable` or `Disabled` | `ack` |
 | `tof width` | Measures the pusher period from 20 trigger timestamps, sizes the record, sets it | `TofWidthMessage` protobuf, then its SHA-256 hex |
 | `acquire` | As `tof width`, then configures zero-suppress streaming and starts an **open-ended** acquisition that publishes data but writes no file | `TofWidthMessage` protobuf, then its SHA-256 hex |
 | `acquire frame`, `<snappy(UimfRequestMessage)>` | Starts acquiring one frame into the named UIMF file; returns immediately | `ack` |
 | `stop`, `acquire` | Stops the running acquisition and tears down the acquisition chain | `ack` |
 | `stop`, `<anything else>` | Stops the running frame, keeps the chain for the next `acquire frame` | `ack` |
 | `trig class`, `trig source`, `mode`, `config digitizer`, `post samples`, `pre samples`, `setup array`, `reset timestamps` | Accepted and ignored (TODO in the source); `setup array` replies `ack` | none |
+
+† Hardcoded upstream, read from `config.txt` by the fork. See Configuration.
 
 The order the console's own test client uses: `init`, `horizontal`, `vertical`, `invert`, then
 `acquire`; then per frame `acquire frame`; then `stop acquire`.
@@ -74,8 +77,9 @@ console also publishes the plain string `finished`; after `stop acquire`, `finis
   rounded down to a multiple of 32 samples. A pusher period that drifts after `acquire` is not
   re-measured.
 - Zero-suppress (the ZS1 option) with threshold **−32667** and hysteresis **100** on the signed
-  16-bit sample scale, no pre- or post-gate samples: hardcoded. Samples are shifted by +32768 into
-  an unsigned range before storage.
+  16-bit sample scale, no pre- or post-gate samples. Threshold and hysteresis are hardcoded
+  upstream and read from `config.txt` by the fork; the gate samples are hardcoded in both.
+  Samples are shifted by +32768 into an unsigned range before storage.
 - The markers stream is parsed per the Acqiris `CPP_IVIC_StreamingZeroSuppress` example; the
   samples stream is fetched in the amount the gates describe. Each trigger becomes one scan row:
   the gated samples with negative run-length entries for the zero gaps, plus `TIC`, `BPI`,
@@ -103,11 +107,43 @@ question.
 
 ## Configuration (`config.txt` beside the executable)
 
+The console reads a flat `key=value` file from its working directory at startup and logs every
+value it resolved, with the ones it fell back on marked as defaulted. Logs go to `logs/` beside
+the executable.
+
 `PostTriggerDelay` (s, default 1e-5), `TriggerRearmDeadTime` (s, default 2.048e-6),
 `ResourceName` (VISA, default `PXI0::0::0::INSTR`), `NotifyOnScansCount` (scans per batch and
 per write, default 500), `AcquisitionTimeoutMs` (0 = wait forever, default 100),
 `AcquisitionInitialBufferCount`, `AcquisitionMaxBufferCount`,
-`AcquisitionBufferReserveElementsCount`, `LogLevel`. Logs go to `logs/` beside the executable.
+`AcquisitionBufferReserveElementsCount`, `LogLevel`.
+
+### Settings the fork moves out of the source
+
+Six settings that the upstream console compiles in are read from the same file by the fork at
+[bushgroup/AqMD3-Acquisition-Console](https://github.com/bushgroup/AqMD3-Acquisition-Console).
+Every default below is the literal the upstream source carries, so a fork given none of these
+keys does what the stock console does.
+
+| Key | Default | Replaces |
+|---|---|---|
+| `TriggerLevel` | `2.0` (V) | the trigger level set by `init` |
+| `TriggerSlope` | `rising` | the edge set by `init`; `rising` or `falling` |
+| `FullScaleRange` | `0.5` (V) | the full scale set by `vertical` |
+| `ZeroSuppressThreshold` | `-32667` | the zero-suppress threshold used by `acquire` |
+| `ZeroSuppressHysteresis` | `100` | the zero-suppress hysteresis used by `acquire` |
+| `ControlIoPort` | `2` | the fixed Control I/O 2 in `enable io port` and `disable io port` |
+
+A stock console ignores all six without saying so. The reply to `info` is how a client tells the
+two builds apart: the fork appends its repository and branch to the version string the stock
+console ends on.
+
+The fork refuses four of these before they reach the driver, naming the key that is wrong: a
+threshold outside the signed 16-bit range, a hysteresis outside 0 to 65535, a port other than 1,
+2 or 3, and a slope other than `rising` or `falling`. Trigger level and full scale are passed
+through, because which values a card accepts depends on the card, and the driver refuses the rest.
+
+The ZeroMQ protocol is unchanged, in both directions and in every command. A client works against
+either build.
 
 ## Building it
 
