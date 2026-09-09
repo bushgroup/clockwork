@@ -12,8 +12,13 @@ is one button.
 
 ## Status
 
-Pre-alpha. The package skeleton, the self-check and the protocol documents exist; the sender, the
-acquisition client and the window do not yet. Documents:
+Pre-alpha, and nothing has been acquired with it yet. What exists: the protocol documents, the
+self-check, `clockwork.mips` (send strings and pulse-sequence tables to a box, follow what it
+reports), `clockwork.method` (load, validate and stamp a method) and `clockwork.acq` (drive the
+acquisition console through a whole acquisition). What does not: the creation of the UIMF file
+the console appends to, the step that sums a frame's repetitions, and the window. Both of the
+lower layers ship a stand-in for the hardware they talk to, so a clone with no instrument can
+run everything the self-check runs. Documents:
 
 - [`docs/mips-wire-format.md`](docs/mips-wire-format.md): how a MIPS box takes a pulse-sequence
   table, times it, and reports back, derived from the public firmware.
