@@ -26,7 +26,7 @@ ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
 
 # The lab repo's directories a session may need, by name. Nothing in src/ hard
 # codes a lab-side path; everything goes through lab_dir().
-_LAB_SUBDIRS = ("tasks", "notes", "explorations", "vendor", "falkor", "console")
+_LAB_SUBDIRS = ("tasks", "notes", "explorations", "golden", "vendor", "falkor", "console")
 
 
 def lab_dir(name: str | None = None) -> str | None:

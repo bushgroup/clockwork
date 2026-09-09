@@ -6,8 +6,9 @@ repository -- are reported as SKIPPED when it is absent, never as FAIL.
 
 What it covers today: the package imports, the version declarations agree, the three lower
 layers stay free of Qt, the module layout is complete, lab-directory resolution behaves, a
-method document round-trips, and the MIPS sender drives a simulated box through a table load,
-a TBLRPT round trip, arming and a rejection. Tasks add sections as they land code.
+method document round-trips through its phases, start sequence and repetition modes, and the
+MIPS sender drives a simulated box through a table load, a TBLRPT round trip, arming and a
+rejection. Tasks add sections as they land code.
 
 Run:  uv run tools/check_public.py
 """
@@ -121,25 +122,69 @@ def main() -> int:
     from clockwork import method
 
     sample = (
-        "schema_version = 1\n\n"
+        f"schema_version = {method.SCHEMA_VERSION}\n\n"
+        'start = [["box2", "TARBTRG"], ["box1", "TBLSTRT"]]\n'
+        'reset = [["box1", "SMOD,LOC"], ["box1", "SMOD,TBL"]]\n\n'
         '[metadata]\nname = "check_public-sample"\ncreated = 2026-09-06\n\n'
         "[acquisition]\nframes = 1\nscans = 100\naccumulations = 10\n"
+        'repetition_mode = "per_repetition"\nkeep_raw = true\n'
         'file_stem = "check_public-sample"\n\n'
-        '[[boxes]]\nname = "box1"\nport = "COM3"\nstrings = ["STBLCLK,EXT"]\n'
+        '[[boxes]]\nname = "box1"\nport = "COM3"\nsetup = ["STBLCLK,EXT"]\n'
+        'load = ["STBLDAT;0:[A:1,100:];"]\narm = ["SMOD,TBL"]\n\n'
+        '[[boxes]]\nname = "box2"\nport = "COM4"\nsetup = ["SWFREQ,1,15000"]\n'
     )
     m = method.loads(sample)
     check_true("a sample method document loads", m.metadata.name == "check_public-sample")
     check_true("dumps then loads round-trips the method", method.loads(method.dumps(m)) == m)
+    check_true(
+        "the start sequence keeps its cross-box order",
+        [(step.box, step.command) for step in m.start]
+        == [("box2", "TARBTRG"), ("box1", "TBLSTRT")],
+    )
+    check_true(
+        "one console frame per repetition is one ion mobility experiment long "
+        f"(frame_length {m.acquisition.frame_length}, {m.acquisition.console_frames} frames)",
+        m.acquisition.frame_length == m.acquisition.scans
+        and m.acquisition.console_frames == m.acquisition.accumulations,
+    )
+    single = method.loads(sample.replace("per_repetition", "single_frame"))
+    check_true(
+        "and one frame per method frame is the whole thing "
+        f"(frame_length {single.acquisition.frame_length})",
+        single.acquisition.frame_length
+        == single.acquisition.scans * single.acquisition.accumulations
+        and single.acquisition.console_frames == 1,
+    )
+    warned = method.loads(sample.replace('"SWFREQ,1,15000"', '"SWFREQ,1,15000\\t"'))
+    check_true(
+        "a string with trailing whitespace is stripped and warned about",
+        warned.boxes[1].setup == ("SWFREQ,1,15000",) and len(warned.warnings) == 1,
+    )
     stamp = method.stamp(m, console_version="0.0.0-check")
     check_true(
         "stamp() carries a hash, text and versions",
         stamp["method_hash"] and stamp["method_text"] and stamp["clockwork_version"],
     )
+    check_true(
+        "the stamp hash covers the start sequence",
+        method.stamp(method.loads(sample.replace('["box2", "TARBTRG"], ', "")))["method_hash"]
+        != stamp["method_hash"],
+    )
     try:
-        method.loads("schema_version = 1\n")
+        method.loads(f"schema_version = {method.SCHEMA_VERSION}\n")
         check_true("an incomplete method document is rejected", False)
     except method.MethodError:
         check_true("an incomplete method document is rejected", True)
+    try:
+        method.loads(
+            sample.replace(f"schema_version = {method.SCHEMA_VERSION}", "schema_version = 1")
+        )
+        check_true("a schema-1 method document is rejected", False)
+    except method.MethodError as exc:
+        check_true(
+            "a schema-1 method document is rejected, saying why",
+            "not supported" in str(exc),
+        )
 
     section("MIPS serial")
     from clockwork import mips

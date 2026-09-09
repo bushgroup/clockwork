@@ -198,9 +198,23 @@ Three terms carry more than one sense and are given both in one entry: *table*, 
   import Qt, and `clockwork.app` is the PySide6 window on top of them. The seam is what lets a
   script drive one box with no GUI stack installed, and `tests/test_architecture.py` and the
   self-check enforce it.
-- **Method.** The saved experiment a trainee loads: the strings each box needs, the acquisition
-  settings, and the map from box name to serial port, as one flat TOML document. Its shape is
+- **Method.** The saved experiment a trainee loads: the strings each box needs in three phases, the
+  acquisition settings, the order the boxes are started in, and the map from box name to serial
+  port, as one flat TOML document. Its shape is
   [method-file-format.md](method-file-format.md).
+- **Phase.** Which of a box's three string lists a command belongs to, chosen by how long its
+  effect lasts. `setup` persists in the box and is sent on demand; `load` is the table or
+  compression table sent once per acquisition; `arm` is what puts the box in table mode.
+- **Start sequence, reset sequence.** The two ordered cross-box lists in a method, written as
+  `[box, command]` pairs. `start` releases an acquisition and its order is part of the experiment;
+  `reset` is what a technical replicate sends first, in place of `load`.
+- **Repetition mode.** Whether each ion mobility experiment is its own acquisition console frame
+  (`per_repetition`) or a whole method frame is one long frame (`single_frame`). It sets the
+  console's `frame_length` and how often the start sequence runs.
+- **`keep_raw`.** The method setting that decides whether the raw file, one frame per repetition,
+  survives beside the summed companion the fold step writes. Default true.
+- **Fold step.** The pass that sums a method frame's repetitions scan by scan, by `ScanNum` modulo
+  `scans`, and writes one summed frame in the shape today's files have.
 - **Provenance stamp.** The record that ties an acquisition to the method that produced it: the
   method's name, the SHA-256 hash of its canonical text, that text in full, and the clockwork and
   console versions. A method's hash changes if and only if the document changes, which makes it a

@@ -8,8 +8,8 @@
   formats and data stream of PNNL's AqMD3 Acquisition Console for the SA220P digitizer, and the
   division of UIMF writing between the console and its client. Derived from the console's source.
 - [**Method file and provenance**](method-file-format.md). The flat TOML document a trainee loads
-  to run an experiment, and the stamp that traces every acquisition back to the method that
-  produced it.
+  to run an experiment: each box's strings in three phases, the ordered sequence that starts and
+  restarts them, and the stamp that traces every acquisition back to the method that produced it.
 - [**Glossary**](glossary.md). What the terms in these documents, in the package and in a method
   file mean, from SLIM and the pusher pulse to `STBLDAT`, zero suppress and the provenance stamp.
 
