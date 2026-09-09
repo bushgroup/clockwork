@@ -188,9 +188,11 @@ Three terms carry more than one sense and are given both in one entry: *table*, 
 - **`start_trigger`, `offset_bins`.** Two fields of the `acquire frame` request. Scans before the
   `start_trigger` index are dropped and `ScanNum` is renumbered from it; `offset_bins` is added to
   the leading zero run of the first gate in every scan.
-- **Snappy, protobuf.** The compression and the message encoding the console uses on both sockets:
-  a Snappy-compressed protobuf message is the argument of `acquire frame` and the payload of every
-  published batch.
+- **Snappy, protobuf.** The compression and the message encoding the console uses for everything
+  that is not a plain string: a Snappy-compressed protobuf message is the argument of
+  `acquire frame` and the payload of every batch published on the `data` topic. Commands, their
+  `ack` replies and the `status` topic's `finished` are plain strings, and the `TofWidthMessage`
+  that answers `acquire` is protobuf without the Snappy.
 
 ## Clockwork's parts
 

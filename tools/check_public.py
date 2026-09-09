@@ -6,9 +6,10 @@ repository -- are reported as SKIPPED when it is absent, never as FAIL.
 
 What it covers today: the package imports, the version declarations agree, the three lower
 layers stay free of Qt, the module layout is complete, lab-directory resolution behaves, a
-method document round-trips through its phases, start sequence and repetition modes, and the
+method document round-trips through its phases, start sequence and repetition modes, the
 MIPS sender drives a simulated box through a table load, a TBLRPT round trip, arming and a
-rejection. Tasks add sections as they land code.
+rejection, and the console client drives a simulated console from `info` through a whole
+frame to `finished acquire`. Tasks add sections as they land code.
 
 Run:  uv run tools/check_public.py
 """
@@ -229,6 +230,113 @@ def main() -> int:
             f"a bad command is rejected with the box's own error code ({exc.code})",
             exc.code == 1,
         )
+
+    section("acquisition console")
+    from clockwork import acq
+
+    request = acq.FrameRequest(
+        frame_length=5000, file_name="check_public-sample.uimf", frame_number=2,
+        nbr_accumulations=100, offset_bins=20000,
+    )
+    check_true(
+        "a frame request round-trips through protobuf and Snappy "
+        f"({len(request.encode())} bytes on the wire)",
+        acq.FrameRequest.decode(request.encode()) == request,
+    )
+    check_true(
+        "a frame past the ScanNum column's declared range is warned about, not refused",
+        len(acq.FrameRequest(frame_length=500_000, offset_bins=20000).warnings()) == 1,
+    )
+    # The instrument's own numbers at 2 GS/s: a 129.0036 us pusher period, the
+    # 10 us post-trigger delay and the 2.048 us rearm dead time.
+    record = acq.record_size_samples(258007, 20000, 4096)
+    check_true(
+        f"the record size follows the console's arithmetic ({record} samples, "
+        f"{record + 20000} with the post-trigger delay)",
+        record == 233888 and record % acq.GATE_GRANULARITY_SAMPLES == 0,
+    )
+
+    with acq.FakeConsole(subscriber_wait_s=2.0) as fake:
+        with acq.DataStream(fake.data_endpoint) as stream, \
+                acq.Console(fake.command_endpoint, timeout=5.0) as console:
+            info = console.info()
+            check_true(
+                f"a simulated console answers info ({info.model}, serial {info.serial})",
+                info.model == "SA220P" and info.is_fork,
+            )
+            check_true("and num instruments", console.num_instruments() == 1)
+            try:
+                console.acquire_frame(acq.FrameRequest(frame_length=10))
+                check_true("acquire frame before acquire is refused by the client", False)
+            except acq.ConsoleStateError:
+                check_true("acquire frame before acquire is refused by the client",
+                           not fake.died)
+            try:
+                console.request("reset timestamps", timeout=0.1)
+                check_true("a command the console never answers is refused, not waited on",
+                           False)
+            except acq.ConsoleStateError:
+                check_true("a command the console never answers is refused, not waited on",
+                           True)
+
+            # The other two ways to break the ordering rule, checked without
+            # sending anything: a start while an acquisition is unstopped
+            # destroys a thread the console never joined, and kills it.
+            sent_so_far = len(fake.commands)
+            with acq.Console(fake.command_endpoint, timeout=1.0) as guard:
+                guard.acquiring = guard.running = True
+                refused = 0
+                for attempt in (lambda: guard.acquire(timeout=1.0),
+                                lambda: guard.acquire_frame(acq.FrameRequest(frame_length=10))):
+                    try:
+                        attempt()
+                    except acq.ConsoleStateError:
+                        refused += 1
+                check_true(
+                    "a start while an acquisition is unstopped is refused, both ways",
+                    refused == 2 and not fake.died
+                    and len(fake.commands) == sent_so_far,
+                )
+
+            console.configure(offset_v=0.251)
+            check_true(
+                "configure sends init, horizontal, vertical, invert and the enable input",
+                [name for name, *_ in fake.commands[-5:]]
+                == ["init", "horizontal", "vertical", "invert", "enable io port"],
+            )
+            width = acq.start_chain(console, stream, timeout=5.0, settle=2.0)
+            check_true(
+                f"acquire replies with a period ({width.pusher_pulse_width} samples) "
+                f"that passes its own SHA-256, and a record of {width.num_samples}",
+                width.num_samples == fake.num_samples,
+            )
+            check_true(
+                "and the open-ended acquisition it starts is stopped and cleared away",
+                console.acquiring and not console.running and stream.poll(0.1) is None,
+            )
+
+            batches: list[acq.Batch] = []
+            end = acq.run_frame(
+                console, stream, acq.FrameRequest(frame_length=250, offset_bins=20000),
+                timeout=10.0, on_batch=batches.append,
+            )
+            check_true(
+                f"one frame's {len(batches)} batches all arrive, then finished on its own "
+                "topic",
+                end.is_finished and end.topic == acq.TOPIC_STATUS
+                and sum(batch.scans for batch in batches) == 250,
+            )
+            check_true(
+                "and the frame was stopped, so the next one may start",
+                not console.running and not fake.died and fake.ignored_frames == 0,
+            )
+            console.stop_acquire()
+            check_true(
+                "and stop acquire is followed by finished acquire",
+                stream.wait_for_status(
+                    acq.FINISHED_ACQUIRE, timeout=10.0
+                ).is_finished_acquire,
+            )
 
     section("hardware")
     skip("a MIPS box answers GVER", "no serial hardware in a self-check; lab record, task 04")

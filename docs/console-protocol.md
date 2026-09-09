@@ -16,10 +16,31 @@ by the fork this project runs, and are listed under Configuration.
 | Socket | Address | Pattern | Carries |
 |---|---|---|---|
 | Command | `tcp://*:5555` | ROUTER; client uses REQ or DEALER | Commands as multipart string frames; one reply frame, or two for `acquire` and `tof width` |
-| Data | `tcp://*:5554` | PUB; client uses SUB on topic `data` | Two frames per message: the topic string, then a Snappy-compressed protobuf `Message` |
+| Data | `tcp://*:5554` | PUB; client uses SUB | Two frames per message: a topic string, then the payload |
 
 The command loop polls with a 1 ms timeout and handles one request at a time. Every reply to a
 setting command is the string `ack`.
+
+The data socket carries **two topics**, and a client needs both:
+
+| Topic | Payload | Published by |
+|---|---|---|
+| `data` | A Snappy-compressed protobuf `Message`, one per batch of `NotifyOnScansCount` scans | `ZmqAcquiredDataSubscriber` |
+| `status` | The plain, uncompressed string `finished` or `finished acquire` | `AcquirePublisher` |
+
+Subscribing to `data` alone is the mistake to avoid: it is the topic named in the console's own
+test client, and a client that subscribes to it and waits for `finished` waits forever. ZeroMQ
+matches a subscription by prefix, so subscribing to the empty string takes both.
+
+Two further properties of this socket follow from where it is created. The console binds
+`tcp://*:5554` inside the handler for the **first `acquire`**, not at startup, so nothing is
+listening on it until a client has acquired once; a subscriber that connects before then is
+fine, because ZeroMQ reconnects on its own. It is then kept: the console caches the socket by
+address and the acquisition chain holds a reference to it, so a later `acquire` reuses the same
+socket rather than rebinding, and a subscriber survives the whole session. And PUB drops what it
+cannot deliver, so a subscription that has not yet reached the console loses the first messages
+published after it: subscribe well before `acquire`, and treat a missing first batch as normal
+rather than as a fault.
 
 ## Command set
 
@@ -40,12 +61,64 @@ Frames are plain strings; a command with an argument is two frames.
 | `acquire frame`, `<snappy(UimfRequestMessage)>` | Starts acquiring one frame into the named UIMF file; returns immediately | `ack` |
 | `stop`, `acquire` | Stops the running acquisition and tears down the acquisition chain | `ack` |
 | `stop`, `<anything else>` | Stops the running frame, keeps the chain for the next `acquire frame` | `ack` |
-| `trig class`, `trig source`, `mode`, `config digitizer`, `post samples`, `pre samples`, `setup array`, `reset timestamps` | Accepted and ignored (TODO in the source); `setup array` replies `ack` | none |
+| `setup array` | Accepted and ignored (TODO in the source) | `ack` |
+| `trig class`, `trig source`, `mode`, `config digitizer`, `post samples`, `pre samples`, `reset timestamps` | Accepted and ignored (TODO in the source) | none |
 
 † Hardcoded upstream, read from `config.txt` by the fork. See Configuration.
 
-The order the console's own test client uses: `init`, `horizontal`, `vertical`, `invert`, then
-`acquire`; then per frame `acquire frame`; then `stop acquire`.
+**Some requests answer nothing at all**, and a client that waits on one of them waits forever:
+each of the seven ignored commands in the last row above, and `stop` sent with anything other
+than exactly two frames. Everything else in the table replies, and `acquire` and `tof width`
+reply twice.
+
+## The order commands have to come in
+
+The console's own test client shows `init`, `horizontal`, `vertical`, `invert`, then `acquire`,
+then `stop acquire`. It never asks for a frame, so it does not show the part that matters, and
+the part that matters is strict. Every rule below is read off the source rather than provoked on
+an instrument, and every one of them has the same shape: the console does not refuse a command
+sent out of order, it either ignores it or dies.
+
+```
+init, horizontal, vertical, invert, enable io port
+acquire                     the chain is built; an open-ended acquisition starts
+stop frame                  that acquisition ends, the chain stays
+    acquire frame <request> one frame
+    (wait for finished)
+    stop frame              ends the frame, or joins the thread that has ended
+stop acquire                the chain is torn down
+```
+
+**One acquisition at a time, and each one is ended with a `stop` before the next begins.** The
+console runs an acquisition on a thread it holds in a `std::unique_ptr`, and `stop` in either
+form is the only thing that joins that thread. Starting another acquisition replaces the
+pointer, which destroys a thread that has not been joined, which in C++ calls `std::terminate`.
+The consequences, exactly:
+
+| Sent | While | The console does |
+|---|---|---|
+| `acquire frame` | no `acquire` since startup | reads through a null pointer, and dies |
+| `acquire frame` | an acquisition is still running | replies `ack`, logs a warning, and starts nothing |
+| `acquire frame` | the previous acquisition ended and was not stopped | destroys a joinable thread, and dies |
+| `acquire` | any acquisition has run and not been stopped | the same, and dies |
+| `stop`, anything | nothing has ever acquired | replies `ack`, harmlessly |
+
+**`acquire` starts an acquisition, not just a chain.** It begins an open-ended one:
+`frame_length` is the largest 64-bit value and the file name is empty, so it streams and
+publishes until it is stopped. This is what binds the data socket and what measures the pusher
+period. Until it is stopped with `stop frame`, an `acquire frame` is the second row of the table
+above: acknowledged, logged, and ignored.
+
+**Every acquisition ends with exactly one `finished`.** The open-ended one publishes it when it
+is stopped; a frame publishes it when its `frame_length` scans are in, or when it is stopped
+early. So a client that acquires and then stops the open-ended acquisition sees a `finished`
+before the first frame has been asked for, and has to expect it. A `stop frame` sent after a
+frame's own `finished` has arrived publishes nothing further; it is sent for the join alone.
+
+A `stop acquire` that cuts a running acquisition short publishes both messages, and their order
+is not determined: the acquisition thread publishes its `finished` as its last act while the
+command thread publishes `finished acquire`, and nothing sequences the two. A client waiting for
+one should ignore the other rather than assume which arrives first.
 
 ## Messages (`message.proto`, proto3)
 
@@ -65,10 +138,18 @@ The order the console's own test client uses: `init`, `horizontal`, `vertical`, 
 `TofWidthMessage`: `pusher_pulse_width` (measured samples between triggers) and `num_samples`
 (record size plus post-trigger samples).
 
-`Message`, published on the data socket per batch of `NotifyOnScansCount` scans: `mz` (a dense
+`Message`, published on topic `data` per batch of `NotifyOnScansCount` scans: `mz` (a dense
 summed spectrum over the batch, one entry per sample in the record), `tic` (one per scan) and
-`time_stamps` (one per scan, in samples of the digitizer clock). After a frame completes the
-console also publishes the plain string `finished`; after `stop acquire`, `finished acquire`.
+`time_stamps` (one per scan, in samples of the digitizer clock). One `Message` is published per
+batch in both modes, whether or not the request named a file.
+
+On topic `status`, the plain string `finished` when a frame's scans are all in, and
+`finished acquire` after `stop acquire`. What `finished` means is narrower than it looks. The
+acquisition thread publishes it once it has counted `frame_length` scans off the digitizer and
+stopped the card, and the subscriber that writes them to the UIMF file runs on its own thread
+behind a queue, so `finished` says the digitizer is done and not that the file is complete. A
+client that needs the rows themselves has to wait on the file. `finished acquire` is the
+stronger of the two: `stop acquire` waits for every subscriber to drain before publishing it.
 
 ## What the console does with the digitizer
 
