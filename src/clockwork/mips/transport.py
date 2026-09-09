@@ -150,6 +150,8 @@ class FakeBox:
         self.mode = "LOC"
         self.status = "IDLE"
         self.error = 0
+        self.ext_freq = 0
+        """The declared external clock frequency, 0 until `SEXTFREQ` says otherwise."""
         self.replies_enabled = True
         self.loaded: _table.Compiled | None = None
         self.dropped_bytes = 0
@@ -275,6 +277,24 @@ class FakeBox:
 
     def _do_gtblfrq(self, _: str) -> None:
         self._value("42000000")
+
+    def _do_sextfreq(self, argument: str) -> None:
+        """§4: declare the external clock's frequency. Stored, never executed on.
+
+        The firmware backs this with a plain integer variable, so it takes any
+        int and range-checks nothing; it changes what `TBLCHK` and the idle-task
+        mode can work out and changes nothing about how a table runs. A host
+        that sets it and a host that does not both get the same sequence.
+        """
+        try:
+            self.ext_freq = int(argument)
+        except ValueError:
+            self._nak(2)
+            return
+        self._ack()
+
+    def _do_gextfreq(self, _: str) -> None:
+        self._value(str(self.ext_freq))
 
     def _do_stblclk(self, argument: str) -> None:
         if self.mode != "LOC":

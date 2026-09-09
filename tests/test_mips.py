@@ -309,6 +309,24 @@ def test_the_box_identifies_itself() -> None:
     assert box.box_name() == "SLIM3-box2"
 
 
+def test_the_external_clock_frequency_round_trips() -> None:
+    """§4: `SEXTFREQ` declares the rate of the clock on Q; `GEXTFREQ` reads it back.
+
+    It exists so that `TBLCHK` and the idle-task mode have a number to reason
+    with, and a box that never hears it still runs the same table at the same
+    speed. A rig that clocks a box from a function generator sets it because
+    the timing check is worth having, not because the sequence needs it.
+    """
+    fake = FakeBox()
+    box = Box(transport=fake)
+    box.command("SEXTFREQ,7752")
+    assert fake.ext_freq == 7752
+    assert box.command("GEXTFREQ", value=True) == "7752"
+    with pytest.raises(BoxRejected) as caught:
+        box.command("SEXTFREQ,fast")
+    assert caught.value.code == 2
+
+
 def test_a_rejection_carries_the_reason_the_box_gave() -> None:
     box = Box(transport=FakeBox())
     with pytest.raises(BoxRejected) as caught:
