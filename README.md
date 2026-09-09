@@ -19,6 +19,9 @@ acquisition client and the window do not yet. Documents:
   table, times it, and reports back, derived from the public firmware.
 - [`docs/console-protocol.md`](docs/console-protocol.md): the ZeroMQ command set of PNNL's
   AqMD3 acquisition console, derived from its source.
+- [`docs/method-file-format.md`](docs/method-file-format.md): the flat TOML method a trainee
+  loads, and the stamp that traces an acquisition back to it.
+- [`docs/glossary.md`](docs/glossary.md): what the terms mean.
 
 ## Running from source
 

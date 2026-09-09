@@ -10,5 +10,7 @@
 - [**Method file and provenance**](method-file-format.md). The flat TOML document a trainee loads
   to run an experiment, and the stamp that traces every acquisition back to the method that
   produced it.
+- [**Glossary**](glossary.md). What the terms in these documents, in the package and in a method
+  file mean, from SLIM and the pusher pulse to `STBLDAT`, zero suppress and the provenance stamp.
 
 The top-level [`README.md`](../README.md) covers running from source.
