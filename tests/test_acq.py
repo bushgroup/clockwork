@@ -17,6 +17,7 @@ import time
 import pytest
 
 from clockwork.acq import (
+    ERROR_PREFIX,
     FINISHED,
     FINISHED_ACQUIRE,
     GATE_GRANULARITY_SAMPLES,
@@ -24,11 +25,13 @@ from clockwork.acq import (
     SECONDS_PER_SAMPLE_2GSPS,
     Batch,
     Console,
+    ConsoleAcquisitionError,
     ConsoleInfo,
     ConsoleProtocolError,
     ConsoleStateError,
     ConsoleTimeout,
     DataStream,
+    EmptyFrameError,
     FakeConsole,
     FrameRequest,
     Status,
@@ -514,15 +517,23 @@ def test_the_status_topic_is_not_the_data_topic(
     assert {event.topic for event in seen if isinstance(event, Status)} == {"status"}
 
 
-def test_a_frames_batches_all_arrive_before_the_finished_that_ends_it(
+def test_messages_reach_a_caller_in_the_order_they_were_published(
     client: Console, stream: DataStream
 ) -> None:
     """Why both topics come off one socket.
 
-    Two sockets would be two connections with no ordering between them, and a
-    frame end could overtake the batches it ends. One subscription on the
-    empty prefix cannot, which is what lets `wait_for_status` be given the
-    batches to draw as they arrive.
+    Two sockets would be two connections with no ordering between them, so a
+    frame end could be read before batches that were published before it. One
+    subscription on the empty prefix cannot do that, which is what lets
+    `wait_for_status` hand batches to a caller as they arrive.
+
+    What this does not show, because the stand-in publishes a frame's batches
+    from inside the handler that started it, is that a frame's batches are
+    published before its end. On the real console they frequently are not: the
+    batches go out from a subscriber thread and `finished` from the
+    acquisition thread, and a fully occupied frame delivered none of its
+    batches before its own end (lab record, task 20). Ordering on the wire is
+    what holds; ordering in time is not.
     """
     client.configure(offset_v=0.251)
     start_chain(client, stream, timeout=5.0, settle=2.0)
@@ -543,3 +554,149 @@ def test_stopping_a_frame_keeps_the_chain(
     assert fake.chain and not fake.running and not fake.unjoined
     assert client.acquiring and not client.running
     assert ("stop", "frame") in fake.commands
+
+
+# --------------------------------------------------------------------------
+# A frame that failed
+# --------------------------------------------------------------------------
+#
+# The console ends a frame the same way whether it acquired every scan or
+# died on its first fetch, so none of the below is visible in the messages
+# themselves. Each is a way the client tells them apart (lab record, task 20).
+
+
+def opened(client: Console, stream: DataStream) -> None:
+    client.configure(offset_v=0.251)
+    start_chain(client, stream, timeout=5.0, settle=2.0)
+
+
+def test_an_error_status_is_told_apart_from_an_ordinary_one() -> None:
+    error = Status(text=f"{ERROR_PREFIX} Invalid value (1000) for parameter")
+    assert error.is_error
+    assert error.error_text == "Invalid value (1000) for parameter"
+    for text in (FINISHED, FINISHED_ACQUIRE, "errors were had"):
+        assert not Status(text=text).is_error
+        assert Status(text=text).error_text == ""
+
+
+def test_a_frame_that_published_nothing_is_not_a_success(
+    client: Console, stream: DataStream, fake: FakeConsole
+) -> None:
+    """The whole point of the exercise.
+
+    A stock console logs an acquisition that failed and then publishes the
+    same `finished` a good frame ends with, so this is the only sign there is.
+    """
+    opened(client, stream)
+    fake.frame_batches = 0
+    with pytest.raises(EmptyFrameError) as raised:
+        run_frame(client, stream, FrameRequest(frame_length=250), timeout=5.0, settle=0.2)
+    assert "250" in str(raised.value)
+    # And it was still stopped, so the next frame may start.
+    assert not client.running and not fake.unjoined and not fake.died
+
+
+def test_and_a_caller_that_wants_an_empty_frame_may_have_one(
+    client: Console, stream: DataStream, fake: FakeConsole
+) -> None:
+    opened(client, stream)
+    fake.frame_batches = 0
+    end = run_frame(client, stream, FrameRequest(frame_length=250), timeout=5.0,
+                    allow_empty=True)
+    assert end.is_finished
+
+
+def test_a_frame_shorter_than_it_asked_for_is_not_treated_as_a_failure(
+    client: Console, stream: DataStream, fake: FakeConsole
+) -> None:
+    """Deliberately not an error, because the count is not trustworthy.
+
+    The data socket drops messages when a client falls behind, so a scan
+    count short of `frame_length` says as much about the client as about the
+    acquisition. Nothing at all is the signal; too little is not.
+    """
+    opened(client, stream)
+    fake.frame_batches = 1
+    batches: list[Batch] = []
+    end = run_frame(client, stream, FrameRequest(frame_length=250), timeout=5.0,
+                    on_batch=batches.append)
+    assert end.is_finished
+    assert sum(batch.scans for batch in batches) == 100
+
+
+def test_an_error_the_console_publishes_reaches_the_caller(
+    client: Console, stream: DataStream, fake: FakeConsole
+) -> None:
+    opened(client, stream)
+    fake.frame_error = ("Error Code: -1074135024 Error Message: Invalid value (1000) for "
+                        "parameter nbrElementsToFetch: Must be strict positive multiple of 16.")
+    with pytest.raises(ConsoleAcquisitionError) as raised:
+        run_frame(client, stream, FrameRequest(frame_length=250), timeout=5.0)
+    assert "nbrElementsToFetch" in str(raised.value)
+    assert [status.error_text for status in stream.errors] == [fake.frame_error]
+
+
+def test_the_consoles_own_words_beat_an_inference_from_no_scans(
+    client: Console, stream: DataStream, fake: FakeConsole
+) -> None:
+    """A frame that failed and said so raises what it said, not what we guessed."""
+    opened(client, stream)
+    fake.frame_batches = 0
+    fake.frame_error = "timeout in acquisition"
+    with pytest.raises(ConsoleAcquisitionError):
+        run_frame(client, stream, FrameRequest(frame_length=250), timeout=5.0, settle=0.2)
+
+
+def test_a_frame_that_failed_does_not_leave_its_finished_for_the_next_one(
+    client: Console, stream: DataStream, fake: FakeConsole
+) -> None:
+    """Why an error is collected and raised after the wait rather than during it.
+
+    The console publishes its error and then the frame's ordinary `finished`.
+    Raising the moment the error arrives would leave that `finished` on the
+    socket for the next frame's wait to read as its own, and the next frame
+    would appear to end before it had begun.
+    """
+    opened(client, stream)
+    fake.frame_error = "timeout in acquisition"
+    with pytest.raises(ConsoleAcquisitionError):
+        run_frame(client, stream, FrameRequest(frame_length=100, frame_number=1), timeout=5.0)
+
+    fake.frame_error = None
+    batches: list[Batch] = []
+    end = run_frame(client, stream, FrameRequest(frame_length=100, frame_number=2),
+                    timeout=5.0, on_batch=batches.append)
+    assert end.is_finished
+    # Its own batches arrived before its own end, so the end it saw was not
+    # the one left over from the frame before.
+    assert sum(batch.scans for batch in batches) == 100
+    assert fake.frames[-1].frame_number == 2
+
+
+def test_an_error_with_no_finished_after_it_raises_the_error_not_the_timeout(
+    client: Console, stream: DataStream, fake: FakeConsole
+) -> None:
+    """`start()` itself failing publishes an error and never a `finished`.
+
+    A timeout would be true and useless; the console has already said why.
+    """
+    opened(client, stream)
+    fake.frame_error = "Error processing UIMF request: no such file"
+    client.acquire_frame(FrameRequest(frame_length=100))
+    with pytest.raises(ConsoleAcquisitionError) as raised:
+        stream.wait_for_status("nothing publishes this", timeout=2.0)
+    assert "never arrived" in str(raised.value)
+    assert "no such file" in str(raised.value)
+    client.stop_frame()
+
+
+def test_an_error_may_be_collected_without_raising(
+    client: Console, stream: DataStream, fake: FakeConsole
+) -> None:
+    opened(client, stream)
+    fake.frame_error = "timeout in acquisition"
+    client.acquire_frame(FrameRequest(frame_length=100))
+    end = stream.wait_for_status(FINISHED, timeout=5.0, raise_on_error=False)
+    client.stop_frame()
+    assert end.is_finished
+    assert [status.error_text for status in stream.errors] == ["timeout in acquisition"]

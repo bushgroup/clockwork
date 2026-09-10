@@ -28,6 +28,13 @@ It also binds its data socket at startup, where the console binds at its first
 against both; a client that depends on the socket being absent works against
 neither.
 
+It models two ways for a frame to fail as well as the way for one to
+succeed, because the two failures are indistinguishable from success in the
+console's own messages and a client that cannot tell them apart is a client
+that reports a dead acquisition as a good one: `frame_batches` cuts a frame
+short or empties it, and `frame_error` publishes the error a forked console
+sends and a stock one only logs.
+
 What it does model, on purpose, is the whole of the ordering rule, because
 that is a set of hazards rather than a set of details. A frame asked for
 before any `acquire` reads through a null pointer; a frame or an `acquire`
@@ -55,6 +62,7 @@ import zmq
 
 from .wire import (
     ACK,
+    ERROR_PREFIX,
     FINISHED,
     FINISHED_ACQUIRE,
     SILENT_COMMANDS,
@@ -171,6 +179,23 @@ class FakeConsole:
 
         self.ignored_frames = 0
         """Frames acknowledged and dropped because one was already running."""
+
+        self.frame_batches: int | None = None
+        """How many batches a frame publishes, or None for as many as it needs.
+
+        A number smaller than the frame calls for is an acquisition that
+        stopped early, and 0 is one that produced nothing at all. Both end
+        with the same `finished` a whole frame ends with, which is exactly
+        what makes them worth simulating (lab record, task 20).
+        """
+
+        self.frame_error: str | None = None
+        """Published as `error <this>` before a frame's `finished`, if set.
+
+        What a forked console does when its acquisition thread catches
+        something. A stock console logs the same thing and publishes nothing,
+        which is `frame_batches` with no `frame_error` beside it.
+        """
 
         self.died = False
         """Set when the client did something the real console does not survive."""
@@ -446,13 +471,20 @@ class FakeConsole:
     def _run_frame(self, request: FrameRequest) -> None:
         """Publish the frame's batches and its end, with no time passing."""
         remaining = int(request.frame_length)
-        while remaining > 0:
+        published = 0
+        while remaining > 0 and (self.frame_batches is None or published < self.frame_batches):
             scans = min(remaining, self.notify_on_scans_count)
             self._publish(TOPIC_DATA, encode_batch(self._batch(scans)))
             remaining -= scans
+            published += 1
         # The frame's scans are all in, so its thread ends and says so; the
-        # handle stays unjoined until a `stop` arrives.
+        # handle stays unjoined until a `stop` arrives. An acquisition that
+        # failed says the same thing, after saying what went wrong, which is
+        # the ordering the console publishes them in.
         self.running = False
+        if self.frame_error is not None:
+            text = f"{ERROR_PREFIX} {self.frame_error}"
+            self._publish(TOPIC_STATUS, text.encode("utf-8"))
         self._publish(TOPIC_STATUS, FINISHED.encode("ascii"))
 
     def _batch(self, scans: int) -> Batch:

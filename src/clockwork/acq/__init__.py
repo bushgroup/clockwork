@@ -54,6 +54,7 @@ from __future__ import annotations
 from .console import (
     ACQUIRE_TIMEOUT_S,
     DEFAULT_TIMEOUT_S,
+    STOP_ACQUIRE_TIMEOUT_S,
     Console,
     ConsoleStateError,
     ConsoleTimeout,
@@ -65,7 +66,7 @@ from .fake import (
     DEFAULT_REARM_SAMPLES,
     FakeConsole,
 )
-from .session import run_frame, start_chain
+from .session import EMPTY_SETTLE_S, run_frame, start_chain
 from .stream import (
     QUEUE_MESSAGES,
     DataStream,
@@ -75,6 +76,7 @@ from .wire import (
     ACK,
     COMMAND_PORT,
     DATA_PORT,
+    ERROR_PREFIX,
     FINISHED,
     FINISHED_ACQUIRE,
     FRAME_TYPES,
@@ -86,8 +88,10 @@ from .wire import (
     TOPIC_STATUS,
     AcqError,
     Batch,
+    ConsoleAcquisitionError,
     ConsoleInfo,
     ConsoleProtocolError,
+    EmptyFrameError,
     FrameRequest,
     Status,
     TofWidth,
@@ -108,6 +112,7 @@ __all__ = [
     "Batch",
     "COMMAND_PORT",
     "Console",
+    "ConsoleAcquisitionError",
     "ConsoleInfo",
     "ConsoleProtocolError",
     "ConsoleStateError",
@@ -119,6 +124,9 @@ __all__ = [
     "DEFAULT_REARM_SAMPLES",
     "DEFAULT_TIMEOUT_S",
     "DataStream",
+    "EMPTY_SETTLE_S",
+    "ERROR_PREFIX",
+    "EmptyFrameError",
     "FINISHED",
     "FINISHED_ACQUIRE",
     "FRAME_TYPES",
@@ -129,6 +137,7 @@ __all__ = [
     "SCAN_NUM_SMALLINT_MAX",
     "SECONDS_PER_SAMPLE_2GSPS",
     "SILENT_COMMANDS",
+    "STOP_ACQUIRE_TIMEOUT_S",
     "Status",
     "StreamTimeout",
     "TOPIC_DATA",

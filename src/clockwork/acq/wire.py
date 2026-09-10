@@ -55,6 +55,20 @@ FINISHED = "finished"
 FINISHED_ACQUIRE = "finished acquire"
 """The acquisition chain is torn down, every subscriber having drained."""
 
+ERROR_PREFIX = "error"
+"""What a status message that reports a failed acquisition begins with.
+
+The rest of the line is whatever the console caught, its newlines flattened
+to spaces. It is followed by the frame's own `finished`, so a failed frame
+ends the same way a successful one does and the error is the only thing that
+says otherwise.
+
+A stock console publishes this never: it catches an acquisition error, logs
+it, and ends the frame with the ordinary `finished`, which is why a frame
+that carried nothing has to be treated as a failure in its own right (lab
+record, task 20).
+"""
+
 SILENT_COMMANDS = frozenset(
     {
         "trig class",
@@ -100,6 +114,27 @@ class AcqError(Exception):
 
 class ConsoleProtocolError(AcqError):
     """The console said something the protocol document does not allow."""
+
+
+class ConsoleAcquisitionError(AcqError):
+    """The console published an error while acquiring.
+
+    Its own words, off the status topic. The frame it belongs to ended,
+    early or with nothing in it, and whatever the console had written to the
+    file before it failed is still there.
+    """
+
+
+class EmptyFrameError(AcqError):
+    """A frame ended having published no scans at all.
+
+    Not the same as a frame with no ions in it: the console publishes a batch
+    per `NotifyOnScansCount` scans whether or not anything crossed the
+    zero-suppress threshold, so a frame that produces no batches produced no
+    scans. On a stock console that is the only visible sign of an acquisition
+    that failed, and until the fetch fix it was the usual one (lab record,
+    task 20).
+    """
 
 
 # --------------------------------------------------------------------------
@@ -308,6 +343,16 @@ class Status:
     @property
     def is_finished_acquire(self) -> bool:
         return self.text == FINISHED_ACQUIRE
+
+    @property
+    def is_error(self) -> bool:
+        """Whether this reports a failed acquisition rather than an ordinary end."""
+        return self.text == ERROR_PREFIX or self.text.startswith(ERROR_PREFIX + " ")
+
+    @property
+    def error_text(self) -> str:
+        """What the console said, without the prefix. Empty if this is not an error."""
+        return self.text[len(ERROR_PREFIX):].strip() if self.is_error else ""
 
 
 @dataclass(slots=True)
@@ -535,6 +580,7 @@ __all__ = [
     "ACK",
     "COMMAND_PORT",
     "DATA_PORT",
+    "ERROR_PREFIX",
     "FINISHED",
     "FINISHED_ACQUIRE",
     "FRAME_TYPES",
@@ -546,8 +592,10 @@ __all__ = [
     "TOPIC_STATUS",
     "AcqError",
     "Batch",
+    "ConsoleAcquisitionError",
     "ConsoleInfo",
     "ConsoleProtocolError",
+    "EmptyFrameError",
     "FrameRequest",
     "Status",
     "TofWidth",

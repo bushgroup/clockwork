@@ -53,6 +53,7 @@ from .wire import (
     TOPIC_DATA,
     AcqError,
     Batch,
+    ConsoleAcquisitionError,
     Status,
     decode_batch,
 )
@@ -101,6 +102,10 @@ class DataStream:
         """Every status message, in the order it arrived, kept because there
         are few of them and the sequence is the record of what the console
         did."""
+
+        self.errors: list[Status] = []
+        """Just the ones that reported a failure, for a caller that wants the
+        session's history rather than the frame that raised."""
 
         self._context = context if context is not None else zmq.Context.instance()
         socket = self._context.socket(zmq.SUB)
@@ -152,6 +157,8 @@ class DataStream:
             topic=topic,
         )
         self.statuses.append(status)
+        if status.is_error:
+            self.errors.append(status)
         return status
 
     def drain(self, timeout: float = 0.0) -> list[Batch | Status]:
@@ -178,32 +185,66 @@ class DataStream:
         *,
         timeout: float,
         on_batch: Callable[[Batch], None] | None = None,
+        raise_on_error: bool = True,
     ) -> Status:
         """Wait for one status message, handing batches to `on_batch` meanwhile.
 
         Because both topics come off one socket in the order they were
-        published, every batch of the frame reaches `on_batch` before the
-        `finished` that ends it. That is the whole reason for the single
-        subscription.
+        published, every batch the console has already put on the wire reaches
+        `on_batch` before a status message that followed it. That is the whole
+        reason for the single subscription.
+
+        It is emphatically not a guarantee that a frame's batches arrive
+        before that frame's `finished`. The console hands batches to a
+        subscriber that publishes them from its own thread on a 10 ms poll and
+        publishes `finished` from the acquisition thread directly, and on the
+        bench a fully occupied 5000 scan frame delivered none of its eleven
+        batches before its own end, the last of them arriving nine seconds
+        after it (lab record, task 20). A caller drawing a live trace sees the
+        frame it is drawing end before it has drawn much of it, and a caller
+        counting scans has to keep listening afterwards.
 
         `timeout` is the whole wait, not the gap between messages: a frame
         either ends inside it or something is wrong. Raises `StreamTimeout`
         when it does not, which is the failure a caller has to be ready for on
         every frame.
+
+        An error published while waiting does not cut the wait short, because
+        the console sends its `finished` afterwards and leaving that unread
+        would hand it to whoever waits next. It is collected, the wait runs to
+        its end, and `ConsoleAcquisitionError` is raised then -- also if the
+        wait times out instead, since an error already seen says more about
+        why than a timeout does. Pass `raise_on_error=False` to collect
+        without raising, which is for a caller doing its own recovery.
         """
         deadline = time.monotonic() + timeout
+        errors: list[Status] = []
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                if errors and raise_on_error:
+                    raise _acquisition_error(errors, f"and {text!r} never arrived")
                 raise StreamTimeout(
                     f"{text!r} did not arrive on {self.endpoint} within {timeout:g} s "
                     f"({self.batches} batches, {self.scans} scans seen)"
                 )
             event = self.poll(min(remaining, 0.1))
+            if isinstance(event, Status) and event.is_error:
+                errors.append(event)
+                continue
             if isinstance(event, Status) and event.text == text:
+                if errors and raise_on_error:
+                    raise _acquisition_error(errors, f"before {text!r}")
                 return event
             if isinstance(event, Batch) and on_batch is not None:
                 on_batch(event)
+
+
+def _acquisition_error(errors: list[Status], when: str) -> ConsoleAcquisitionError:
+    """One exception for however many errors the console published in one wait."""
+    said = "; ".join(status.error_text for status in errors)
+    count = "an error" if len(errors) == 1 else f"{len(errors)} errors"
+    return ConsoleAcquisitionError(f"the console reported {count} {when}: {said}")
 
 
 __all__ = [

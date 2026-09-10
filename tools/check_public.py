@@ -8,8 +8,10 @@ What it covers today: the package imports, the version declarations agree, the t
 layers stay free of Qt, the module layout is complete, lab-directory resolution behaves, a
 method document round-trips through its phases, start sequence and repetition modes, the
 MIPS sender drives a simulated box through a table load, a TBLRPT round trip, arming and a
-rejection, and the console client drives a simulated console from `info` through a whole
-frame to `finished acquire`. Tasks add sections as they land code.
+rejection, the console client drives a simulated console from `info` through a whole
+frame to `finished acquire`, and a frame that published nothing and a frame the console
+reported an error on are both refused rather than reported as successes. Tasks add
+sections as they land code.
 
 Run:  uv run tools/check_public.py
 """
@@ -330,6 +332,29 @@ def main() -> int:
                 "and the frame was stopped, so the next one may start",
                 not console.running and not fake.died and fake.ignored_frames == 0,
             )
+
+            # A frame that acquired nothing ends with exactly the `finished` a
+            # whole frame ends with, so a client that takes that at face value
+            # reports a dead acquisition as a good one (lab record, task 20).
+            fake.frame_batches = 0
+            try:
+                acq.run_frame(console, stream, acq.FrameRequest(frame_length=250),
+                              timeout=10.0, settle=0.5)
+                check_true("a frame that published no scans is not called a success", False)
+            except acq.EmptyFrameError:
+                check_true("a frame that published no scans is not called a success",
+                           not console.running and not fake.died)
+            fake.frame_error = "Invalid value (1000) for parameter nbrElementsToFetch"
+            try:
+                acq.run_frame(console, stream, acq.FrameRequest(frame_length=250),
+                              timeout=10.0, settle=0.5)
+                check_true("and an error the console publishes is raised in its own words",
+                           False)
+            except acq.ConsoleAcquisitionError as exc:
+                check_true("and an error the console publishes is raised in its own words",
+                           "nbrElementsToFetch" in str(exc))
+            fake.frame_batches, fake.frame_error = None, None
+
             console.stop_acquire()
             check_true(
                 "and stop acquire is followed by finished acquire",

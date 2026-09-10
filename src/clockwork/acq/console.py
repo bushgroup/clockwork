@@ -73,6 +73,18 @@ measurement taking long: it is about what happens when no pulse arrives. The
 console waits, and this timeout is the client's only way out of that.
 """
 
+STOP_ACQUIRE_TIMEOUT_S = 60.0
+"""For `stop acquire`, which does not answer until every subscriber has drained.
+
+The one command whose reply waits on however much data the last frame
+produced. Measured at 11.2 s on the bench for a 5000 scan frame at 2 GS/s
+whose records were entirely unsuppressed, which is the largest a frame of that
+length can be, and the ordinary timeout is 10 s: this is a command that failed
+on the first fully occupied frame anyone ran through it (lab record, task 20).
+Sixty seconds is not a measurement, it is room, and it is bounded because the
+console's own publish of `finished acquire` gives up after thirty.
+"""
+
 
 class ConsoleTimeout(AcqError):
     """The console did not answer in time.
@@ -363,29 +375,45 @@ class Console:
         self._ack("acquire frame", request.encode())
         self.running = True
 
-    def stop_frame(self) -> None:
+    def stop_frame(self, *, timeout: float | None = None) -> None:
         """End the running acquisition and keep the chain for the next one.
 
         Sent between frames whether or not one is still running: after a frame
         has published its `finished` the console's thread has ended but has not
         been joined, and this is what joins it. An acquisition still running
         when this arrives ends here and publishes its own `finished`; one that
-        had already ended publishes nothing further.
+        had already ended publishes nothing further. It does not wait for the
+        subscribers, so it is as quick as any other command.
         """
-        self._ack("stop", "frame")
-        self.running = False
+        try:
+            self._ack("stop", "frame", timeout=timeout)
+        finally:
+            self.running = False
 
-    def stop_acquire(self) -> None:
+    def stop_acquire(self, *, timeout: float = STOP_ACQUIRE_TIMEOUT_S) -> None:
         """Stop and tear the acquisition chain down.
 
         Followed by `finished acquire` on the status topic once every
         subscriber has drained, which unlike `finished` does mean the writing
         is done. The next `acquire` builds a fresh chain and rebinds the data
         socket.
+
+        The draining happens before the reply, not after it, so this is the one
+        command that can take tens of seconds and it has its own timeout to
+        match.
+
+        Both stops clear their flags even when the reply never comes. The
+        command went out, and the console takes its requests one at a time off
+        a poll loop, so a stop that was sent is a stop that will be acted on:
+        the flags describe the console and not the reply. Leaving them set
+        would refuse every later acquisition on this object for a stop that had
+        in fact happened.
         """
-        self._ack("stop", "acquire")
-        self.acquiring = False
-        self.running = False
+        try:
+            self._ack("stop", "acquire", timeout=timeout)
+        finally:
+            self.acquiring = False
+            self.running = False
 
     # -- the sequence, in the order the console expects it ------------------
 
@@ -421,6 +449,7 @@ def _frame(part: str | bytes) -> bytes:
 __all__ = [
     "ACQUIRE_TIMEOUT_S",
     "DEFAULT_TIMEOUT_S",
+    "STOP_ACQUIRE_TIMEOUT_S",
     "Console",
     "ConsoleStateError",
     "ConsoleTimeout",
