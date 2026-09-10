@@ -28,6 +28,13 @@ It also binds its data socket at startup, where the console binds at its first
 against both; a client that depends on the socket being absent works against
 neither.
 
+**It writes `Frame_Scans`**, when a request names a file, the way the console
+does: rows appended to a file it did not create, one transaction per batch,
+`synchronous = 0`, and no other table touched. That is what lets the whole of
+task 06's two-phase protocol and its fold run with no hardware, and what makes
+the self-check able to say that a file clockwork created, a console filled and
+mainspring read holds what the acquisition put in it.
+
 It models two ways for a frame to fail as well as the way for one to
 succeed, because the two failures are indistinguishable from success in the
 console's own messages and a client that cannot tell them apart is a client
@@ -54,11 +61,13 @@ open until stopped. Ordering is right, volume is not.
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 import time
 
 import numpy as np
 import zmq
+from mainspring.uimf import encode_intensities
 
 from .wire import (
     ACK,
@@ -89,6 +98,14 @@ DEFAULT_REARM_SAMPLES = 256
 DEFAULT_NOTIFY_ON_SCANS_COUNT = 100
 """The console's own default is 500; this keeps a short frame to a few batches."""
 
+DEFAULT_SCAN_PERIOD = 16
+"""How often the invented per-push spectrum repeats, in scans.
+
+A divisor of any sensible `scans`, so that both repetition modes fold to exactly
+the same answer; see `FakeConsole._scan_spectrum`. One scan in every period
+stores no row at all.
+"""
+
 
 class FakeConsole:
     """A console stand-in on a loopback port.
@@ -116,6 +133,7 @@ class FakeConsole:
         post_trigger_samples: int = DEFAULT_POST_TRIGGER_SAMPLES,
         rearm_samples: int = DEFAULT_REARM_SAMPLES,
         notify_on_scans_count: int = DEFAULT_NOTIFY_ON_SCANS_COUNT,
+        scan_period: int = DEFAULT_SCAN_PERIOD,
         open_batches: int = 2,
         subscriber_wait_s: float = 1.0,
         context: zmq.Context | None = None,
@@ -133,6 +151,7 @@ class FakeConsole:
         self.branch = branch
         self.instruments = instruments
         self.notify_on_scans_count = notify_on_scans_count
+        self.scan_period = int(scan_period)
         self.open_batches = open_batches
         """Batches to publish for the open-ended acquisition before going quiet."""
 
@@ -489,8 +508,18 @@ class FakeConsole:
         """Publish the frame's batches and its end, with no time passing."""
         remaining = int(request.frame_length)
         published = 0
+        write_error: str | None = None
         while remaining > 0 and (self.frame_batches is None or published < self.frame_batches):
             scans = min(remaining, self.notify_on_scans_count)
+            if request.file_name and write_error is None:
+                # Written before the batch is published, which is the one
+                # ordering a real console never manages: there the rows trail
+                # their own `finished` by seconds. A client that must not read a
+                # frame before it is finalised is held to that by the completion
+                # marker, not by this.
+                write_error = self._write_scans(
+                    request, int(request.frame_length) - remaining, scans
+                )
             self._publish(TOPIC_DATA, encode_batch(self._batch(scans)))
             remaining -= scans
             published += 1
@@ -499,10 +528,88 @@ class FakeConsole:
         # failed says the same thing, after saying what went wrong, which is
         # the ordering the console publishes them in.
         self.running = False
-        if self.frame_error is not None:
-            text = f"{ERROR_PREFIX} {self.frame_error}"
-            self._publish(TOPIC_STATUS, text.encode("utf-8"))
+        error = self.frame_error if self.frame_error is not None else write_error
+        if error is not None:
+            self._publish(TOPIC_STATUS, f"{ERROR_PREFIX} {error}".encode())
         self._publish(TOPIC_STATUS, FINISHED.encode("ascii"))
+
+    def _write_scans(
+        self, request: FrameRequest, first_scan: int, scans: int
+    ) -> str | None:
+        """Append one batch of `Frame_Scans` rows, as the console's writer would.
+
+        Opened read-write on a file this did not create, one transaction for the
+        batch, `synchronous = 0`, and nothing but `Frame_Scans` written: the
+        division of labour in `docs/console-protocol.md`.
+
+        Returns what went wrong, or None. A file that does not exist or has no
+        `Frame_Scans` table is not this stand-in's problem to fix: the console
+        cannot write it either, and what a client sees when that happens is a
+        frame that publishes its batches, then an error, then the same
+        `finished` a good frame ends with. Modelling that is the point -- a
+        client that names a file it never created is a real bug, and it should
+        surface here rather than on the instrument.
+        """
+        conn = sqlite3.connect(request.file_name, isolation_level=None)
+        try:
+            conn.execute("PRAGMA synchronous = 0")
+            rows = []
+            for offset in range(scans):
+                scan = first_scan + offset
+                bins, values = self._scan_spectrum(scan)
+                if not bins:
+                    # A push that crossed the threshold nowhere stores no row.
+                    # Real files are full of these -- a SLIMPHONY frame keeps a
+                    # third of its scans -- and a reader that assumed a row per
+                    # scan would pass every test written without them.
+                    continue
+                bin_index = np.asarray(bins, dtype=np.int64)
+                intensity = np.asarray(values, dtype=np.int32)
+                blob = encode_intensities(bin_index, intensity, np.dtype("<i4"))
+                peak = int(np.argmax(intensity))
+                rows.append((
+                    int(request.frame_number), scan, int(intensity.size),
+                    int(intensity[peak]), float(bin_index[peak]),
+                    int(intensity.sum()), blob,
+                ))
+            if not rows:
+                return None
+            conn.execute("BEGIN")
+            conn.executemany(
+                "INSERT INTO Frame_Scans (FrameNum, ScanNum, NonZeroCount, BPI,"
+                " BPI_MZ, TIC, Intensities) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            conn.execute("COMMIT")
+        except sqlite3.Error as exc:
+            return f"writing {request.file_name}: {exc}"
+        finally:
+            conn.close()
+        return None
+
+    def _scan_spectrum(self, scan: int) -> tuple[list[int], list[int]]:
+        """The invented spectrum of one push, which repeats every `scan_period`.
+
+        Periodic on purpose, and it is the fold that needs it so. A method frame
+        of A repetitions folds into a summed frame that must equal exactly A
+        times one repetition -- that is the acceptance test on the bench, a
+        pulser at a fixed amplitude summing to A times its per-push height -- and
+        it can only be checked exactly if every repetition sees the same
+        spectrum. Periodic in `ScanNum` rather than constant so that the fold's
+        two modes both have something to get wrong: `per_repetition` adds whole
+        frames, `single_frame` adds blocks of `Scans` inside one, and both land
+        on the same answer only if the period divides `Scans`.
+
+        `BPI_MZ` is written as the base peak's **bin index** rather than its m/z,
+        which is what the console's own source does with that column.
+        """
+        phase = scan % self.scan_period
+        if phase == self.scan_period - 1:
+            return [], []
+        base = self.post_trigger_samples
+        span = max(1, self.num_samples - base - 1)
+        bins = [base + (phase * span) // self.scan_period + step * 4 for step in range(3)]
+        return [b for b in bins if b < self.num_samples], [7, 31 + phase, 5][: len(bins)]
 
     def _batch(self, scans: int) -> Batch:
         """A summary shaped like the console's, with invented contents.
@@ -534,5 +641,6 @@ __all__ = [
     "DEFAULT_PERIOD_SAMPLES",
     "DEFAULT_POST_TRIGGER_SAMPLES",
     "DEFAULT_REARM_SAMPLES",
+    "DEFAULT_SCAN_PERIOD",
     "FakeConsole",
 ]

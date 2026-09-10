@@ -10,8 +10,10 @@ method document round-trips through its phases, start sequence and repetition mo
 MIPS sender drives a simulated box through a table load, a TBLRPT round trip, arming and a
 rejection, the console client drives a simulated console from `info` through a whole
 frame to `finished acquire`, and a frame that published nothing and a frame the console
-reported an error on are both refused rather than reported as successes. Tasks add
-sections as they land code.
+reported an error on are both refused rather than reported as successes, and a whole
+acquisition goes through the UIMF path -- clockwork creates the file, a simulated console
+appends its scans, mainspring reads them back, and the fold sums a method frame's
+repetitions to exactly A times one of them. Tasks add sections as they land code.
 
 Run:  uv run tools/check_public.py
 """
@@ -381,6 +383,74 @@ def main() -> int:
                 console.tof_width(timeout=10.0).pusher_pulse_width
                 == fake.pusher_period_samples,
             )
+
+    section("UIMF files")
+    # The whole of task 06's clockwork side without hardware: a file created with its
+    # schema and parameters, a console that appends `Frame_Scans` to it and nothing
+    # else, the two-phase completion marker, and the fold. The equality at the end is
+    # the bench's own acceptance test for the fold, run against a stand-in whose
+    # invented spectrum repeats so that it can be an equality (lab record, task 18).
+    import datetime as _dt
+    import tempfile
+
+    from mainspring.uimf import UimfFile
+
+    from clockwork import method as method_module
+
+    accumulations, scans = 3, 32
+    document = {
+        "schema_version": method_module.SCHEMA_VERSION,
+        "metadata": {"name": "self-check", "created": _dt.date(2026, 9, 10)},
+        "acquisition": {"frames": 1, "scans": scans, "accumulations": accumulations,
+                        "file_stem": "selfcheck"},
+        "boxes": [{"name": "a", "port": "COM1", "load": ["STBLDAT;..."]}],
+        "start": [["a", "TBLSTRT"]],
+    }
+    recipe = method_module.from_dict(document)
+    with tempfile.TemporaryDirectory() as directory:
+        with acq.FakeConsole() as fake:
+            geometry = acq.Geometry.from_tof_width(
+                fake.tof_width(), sample_rate_hz=2e9,
+                post_trigger_samples=fake.post_trigger_samples,
+            )
+            with acq.DataStream(fake.data_endpoint) as stream, \
+                    acq.Console(fake.command_endpoint) as console:
+                console.configure(offset_v=0.251)
+                acq.start_chain(console, stream, timeout=10.0, settle=2.0, quiet=0.1)
+                recording = acq.Recording.create(directory, recipe, geometry)
+                raw, summed = recording.raw_path, recording.summed_path
+                check_true("the file exists before the first frame is asked for",
+                           os.path.isfile(raw))
+                with recording:
+                    for repetition in range(1, accumulations + 1):
+                        with recording.frame(1, repetition) as request:
+                            acq.run_frame(console, stream, request, timeout=10.0)
+                        check_true(
+                            f"repetition {repetition} is marked complete once it ends",
+                            UimfFile(raw).frame_params(repetition).marked_complete,
+                        )
+                    rows = recording.fold(1)
+                console.stop_acquire()
+
+        check_true(f"the fold wrote a summed companion ({rows} rows)",
+                   os.path.isfile(summed) and rows > 0)
+        opened = UimfFile(summed)
+        parameters = opened.frame_params(1)
+        check_true("the companion is today's shape: one frame, Accumulations = A",
+                   opened.frame_numbers() == [1]
+                   and parameters.accumulations == accumulations
+                   and parameters.scans == scans)
+        check_true("the companion says which method frame it came from",
+                   parameters.method_frame == 1)
+        one = UimfFile(raw).read_frame(1)
+        total = opened.read_frame(1)
+        exact = all(
+            list(total.scan(n)[0]) == list(one.scan(n)[0])
+            and list(total.scan(n)[1]) == [v * accumulations for v in one.scan(n)[1]]
+            for n in range(scans)
+        )
+        check_true(f"and it is exactly {accumulations} times one repetition, bin for bin",
+                   exact and len(one) > 0)
 
     section("hardware")
     skip("a MIPS box answers GVER", "no serial hardware in a self-check; lab record, task 04")

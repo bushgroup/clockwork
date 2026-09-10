@@ -10,6 +10,7 @@ blocks, so nothing in it may run on the UI thread.
     console.py   the command socket: configure, acquire, ask for a frame, stop
     stream.py    the data socket: per-batch summaries and frame status
     session.py   the two sockets in step: open the chain, run one frame
+    uimf.py      the files: the two-phase frame parameters and the fold
     fake.py      a console simulated in this process, for tests and the
                  hardware-free self-check
 
@@ -64,6 +65,7 @@ from .fake import (
     DEFAULT_PERIOD_SAMPLES,
     DEFAULT_POST_TRIGGER_SAMPLES,
     DEFAULT_REARM_SAMPLES,
+    DEFAULT_SCAN_PERIOD,
     FakeConsole,
 )
 from .session import EMPTY_SETTLE_S, run_frame, start_chain
@@ -71,6 +73,18 @@ from .stream import (
     QUEUE_MESSAGES,
     DataStream,
     StreamTimeout,
+)
+from .uimf import (
+    PROVENANCE_KEYS,
+    RAW_SUFFIX,
+    SA220P_DETECTOR_BITS,
+    SUMMED_SUFFIX,
+    Geometry,
+    Recording,
+    fold_scans,
+    raw_path,
+    stamp_globals,
+    summed_path,
 )
 from .wire import (
     ACK,
@@ -124,6 +138,7 @@ __all__ = [
     "DEFAULT_PERIOD_SAMPLES",
     "DEFAULT_POST_TRIGGER_SAMPLES",
     "DEFAULT_REARM_SAMPLES",
+    "DEFAULT_SCAN_PERIOD",
     "DEFAULT_TIMEOUT_S",
     "DataStream",
     "EMPTY_SETTLE_S",
@@ -135,11 +150,17 @@ __all__ = [
     "FakeConsole",
     "FrameRequest",
     "GATE_GRANULARITY_SAMPLES",
+    "Geometry",
+    "PROVENANCE_KEYS",
     "QUEUE_MESSAGES",
+    "RAW_SUFFIX",
+    "Recording",
+    "SA220P_DETECTOR_BITS",
     "SCAN_NUM_SMALLINT_MAX",
     "SECONDS_PER_SAMPLE_2GSPS",
     "SILENT_COMMANDS",
     "STOP_ACQUIRE_TIMEOUT_S",
+    "SUMMED_SUFFIX",
     "Status",
     "StreamTimeout",
     "TOPIC_DATA",
@@ -151,8 +172,12 @@ __all__ = [
     "decompress",
     "encode_batch",
     "encode_tof_width",
+    "fold_scans",
+    "raw_path",
     "record_size_samples",
     "run_frame",
     "samples_at",
+    "stamp_globals",
     "start_chain",
+    "summed_path",
 ]

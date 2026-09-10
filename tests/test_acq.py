@@ -430,8 +430,31 @@ def test_start_chain_leaves_the_stream_holding_nothing(
 # --------------------------------------------------------------------------
 
 
+def empty_uimf(path) -> str:
+    """A file with only the table the console appends to, and no parameters.
+
+    Enough for a test about the protocol: the console creates nothing and writes
+    nothing but `Frame_Scans`, so this is the whole of what it needs from a file.
+    A file with its schema and its parameters, which is what a real acquisition
+    is handed, is `tests/test_acq_uimf.py`.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute(
+            "CREATE TABLE Frame_Scans ( FrameNum INTEGER NOT NULL, ScanNum SMALLINT"
+            " NOT NULL, NonZeroCount INTEGER NOT NULL, BPI INTEGER NOT NULL,"
+            " BPI_MZ DOUBLE NOT NULL, TIC INTEGER NOT NULL, Intensities BLOB)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return str(path)
+
+
 def test_one_frame_from_configure_to_finished(
-    client: Console, stream: DataStream, fake: FakeConsole
+    client: Console, stream: DataStream, fake: FakeConsole, tmp_path
 ) -> None:
     client.configure(offset_v=0.251)
     width = start_chain(client, stream, timeout=5.0, settle=2.0)
@@ -439,7 +462,9 @@ def test_one_frame_from_configure_to_finished(
     assert width.num_samples == fake.num_samples
     assert fake.chain
 
-    request = FrameRequest(frame_length=250, file_name="frame.uimf", frame_number=4,
+    request = FrameRequest(frame_length=250,
+                           file_name=empty_uimf(tmp_path / "frame.uimf"),
+                           frame_number=4,
                            nbr_accumulations=100, offset_bins=20000)
     batches: list[Batch] = []
     end = run_frame(client, stream, request, timeout=10.0, on_batch=batches.append)
@@ -474,7 +499,7 @@ def test_a_frame_that_writes_no_file_still_publishes(
 
 
 def test_repeated_frames_are_numbered_and_all_arrive(
-    client: Console, stream: DataStream, fake: FakeConsole
+    client: Console, stream: DataStream, fake: FakeConsole, tmp_path
 ) -> None:
     """The shape of a `per_repetition` method frame: one console frame each.
 
@@ -483,16 +508,32 @@ def test_repeated_frames_are_numbered_and_all_arrive(
     """
     client.configure(offset_v=0.251)
     start_chain(client, stream, timeout=5.0, settle=2.0)
+    path = empty_uimf(tmp_path / "rep.uimf")
     scans_before = stream.scans
     for number in (1, 2, 3):
         run_frame(client, stream,
                   FrameRequest(frame_length=100, frame_number=number,
-                               file_name="rep.uimf", offset_bins=20000),
+                               file_name=path, offset_bins=20000),
                   timeout=10.0)
     assert [frame.frame_number for frame in fake.frames] == [1, 2, 3]
     assert stream.scans - scans_before == 300
     assert [status.text for status in stream.statuses[-3:]] == [FINISHED] * 3
     assert fake.ignored_frames == 0
+
+
+def test_a_frame_whose_file_cannot_be_written_reports_it(
+    client: Console, stream: DataStream, tmp_path
+) -> None:
+    """The console creates no file, so naming one that does not exist is a client
+    bug -- and it looks like every other failed acquisition: batches, an error,
+    then the same `finished` a good frame ends with (lab record, task 20)."""
+    client.configure(offset_v=0.251)
+    start_chain(client, stream, timeout=5.0, settle=2.0)
+    with pytest.raises(ConsoleAcquisitionError, match="missing.uimf"):
+        run_frame(client, stream,
+                  FrameRequest(frame_length=100,
+                               file_name=str(tmp_path / "missing.uimf")),
+                  timeout=10.0)
 
 
 def test_the_status_topic_is_not_the_data_topic(

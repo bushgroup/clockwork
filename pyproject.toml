@@ -16,6 +16,12 @@ classifiers = [
 ]
 dependencies = [
     "numpy~=2.5.2",
+    # The UIMF writer and reader both live in mainspring, so that the code which
+    # creates a file and the code which reads one are the same code (lab record,
+    # task 06). It reaches PyPI never -- the wheel is a GitHub release asset --
+    # so the source below is how a clone resolves it, and uv.lock pins the exact
+    # commit. It becomes a tag at mainspring's next release.
+    "mainspring~=1.0",
     "pyserial~=3.5",
     "pyzmq~=27.2",
     "protobuf~=7.36",
@@ -40,6 +46,9 @@ packages = ["src/clockwork"]
 
 [tool.uv]
 package = true
+
+[tool.uv.sources]
+mainspring = { git = "https://github.com/bushgroup/mainspring", branch = "main" }
 
 [dependency-groups]
 dev = [
