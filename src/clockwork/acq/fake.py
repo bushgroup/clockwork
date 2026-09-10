@@ -136,6 +136,17 @@ class FakeConsole:
         self.open_batches = open_batches
         """Batches to publish for the open-ended acquisition before going quiet."""
 
+        self.refuse: dict[str, str] = {}
+        """Commands to answer with `error <what>` instead of their reply.
+
+        Keyed by command string, the value being what the console would say it
+        caught. This is the console's error boundary: a handler that throws is
+        logged, answered with one `error` frame, and the server carries on. A
+        stock console has no boundary at all and dies instead, which is what
+        `died` stands for; the two are different outcomes and a client has to
+        tell them apart.
+        """
+
         self.subscriber_wait_s = subscriber_wait_s
         """How long to wait for a subscription to arrive before publishing.
 
@@ -298,6 +309,12 @@ class FakeConsole:
         ]
         self.commands.append(tuple([command] + shown))
         if command in SILENT_COMMANDS:
+            return
+        if command in self.refuse:
+            # One frame in place of the reply, whatever the command normally
+            # answers with, and nothing else happens: the command threw before
+            # it did anything.
+            self._respond(identity, f"{ERROR_PREFIX} {self.refuse[command]}".encode())
             return
         handler = getattr(self, "_do_" + command.replace(" ", "_"), None)
         if handler is None:

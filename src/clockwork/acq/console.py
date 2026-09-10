@@ -46,9 +46,11 @@ import zmq
 from .wire import (
     ACK,
     COMMAND_PORT,
+    ERROR_PREFIX,
     SECONDS_PER_SAMPLE_2GSPS,
     SILENT_COMMANDS,
     AcqError,
+    ConsoleCommandError,
     ConsoleInfo,
     ConsoleProtocolError,
     FrameRequest,
@@ -227,6 +229,11 @@ class Console:
         reply = self._socket.recv_multipart()
         if reply and reply[0] == b"":
             reply = reply[1:]
+        if len(reply) == 1 and _is_error_reply(reply[0]):
+            raise ConsoleCommandError(
+                f"the console refused {command!r}: "
+                f"{reply[0].decode('utf-8', 'replace')[len(ERROR_PREFIX):].strip()}"
+            )
         if len(reply) != replies:
             raise ConsoleProtocolError(
                 f"{command!r} answered with {len(reply)} frames, not {replies}: "
@@ -444,6 +451,19 @@ class Console:
 def _frame(part: str | bytes) -> bytes:
     """Command frames are plain strings; only `acquire frame`'s is bytes."""
     return part if isinstance(part, bytes) else part.encode("utf-8")
+
+
+def _is_error_reply(frame: bytes) -> bool:
+    """Whether a one-frame reply is the console saying the command failed.
+
+    The same `error <what>` shape the status topic uses, on the command socket
+    and in place of the reply. Only a console that has an error boundary around
+    its command handlers ever sends it, and only in place of a reply, so
+    checking a single-frame reply is enough: nothing the protocol document
+    lists answers with one frame beginning `error`.
+    """
+    text = frame.decode("utf-8", "replace")
+    return text == ERROR_PREFIX or text.startswith(ERROR_PREFIX + " ")
 
 
 __all__ = [

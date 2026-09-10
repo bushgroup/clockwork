@@ -26,6 +26,7 @@ from clockwork.acq import (
     Batch,
     Console,
     ConsoleAcquisitionError,
+    ConsoleCommandError,
     ConsoleInfo,
     ConsoleProtocolError,
     ConsoleStateError,
@@ -700,3 +701,52 @@ def test_an_error_may_be_collected_without_raising(
     client.stop_frame()
     assert end.is_finished
     assert [status.error_text for status in stream.errors] == ["timeout in acquisition"]
+
+
+def test_a_command_the_console_refuses_raises_rather_than_looking_like_a_reply(
+    client: Console, fake: FakeConsole
+) -> None:
+    """`error <what>` in place of a reply is the console's, not the card's, failure.
+
+    The console has an error boundary around its command handlers, so a command
+    that throws inside it answers with one `error` frame and the server stays
+    up. Without one the exception unwinds out of the server loop and out of
+    `main`, and the client meets it as a request that timed out because the
+    process is gone (lab record, task 21).
+    """
+    fake.refuse["tof width"] = (
+        "measured pusher period 970673862127001819 samples (4.85e+08 s at 2e+09 S/s) "
+        "is outside the believable band 1e-06 s to 0.1 s"
+    )
+    with pytest.raises(ConsoleCommandError) as raised:
+        client.tof_width(timeout=5.0)
+    assert "tof width" in str(raised.value)
+    assert "believable band" in str(raised.value)
+    assert ERROR_PREFIX not in str(raised.value).split(":")[-1]
+
+
+def test_a_refused_command_leaves_the_client_free_to_send_the_next_one(
+    client: Console, fake: FakeConsole
+) -> None:
+    """The point of an error reply rather than a dead console: the session survives.
+
+    A refusal is one frame and the command did nothing, so the client's idea of
+    what the console is holding does not change and the next command goes out on
+    the same socket.
+    """
+    fake.refuse["tof width"] = "0 trigger timestamps is not enough to measure a period"
+    with pytest.raises(ConsoleCommandError):
+        client.tof_width(timeout=5.0)
+    fake.refuse.clear()
+    assert client.tof_width(timeout=5.0).pusher_pulse_width == fake.pusher_period_samples
+    assert not client.acquiring and not client.running
+
+
+def test_a_refused_ack_command_raises_the_refusal_not_a_protocol_error(
+    client: Console, fake: FakeConsole
+) -> None:
+    """One frame is also what `ack` is, so the two are told apart by what it says."""
+    fake.refuse["init"] = "Error during call to digitizer. Error Code: -1074135024"
+    with pytest.raises(ConsoleCommandError) as raised:
+        client.init()
+    assert "Error Code" in str(raised.value)

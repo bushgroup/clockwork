@@ -267,6 +267,30 @@ acquired nothing.
 The ZeroMQ protocol is unchanged in every command and in both replies. A client works against
 either build.
 
+### One reply the fork adds
+
+A command that fails inside the console answers
+
+    error <what went wrong>
+
+as a single frame on the command socket, in place of whatever that command normally replies
+with, its newlines and tabs flattened to spaces the same way. The command did nothing: no
+acquisition was started or stopped by it, and the card is in whatever state the failed command
+left it in. Every successful reply is exactly what it was, so a client that never meets a
+failure sees no difference.
+
+A stock console has no error boundary around its command handlers at all. An exception from any
+of them unwinds out of the server's poll loop and out of `main`, which logs two `critical` lines
+and exits, so the client learns of the failure as a request that timed out because the process
+is gone. That is not a hypothetical: a `tof width` or an `acquire` whose period measurement had
+been spoiled computed a record size the driver refused, and the refusal took the console down
+every time.
+
+A client should treat a one-frame reply beginning `error` as a failure of the command rather
+than as its answer. The reply is one frame where `acquire` and `tof width` answer with two, so a
+client that checks the frame count meets it as a malformed reply rather than as a period; the
+prefix is what tells the two apart.
+
 ## Building it
 
 Visual Studio 2019 16.9 or newer (the source uses `std::format`, so in practice 2022), CMake,

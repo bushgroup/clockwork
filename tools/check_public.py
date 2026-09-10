@@ -363,6 +363,25 @@ def main() -> int:
                 ).is_finished_acquire,
             )
 
+            # A command that fails inside the console answers with one `error`
+            # frame in place of its reply, and the session goes on. A console
+            # without that boundary exits instead, and the client meets the
+            # exit as a request that timed out (lab record, task 21).
+            fake.refuse["tof width"] = "measured pusher period is outside the believable band"
+            try:
+                console.tof_width(timeout=10.0)
+                check_true("a command the console refuses is raised, not taken for a reply",
+                           False)
+            except acq.ConsoleCommandError as exc:
+                check_true("a command the console refuses is raised, not taken for a reply",
+                           "believable band" in str(exc))
+            fake.refuse.clear()
+            check_true(
+                "and the refusal cost the session nothing: the next command is answered",
+                console.tof_width(timeout=10.0).pusher_pulse_width
+                == fake.pusher_period_samples,
+            )
+
     section("hardware")
     skip("a MIPS box answers GVER", "no serial hardware in a self-check; lab record, task 04")
     skip("the acquisition console answers info", "no console in a self-check; lab record, task 03")

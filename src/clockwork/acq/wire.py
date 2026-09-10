@@ -116,6 +116,21 @@ class ConsoleProtocolError(AcqError):
     """The console said something the protocol document does not allow."""
 
 
+class ConsoleCommandError(AcqError):
+    """The console answered a command with an error instead of its reply.
+
+    One frame, `error <what>`, in place of whatever the command normally
+    answers with. It means the command threw inside the console and the
+    console caught it: the card is in whatever state the failed command left,
+    and no acquisition was started or stopped by it.
+
+    A stock console sends this never. It has no error boundary around its
+    command handlers at all, so a command that throws unwinds out of the
+    server loop and out of `main`, and the client learns of it as a request
+    that timed out because the process is gone (lab record, task 21).
+    """
+
+
 class ConsoleAcquisitionError(AcqError):
     """The console published an error while acquiring.
 
@@ -593,6 +608,7 @@ __all__ = [
     "AcqError",
     "Batch",
     "ConsoleAcquisitionError",
+    "ConsoleCommandError",
     "ConsoleInfo",
     "ConsoleProtocolError",
     "EmptyFrameError",
