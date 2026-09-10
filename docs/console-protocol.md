@@ -26,7 +26,7 @@ The data socket carries **two topics**, and a client needs both:
 | Topic | Payload | Published by |
 |---|---|---|
 | `data` | A Snappy-compressed protobuf `Message`, one per batch of `NotifyOnScansCount` scans | `ZmqAcquiredDataSubscriber` |
-| `status` | The plain, uncompressed string `finished` or `finished acquire` | `AcquirePublisher` |
+| `status` | The plain, uncompressed string `finished`, `finished acquire`, or (the fork only) `error <what>` | `AcquirePublisher` |
 
 Subscribing to `data` alone is the mistake to avoid: it is the topic named in the console's own
 test client, and a client that subscribes to it and waits for `finished` waits forever. ZeroMQ
@@ -151,6 +151,24 @@ behind a queue, so `finished` says the digitizer is done and not that the file i
 client that needs the rows themselves has to wait on the file. `finished acquire` is the
 stronger of the two: `stop acquire` waits for every subscriber to drain before publishing it.
 
+**Most of a frame's batches can arrive after the `finished` of that frame.** Both topics come
+off one socket, so a client sees messages in the order they were published and never out of it,
+but the two are not published by the same thread: the acquisition thread hands each batch to a
+subscriber that publishes it from its own thread on a 10 ms poll, and publishes `finished`
+itself, directly. The gap this opens is large. Measured on an SA220P at 2 GS/s with a 233 888
+sample record, 5000 scan frames in which no sample was suppressed delivered half or all of
+their scans after their own `finished`, the first trailing batch arriving 0.4 to 0.9 s after it
+and the last as much as 9.5 s after it. A lightly occupied frame of the same length delivers
+most of its batches in time. Two consequences: a client drawing a live trace is always drawing
+a frame that has already ended, and a client deciding that a frame produced nothing has to keep
+listening for several seconds before it may say so.
+
+**`finished` says a frame ended and not that it succeeded.** The acquisition loop catches an
+error, logs it, stops, and publishes the same `finished` it would have published on success, so
+a frame that failed on its first fetch is indistinguishable on the wire from a frame that
+acquired everything asked of it. Upstream that is all there is; the fork adds the message
+below.
+
 ## What the console does with the digitizer
 
 - Continuous streaming, triggered mode, one record per external trigger: the pusher pulse.
@@ -223,7 +241,30 @@ threshold outside the signed 16-bit range, a hysteresis outside 0 to 65535, a po
 2 or 3, and a slope other than `rising` or `falling`. Trigger level and full scale are passed
 through, because which values a card accepts depends on the card, and the driver refuses the rest.
 
-The ZeroMQ protocol is unchanged, in both directions and in every command. A client works against
+### One status message the fork adds
+
+An acquisition that fails publishes
+
+    error <what went wrong>
+
+on the `status` topic, one line, with any newlines and tabs in the text flattened to spaces.
+The frame's own `finished` follows it, so the ordinary end of a frame is unchanged and arrives
+whether or not an error came first; a frame that fails before it starts publishes the error and
+no `finished` at all. Nothing else about the protocol changes, and a client that matches
+`finished` and `finished acquire` exactly ignores this and behaves as it did.
+
+It exists because there was otherwise no way for a client to learn that an acquisition had
+failed. The error went to a log file on the acquisition machine and the frame ended with the
+`finished` of a frame that had worked.
+
+Against a stock console, or a fork older than this, the only sign of a failed acquisition is
+still a frame that ends carrying fewer scans than it asked for, or none at all. Fewer is not
+reliable, since the data socket drops messages when a client falls behind, but none at all is
+worth treating as a failure: the console publishes a batch per `NotifyOnScansCount` scans
+whether or not anything crossed the zero-suppress threshold, so a frame with no batches
+acquired nothing.
+
+The ZeroMQ protocol is unchanged in every command and in both replies. A client works against
 either build.
 
 ## Building it
