@@ -353,6 +353,47 @@ def test_the_summed_file_is_todays_shape(tmp_path):
     assert opened.global_params().extra["AcquisitionMethod"] == "test method"
 
 
+def test_the_three_grouping_cases_a_viewer_has_to_tell_apart(tmp_path):
+    """`repetitions` is what the method asked for and goes on every frame; `repetition`
+    is which one this frame is, and only a frame that is one of them carries it. So a
+    frame reads as one repetition of a method frame, or as the whole of one, and a
+    viewer that has never seen the method can tell which (lab record, task 16)."""
+    accumulations = 3
+    per_repetition = make_method(accumulations=accumulations, stem="a")
+    single = make_method(accumulations=accumulations, repetition_mode="single_frame",
+                         stem="b")
+    with FakeConsole() as fake, DataStream(fake.data_endpoint) as stream, \
+            Console(fake.command_endpoint) as console:
+        geometry = make_geometry(fake)
+        console.configure(offset_v=0.25)
+        start_chain(console, stream, settle=1.0, quiet=0.05)
+        paths = {}
+        for method in (per_repetition, single):
+            with Recording.create(tmp_path, method, geometry) as recording:
+                paths[method.acquisition.repetition_mode] = (
+                    recording.raw_path, recording.summed_path
+                )
+                acquire(recording, console, stream, method)
+        console.stop_acquire()
+
+    # One repetition of a method frame: both parameters, and the count to check it
+    # against, so a method frame missing a repetition is visible without the method.
+    raw, summed = paths["per_repetition"]
+    frames = [UimfFile(raw).frame_params(n) for n in (1, 2, 3)]
+    assert [f.repetition for f in frames] == [1, 2, 3]
+    assert {f.method_frame for f in frames} == {1}
+    assert {f.repetitions for f in frames} == {accumulations}
+
+    # The whole of a method frame, twice over: the one console frame that held every
+    # repetition, and the summed frame the fold made of them.
+    whole_raw, whole_summed = paths["single_frame"]
+    for path in (whole_raw, whole_summed, summed):
+        params = UimfFile(path).frame_params(1)
+        assert params.method_frame == 1, path
+        assert params.repetition is None, path
+        assert params.repetitions == accumulations, path
+
+
 # --- keep_raw --------------------------------------------------------------------------
 
 

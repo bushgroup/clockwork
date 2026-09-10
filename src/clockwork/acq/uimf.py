@@ -390,11 +390,13 @@ class Recording:
                 f"repetition_mode {acquisition.repetition_mode!r}"
             )
         slope, intercept = self.calibration
-        # In `single_frame` mode the one console frame holds every repetition, so it
-        # says which method frame it is and does not claim to be a repetition of it.
-        # In `per_repetition` mode it is repetition n of A and says so, which is what
-        # lets a viewer that never sees the method group the frames and notice a method
-        # frame that was cut short.
+        # `repetitions` is what the method asked for, so it goes on every frame in
+        # both modes and both files; `repetition` is which one this frame is, and only
+        # a frame that is one of them has it. In `single_frame` mode the one console
+        # frame holds every repetition, so it names its method frame and claims to be
+        # no repetition of it. Together those two say all three cases a viewer that has
+        # never seen the method has to tell apart: ungrouped, one repetition of a method
+        # frame, or the whole of one.
         whole = acquisition.repetition_mode == "single_frame"
         spec = FrameSpec(
             scans=acquisition.frame_length,
@@ -405,7 +407,7 @@ class Recording:
             start_time_minutes=0.0,
             method_frame=method_frame,
             repetition=None if whole else repetition,
-            repetitions=None if whole else acquisition.console_frames,
+            repetitions=acquisition.accumulations,
         )
         frame = self._raw.add_frame(spec)
         self._frames.setdefault(method_frame, []).append(frame)
@@ -481,6 +483,13 @@ class Recording:
         in `single_frame` they are consecutive blocks of `Scans` inside one raw frame and
         the fold adds those. Either way the summed frame is `scans` long with
         `Accumulations` = A, which is the shape FALKOR writes today.
+
+        **The two files mean different things by `DurationSeconds`.** A raw frame's is
+        the console's, counted off the card's own sample clock. A summed frame's is the
+        wall time its whole method frame took, the per-repetition restart included,
+        because no console ever touches that file and there is no better number to have.
+        So differencing the two measures the restart gap, which is a real quantity but
+        not one either column was written to report.
         """
         self._require_open()
         method_frame = int(method_frame)
@@ -513,6 +522,7 @@ class Recording:
             calibration_intercept=self.calibration[1],
             average_tof_length_ns=self.geometry.average_tof_length_ns,
             method_frame=method_frame,
+            repetitions=acquisition.accumulations,
         ))
         rows = writer.write_scans(frame, _scan_rows(total))
         # A summed frame is the whole of its method frame, so it names the method frame
