@@ -425,8 +425,36 @@ table execution the firmware keeps servicing serial commands between
 interrupts, so status polling remains possible.
 
 Consequence of the ISR pre-load design: the **first** event of a table
-at tick 0 is applied at trigger time; events must leave the ISR enough
+at tick 0 is staged by `SetupNextEntry()` before the table is released,
+so it is applied as the table starts rather than one staging interrupt
+later (with the qualification below); events must leave the ISR enough
 time to stage the next event (see timing limits below).
+
+**"At release" is not the same instant as the trigger when the trigger
+is `SW` and the clock is external.** The TIOA toggle that latches a
+tick-0 event is armed as an RA compare (`ACPA_TOGGLE`), plus
+`AEEVT_TOGGLE` in the tick-0 case only, and `SetupTimer()` carries two
+dated comments saying the counter-0 event does not arrive on an
+external trigger and that `TC_CMR_ASWTRG_TOGGLE` was added (2018-05-05)
+and then removed (2018-07-28) because the resulting toggle "happen[s]
+after the software trigger and after the first clock edge"
+(`Table.cpp: SetupTimer()`). Read together with the RA=0 compare
+needing a clock edge to be evaluated, a tick-0 event on a
+`STBLCLK,EXT` + `STBLTRG,SW` table lands on the **first clock edge
+after `TBLSTRT`**, not on `TBLSTRT` itself, and tick *n* lands on the
+(*n*+1)th. A host that has to know which external clock edge an output
+changed on cannot get that from this document; scope it (§7).
+
+**Tables within one `STBLDAT` string are advanced by the ISR with no
+gap between them.** On the loop-end (`]`) entry with the repeat count
+expired, `SetupNextEntry()` advances the table pointer and, when the
+next table opens with a tick-0 event, applies it immediately: "This
+table's time zero event happens at the same time as the current tables
+top count" (`Table.cpp`). `STBLDLY`/`InterTableDelay` (§4) does **not**
+insert that gap: it is the poll period of the software service loop
+that runs while the hardware timer executes the table, so it bounds how
+quickly the host learns of `TBLCMPLT` and how often serial is serviced
+during a table, not output timing.
 
 ### Clock semantics (Q2: clock-referenced, one release trigger)
 
@@ -531,7 +559,7 @@ Grouped from `MIPScommands.txt` + dispatch table in `Serial.cpp`
 | `STBLADV`/`GTBLADV` | `ON\|OFF` | Auto-advance buffer after each trigger |
 | `STBLVLT`/`GTBLVLT` | `count,chan[,volts]` | Patch/read a loaded DC-bias entry in place (no re-upload) |
 | `STBLCNT` | `count,chan,newcount` | Patch a time point in place |
-| `STBLDLY` | ms | Inter-table delay in the table-mode service loop (default 3) |
+| `STBLDLY` | ms | Poll period of the table-mode service loop (default 3). Despite the name it inserts no gap between the tables of one string; see §3 |
 | `STBLDLT`/`GTBLDLT` | ticks | Read/write `TimeDelta` directly |
 | `STBLRETRIG`/`GTBLRETRIG` | `TRUE\|FALSE` | External re-trigger enable |
 | `STBLEVY`/`GTBLEVY` | `TRUE\|FALSE` | Stop after each segment awaiting trigger (with retrigger + `a`) |
@@ -1053,6 +1081,17 @@ inspection, not scriptable):
   one waveform period, from the manual; the module firmware that
   implements it isn't public) if Layer 1 timing budgets come to depend
   on the exact value.
+- **Which external clock edge a tick-0 event lands on**, for a
+  `STBLCLK,EXT` + `STBLTRG,SW` table. §3 reads the firmware as the
+  first edge after `TBLSTRT`, one edge later than "at trigger time",
+  but the two dated `SetupTimer()` comments show this is a corner the
+  vendor has revised twice, and the SAM3X compare behaviour at RA=0 is
+  not something the source states outright. Scope one DIO output
+  against the clock input with a tick-0 event and a tick-1 event in the
+  same table: the answer is a one-edge offset in every downstream
+  consumer that maps ticks onto clock edges. Also confirm the §3
+  reading that no gap separates the tables of one string, by putting a
+  DIO edge at the tick-0 event of a second table.
 
 Items that are plain protocol-level pass/fail probes, deferred to the
 `clockwork` hardware-in-the-loop test suite once it
