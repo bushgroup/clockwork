@@ -49,7 +49,7 @@ Frames are plain strings; a command with an argument is two frames.
 | Frames | Effect | Reply |
 |---|---|---|
 | `num instruments` | Counts VISA resources matching `PXI?*::INSTR` | The count |
-| `info` | Model, serial, firmware, console version and commit | One descriptive string |
+| `info` | Model, serial, firmware, console version and commit; the fork adds its repository and branch and the full scale in force | One descriptive string |
 | `firmware`, `serial` | The single field | The string |
 | `init` | Trigger source `External1`, level 2.0 V †, rising edge †, post-trigger delay from config (default 10 µs) | `ack` |
 | `horizontal`, `<seconds per sample>` | Sample rate = 1/value (0.5 ns → 2 GS/s) | `ack` |
@@ -195,6 +195,14 @@ file with the full schema and parameters before the first `acquire frame`, and o
 parameter value. SQLite's journal mode is a property of the file, so a client that creates it in
 WAL mode gets WAL on the console's connection too.
 
+`BPI_MZ` holds the m/z of the base peak's bin, which the fork computes from the calibration the
+frame's own `Frame_Params` state and the `BinWidth` in `Global_Params`. Both are in the file
+before `acquire frame`, because the client writes a frame's parameters and then asks for the
+frame. A frame whose `CalibrationSlope` is zero or absent has no mass axis, and the column holds
+the base peak's bin index on those rows instead. The upstream console stores the bin index on
+every row, calibrated or not, so a file acquired through a stock build holds bin indices in a
+column defined as m/z.
+
 ## Accumulations
 
 The console writes **one scan row per trigger**. A frame acquired with `frame_length` = 5000 and
@@ -236,10 +244,24 @@ A stock console ignores all six without saying so. The reply to `info` is how a 
 two builds apart: the fork appends its repository and branch to the version string the stock
 console ends on.
 
-The fork refuses four of these before they reach the driver, naming the key that is wrong: a
-threshold outside the signed 16-bit range, a hysteresis outside 0 to 65535, a port other than 1,
-2 or 3, and a slope other than `rising` or `falling`. Trigger level and full scale are passed
-through, because which values a card accepts depends on the card, and the driver refuses the rest.
+The fork also reports the full scale in force, appending ` / Full Scale: <volts>` to the same
+string. `FullScaleRange` is read at startup and applied by `vertical`, and nothing else in the
+protocol reports it back, so `info` is how a client records the vertical window a file was
+acquired with rather than the window the configuration file was last edited to say.
+
+The fork refuses five of these before they reach the driver, naming the key that is wrong: a
+threshold outside the signed 16-bit range, a hysteresis outside 100 to 1023, a full scale other
+than 0.5 or 2.5, a port other than 1, 2 or 3, and a slope other than `rising` or `falling`. The
+hysteresis bound and the full-scale pair are the SA220P's own documented limits: the card offers
+exactly two full-scale ranges, and it accepts a hysteresis only in [100, 1023], so every other
+value in the span the fork used to allow would have reached the driver and been refused there.
+Trigger level is still passed through, because the level a card accepts depends on how its input
+is terminated, and the driver refuses what it will not take.
+
+The threshold is checked against the signed 16-bit range rather than against the card's own,
+which is [hysteresis - 32768, +32767] and so moves with the hysteresis. That is why the console's
+-32667 sits one code above the minimum at a hysteresis of 100 and would be refused by the driver
+at a hysteresis of 1023.
 
 ### One status message the fork adds
 
