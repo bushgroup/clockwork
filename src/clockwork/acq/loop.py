@@ -597,7 +597,7 @@ def run_acquisition(
     instrument: Instrument = UNCALIBRATED,
     adc_name: str = "",
     overwrite: bool = False,
-    clock: Callable[[], float] = time.monotonic,
+    clock: Callable[[], float] = time.perf_counter,
 ) -> Run:
     """Acquire everything one method asks for, into one pair of files.
 
@@ -652,6 +652,11 @@ def run_acquisition(
             + ", ".join(sorted(set(missing)))
         )
 
+    # The run's origin, shared with the recording below so that this run's record of
+    # when a frame began and the file's `StartTime` are the same measurement. The
+    # default clock is `perf_counter` rather than `monotonic`, and has to agree with
+    # `Recording.create`'s: on Windows `monotonic` ticks at about 15.6 ms, which is
+    # comparable to a frame and coarser than the setup in front of the first one.
     started = clock()
     owns_chain = width is None
     if width is None:

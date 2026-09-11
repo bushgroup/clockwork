@@ -337,7 +337,7 @@ class Recording:
         adc_name: str = "",
         console_version: str = "",
         stem: str | None = None,
-        clock: Callable[[], float] = time.monotonic,
+        clock: Callable[[], float] = time.perf_counter,
         started: float | None = None,
         overwrite: bool = False,
     ) -> Recording:
@@ -372,6 +372,15 @@ class Recording:
         start times anyway, instead of writing zeros unless the caller remembers to say
         otherwise (lab record, task 25). The same clock times the frames, so a test that
         substitutes one controls both.
+
+        **`perf_counter`, not `monotonic`**, for the same reason `clockwork.mips.box` and
+        `clockwork.acq.console` are: on Windows `time.monotonic()` ticks at about 15.6 ms,
+        which is coarser than the gap between creating a recording and beginning its first
+        frame and comparable to a short frame, so it quantises every `StartTime` in the
+        file to that grid and rounds the first frame's to nothing at all. `perf_counter`
+        resolves to well under a microsecond there, which makes each frame's start a
+        measurement rather than a tick count. Both clocks are monotonic and neither has a
+        meaningful origin, which is why only differences are ever written.
 
         The summed companion is not created here. It is created by the first `fold`, so
         that a run which never gets that far does not leave an empty second file.

@@ -501,9 +501,17 @@ def main() -> int:
                    and parameters.calibration_done)
         starts = [float(raw_file.frame_params(n).extra["StartTimeMinutes"])
                   for n in raw_file.frame_numbers()]
-        check_true(f"StartTime runs off a run clock rather than staying 0 ({starts[-1]:.6f} "
-                   "minutes at the last frame)",
-                   starts[0] == 0.0 and starts[-1] > 0.0
+        # Not `starts[0] == 0.0`. The run clock's origin is the run's, not the first
+        # frame's, so the first frame begins however long the setup in front of it took:
+        # a fraction of a millisecond here, the whole acquisition chain in a real run.
+        # The equality only ever held because `time.monotonic` ticks at 15.6 ms on
+        # Windows and usually rounded that gap to nothing; when a tick landed inside it,
+        # this line failed. The clock is `perf_counter` now and the gap is real, so what
+        # is asserted is that the first frame starts at the origin rather than a run in.
+        check_true("StartTime runs off a run clock rather than staying 0 "
+                   f"({starts[0]:.6f} minutes at the first frame, {starts[-1]:.6f} at "
+                   "the last)",
+                   0.0 <= starts[0] < 0.001 and starts[-1] > starts[0]
                    and starts == sorted(starts))
         check_true("the summed frame starts when its first repetition did",
                    float(parameters.extra["StartTimeMinutes"]) == starts[0])
