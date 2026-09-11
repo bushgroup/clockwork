@@ -520,6 +520,128 @@ def main() -> int:
         check_true(f"and it is exactly {accumulations} times one repetition, bin for bin",
                    exact and len(one) > 0)
 
+    section("one whole acquisition")
+    # Task 23's loop, which is the section above and the two before it composed: the
+    # boxes loaded and armed, one console frame per repetition with the start list
+    # walked into each one after `acquire frame`, the silence before the completion
+    # marker, the fold, and a technical replicate. Nothing above this layer is allowed
+    # to hold a second copy of that order, so this is where it is checked.
+    import time as _time
+
+    from clockwork import mips as mips_module
+
+    class SlowBox(mips_module.FakeBox):
+        """A box whose every write costs what a USB round trip costs.
+
+        The enable-gate guard watches the window between `acquire frame` and the end of
+        the start list, and against a stand-in that answers instantly there is no
+        window at all. Only the gate check below needs one.
+        """
+
+        def write(self, data: bytes) -> None:
+            _time.sleep(0.25)
+            super().write(data)
+
+    loop_document = dict(document)
+    loop_document["metadata"] = {"name": "self-check loop",
+                                 "created": _dt.date(2026, 9, 11)}
+    loop_document["acquisition"] = dict(document["acquisition"]) | {
+        "file_stem": "selfcheck-loop"}
+    loop_document["boxes"] = [{
+        "name": "a", "port": "COM1", "setup": ["STBLCLK,EXT"],
+        "load": [f"STBLDAT;0:[A:1,0:B:1,10:B:0,{scans + 1}:A:0,{scans + 2}:];"],
+        "arm": ["SMOD,TBL"],
+    }]
+    loop_document["reset"] = [["a", "SMOD,LOC"], ["a", "SMOD,TBL"]]
+    recipe = method_module.from_dict(loop_document)
+
+    check_true(
+        "single_frame with more than one method frame is refused, and nothing else is",
+        len(acq.refusals(method_module.from_dict(
+            loop_document | {"acquisition": dict(loop_document["acquisition"])
+                             | {"repetition_mode": "single_frame", "frames": 2}}))) == 1
+        and acq.refusals(recipe) == [],
+    )
+
+    with tempfile.TemporaryDirectory() as directory:
+        boxes = {"a": mips_module.Box(transport=mips_module.FakeBox(), name="a")}
+        seen: list[acq.Event] = []
+        acq.send_phases(recipe, boxes, progress=seen.append)
+        check_true(
+            "send_phases sends setup, load and arm in the method's order, and waits "
+            "for the box to say it is ready",
+            [event.phase for event in seen if isinstance(event, acq.PhaseSent)]
+            == ["setup", "load", "arm"]
+            and "TBLRDY" in seen[-1].detail,
+        )
+
+        with acq.FakeConsole() as fake:
+            # The stand-in publishes a frame from inside the handler for `acquire
+            # frame`, so without a hold its batches race the start list the loop walks
+            # to release that frame, and the enable-gate guard fires at random.
+            fake.frame_hold_s = 0.05
+            with acq.DataStream(fake.data_endpoint) as stream, \
+                    acq.Console(fake.command_endpoint) as console:
+                console.configure(offset_v=0.251)
+                run = acq.run_acquisition(
+                    recipe, boxes=boxes, console=console, stream=stream,
+                    directory=directory,
+                    post_trigger_samples=fake.post_trigger_samples,
+                    silence=0.3, progress=seen.append,
+                )
+                check_true(
+                    f"the loop ran a whole acquisition ({run.text})",
+                    run.complete and len(run.frames) == accumulations
+                    and run.scans_published == scans * accumulations,
+                )
+                check_true(
+                    "and waited for the stream to fall silent before marking each "
+                    "frame complete",
+                    all(record.silence_seconds >= 0.3 for record in run.frames)
+                    and all(UimfFile(run.raw_path).frame_params(n).marked_complete
+                            for n in range(1, accumulations + 1)),
+                )
+                check_true(
+                    "and folded the method frame into a companion of today's shape",
+                    len(run.folds) == 1 and run.folds[0].error is None
+                    and UimfFile(run.summed_path).frame_params(1).scans == scans,
+                )
+
+                replicate = acq.run_acquisition(
+                    recipe, boxes=boxes, console=console, stream=stream,
+                    directory=directory,
+                    post_trigger_samples=fake.post_trigger_samples,
+                    stem="selfcheck-loop-2", replicate=True, silence=0.3,
+                )
+                check_true(
+                    "a replicate sends the reset list and acquires again into a new "
+                    f"file ({os.path.basename(replicate.raw_path)})",
+                    replicate.complete and replicate.replicate
+                    and os.path.isfile(run.raw_path),
+                )
+
+                # The one failure that produces a full frame of plausible data at the
+                # wrong offset, from a table that left the enable high or an enable
+                # lead off a pulled-up input (lab record, task 05). The start list is
+                # three serial round trips on the instrument and instant against a
+                # stand-in, so the window the guard watches has to be put back.
+                fake.frame_hold_s = 0.0
+                slow = {"a": mips_module.Box(transport=SlowBox(), name="a")}
+                acq.send_phases(recipe, slow)
+                stalled = acq.run_acquisition(
+                    recipe, boxes=slow, console=console, stream=stream,
+                    directory=directory,
+                    post_trigger_samples=fake.post_trigger_samples,
+                    stem="selfcheck-loop-gate", silence=0.3, abort_after=1,
+                )
+                check_true(
+                    "a batch published before the start list has finished fails its "
+                    "frame rather than being acquired",
+                    stalled.frames[0].outcome == "EnableGateError"
+                    and not UimfFile(stalled.raw_path).frame_params(1).marked_complete,
+                )
+                console.stop_acquire()
+
     section("hardware")
     skip("a MIPS box answers GVER", "no serial hardware in a self-check; lab record, task 04")
     skip("the acquisition console answers info", "no console in a self-check; lab record, task 03")

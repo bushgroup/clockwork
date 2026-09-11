@@ -278,6 +278,7 @@ class FakeBox:
         version: str = "1.263, June 20, 2026",
         trigger: str = "EDGE",
         ring_buffer_bytes: int = RING_BUFFER_BYTES,
+        strict: bool = True,
         arb_modules: int = 0,
         arb_version: str = "2.21",
         do_channels: int = 16,
@@ -287,6 +288,22 @@ class FakeBox:
         self.version = version
         self.trigger = trigger
         self.ring_buffer_bytes = ring_buffer_bytes
+        self.strict = strict
+        """Whether a command this stand-in does not implement is rejected.
+
+        A real box NAKs what its firmware does not have, and so does this by
+        default, which is what makes a typo in a method show up here. Set it
+        false to acknowledge anything instead. That is a blunt instrument and
+        the last resort: a method whose boxes carry ARB modules wants
+        `arb_modules` rather than this, because section 6 is modelled below and
+        an acknowledgement from that path at least stores what it was given.
+        What this is for is a method carrying a command no version of this
+        stand-in has heard of, where the alternative is not being able to send
+        it anywhere but the instrument. An acknowledgement then says exactly
+        what it says -- the string was well formed and went out -- and nothing
+        about what a box would have done with it.
+        """
+
         self.arb_modules = arb_modules
         """How many ARB modules this box answers for, and `GCHAN,ARB`.
 
@@ -436,7 +453,10 @@ class FakeBox:
         if handler is None:
             if self._arb(name, argument):
                 return
-            self._nak(1)  # invalid command
+            if self.strict:
+                self._nak(1)  # invalid command
+            else:
+                self._ack()
             return
         handler(argument)
 
@@ -647,8 +667,8 @@ class FakeBox:
     def _arb(self, name: str, argument: str) -> bool:
         """Handle one §6 command, or say it is none of them.
 
-        Returns whether the command was recognised, so one that is none of
-        them still falls through to the NAK any unknown command gets.
+        Returns whether the command was recognised, so an unrecognised one
+        still falls through to `strict`'s NAK or acknowledgement.
         """
         if name in _ARB_NO_ARGUMENT:
             if self._arb_present():

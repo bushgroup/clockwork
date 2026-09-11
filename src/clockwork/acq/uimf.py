@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sqlite3
 import time
 from collections.abc import Callable, Iterator
 
@@ -332,6 +333,7 @@ class Recording:
         detector_bits: int | None = SA220P_DETECTOR_BITS,
         adc_name: str = "",
         console_version: str = "",
+        stem: str | None = None,
         clock: Callable[[], float] = time.monotonic,
         started: float | None = None,
         overwrite: bool = False,
@@ -352,6 +354,12 @@ class Recording:
         `Console.info().text` is the string to pass: it names the card, its firmware, the
         console's version and commit, and on the lab's build the fork and branch as well.
 
+        `stem` names the files, and defaults to the method's `file_stem`. It is an
+        argument rather than a method field because a technical replicate is the same
+        method written to a different file: the stamp has to hash to the same value for
+        every replicate of one method, which it cannot if the name a file happens to be
+        given is part of the document being hashed (lab record, task 23).
+
         `clock` and `started` are the run clock every frame's `StartTime` is measured
         against, and they default to this recording's own creation. **The acquisition
         loop owns the clock and passes both down** (`clockwork.acq.loop`, lab record,
@@ -365,7 +373,7 @@ class Recording:
         The summed companion is not created here. It is created by the first `fold`, so
         that a run which never gets that far does not leave an empty second file.
         """
-        stem = method.acquisition.file_stem
+        stem = stem or method.acquisition.file_stem
         path = raw_path(directory, stem)
         globals_ = GlobalSpec(
             bins=geometry.bins,
@@ -400,6 +408,26 @@ class Recording:
     def frames_of(self, method_frame: int) -> list[int]:
         """The raw frame numbers one method frame produced, in acquisition order."""
         return list(self._frames.get(int(method_frame), ()))
+
+    def rows_in(self, frame: int) -> int | None:
+        """`Frame_Scans` rows the raw file holds for one frame, or None if unreadable.
+
+        Read through the ordinary reader while the console may still be writing, which
+        is safe and is the point: asked once when a frame publishes `finished` and again
+        once its stream has fallen silent, the difference is how far the console's writer
+        lags its own publisher. That lag is the fold's timing constraint and nothing else
+        measures it (lab record, task 23).
+
+        `scan_summary` rather than `read_frame`: one query for the `ScanNum` column, no
+        spectrum decoded, so asking twice a frame is not part of what is being measured.
+        """
+        try:
+            return int(UimfFile(self._raw.path).scan_summary(int(frame))[0].size)
+        except (ValueError, KeyError, OSError, sqlite3.Error):
+            # A frame nobody has written to yet, or a file being replaced under us. The
+            # lag is a measurement, not a check, so an unreadable answer is None and the
+            # acquisition carries on.
+            return None
 
     # --- the two phases ----------------------------------------------------------------
 
@@ -526,7 +554,11 @@ class Recording:
         Runs after the last repetition of `method_frame` and can run while the next
         method frame acquires: it opens the raw file through the ordinary reader, which
         takes a short read lock per query and never blocks the console for longer than
-        one of them.
+        one of them. What it refuses is a fold of a frame that is still open, not a fold
+        while *some* frame is open, which is what makes the overlap real rather than
+        only promised (lab record, task 23). Nothing else about a `Recording` is thread
+        safe, so the one supported overlap is a fold on a worker thread while the frames
+        of a later method frame are begun and ended on the loop's own.
 
         The two repetition modes fold differently and produce the same frame. In
         `per_repetition` the repetitions are separate raw frames and the fold adds them;
@@ -551,7 +583,7 @@ class Recording:
                 f"method frame {method_frame} has already been folded; a second fold "
                 "would add a second summed frame for it"
             )
-        if self._open_frame is not None:
+        if self._open_frame is not None and self._open_frame[0] in numbers:
             raise ValueError(
                 f"frame {self._open_frame[0]} is still open; a fold reads rows the "
                 "console may still be writing"
@@ -614,6 +646,19 @@ class Recording:
         return self._summed
 
     # --- closing -------------------------------------------------------------------------
+
+    def close_companion(self) -> None:
+        """Close the summed file and nothing else. Idempotent, and a no-op if no fold ran.
+
+        Split out of `close` for one reason. A caller that runs `fold` on a worker
+        thread, which is the overlap `fold` is written to allow, gets a SQLite
+        connection that belongs to that thread, and sqlite3 refuses to let any other
+        thread touch it -- including to close it. So a caller that folds off-thread
+        calls this on the thread that did the folding, and then closes the recording
+        from wherever it likes (lab record, task 23).
+        """
+        if self._summed is not None:
+            self._summed.close()
 
     def close(self) -> None:
         """Close both files, and honour `keep_raw`. Idempotent.

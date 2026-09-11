@@ -11,6 +11,8 @@ blocks, so nothing in it may run on the UI thread.
     stream.py    the data socket: per-batch summaries and frame status
     session.py   the two sockets in step: open the chain, run one frame
     uimf.py      the files: the two-phase frame parameters and the fold
+    loop.py      a whole acquisition from a method: the boxes, the frames,
+                 the fold, a replicate
     fake.py      a console simulated in this process, for tests and the
                  hardware-free self-check
 
@@ -41,6 +43,21 @@ The order in that example is not a style: a frame asked for out of turn kills
 the console process rather than earning an error, which is why `session.py`
 exists and why `Console` refuses the calls that would do it.
 
+A whole acquisition, which is that sequence with the boxes and the files
+around it and is what anything above this package should call:
+
+    from clockwork.acq import run_acquisition, send_phases
+
+    send_phases(method, boxes, progress=print_event)
+    run = run_acquisition(method, boxes=boxes, console=console, stream=stream,
+                          directory=folder, post_trigger_samples=20000,
+                          progress=print_event)
+    replicate = run_acquisition(method, boxes=boxes, console=console,
+                                stream=stream, directory=folder,
+                                post_trigger_samples=20000,
+                                stem=run.method.acquisition.file_stem + "-2",
+                                replicate=True, progress=print_event)
+
 and the same against no console at all, which is what the self-check runs:
 
     from clockwork.acq import Console, DataStream, FakeConsole
@@ -67,6 +84,31 @@ from .fake import (
     DEFAULT_REARM_SAMPLES,
     DEFAULT_SCAN_PERIOD,
     FakeConsole,
+)
+from .loop import (
+    ABORT_AFTER_FAILURES,
+    ARM_TIMEOUT_S,
+    FRAME_TIMEOUT_FLOOR_S,
+    FRAME_TIMEOUT_SLACK,
+    SILENCE_S,
+    AcquisitionRefused,
+    BatchSeen,
+    BoxReady,
+    BoxSaid,
+    EnableGateError,
+    Event,
+    Folded,
+    FoldRecord,
+    FrameBegun,
+    FrameEnded,
+    FrameRecord,
+    PhaseSent,
+    Run,
+    RunBegun,
+    Warned,
+    refusals,
+    run_acquisition,
+    send_phases,
 )
 from .session import EMPTY_SETTLE_S, run_frame, start_chain
 from .stream import (
@@ -121,10 +163,16 @@ from .wire import (
 )
 
 __all__ = [
+    "ABORT_AFTER_FAILURES",
     "ACK",
     "ACQUIRE_TIMEOUT_S",
+    "ARM_TIMEOUT_S",
     "AcqError",
+    "AcquisitionRefused",
     "Batch",
+    "BatchSeen",
+    "BoxReady",
+    "BoxSaid",
     "COMMAND_PORT",
     "Console",
     "ConsoleAcquisitionError",
@@ -144,20 +192,33 @@ __all__ = [
     "EMPTY_SETTLE_S",
     "ERROR_PREFIX",
     "EmptyFrameError",
+    "EnableGateError",
+    "Event",
     "FINISHED",
     "FINISHED_ACQUIRE",
+    "FRAME_TIMEOUT_FLOOR_S",
+    "FRAME_TIMEOUT_SLACK",
     "FRAME_TYPES",
     "FakeConsole",
+    "FoldRecord",
+    "Folded",
+    "FrameBegun",
+    "FrameEnded",
+    "FrameRecord",
     "FrameRequest",
     "GATE_GRANULARITY_SAMPLES",
     "Geometry",
     "PROVENANCE_KEYS",
+    "PhaseSent",
     "QUEUE_MESSAGES",
     "RAW_SUFFIX",
     "Recording",
+    "Run",
+    "RunBegun",
     "SA220P_DETECTOR_BITS",
     "SCAN_NUM_SMALLINT_MAX",
     "SECONDS_PER_SAMPLE_2GSPS",
+    "SILENCE_S",
     "SILENT_COMMANDS",
     "STOP_ACQUIRE_TIMEOUT_S",
     "SUMMED_SUFFIX",
@@ -166,6 +227,7 @@ __all__ = [
     "TOPIC_DATA",
     "TOPIC_STATUS",
     "TofWidth",
+    "Warned",
     "compress",
     "decode_batch",
     "decode_tof_width",
@@ -175,8 +237,11 @@ __all__ = [
     "fold_scans",
     "raw_path",
     "record_size_samples",
+    "refusals",
+    "run_acquisition",
     "run_frame",
     "samples_at",
+    "send_phases",
     "stamp_globals",
     "start_chain",
     "summed_path",

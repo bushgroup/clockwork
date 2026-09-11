@@ -103,6 +103,7 @@ def run_frame(
     *,
     timeout: float,
     on_batch: Callable[[Batch], None] | None = None,
+    release: Callable[[], None] | None = None,
     allow_empty: bool = False,
     settle: float = EMPTY_SETTLE_S,
 ) -> Status:
@@ -112,6 +113,15 @@ def run_frame(
     thread has ended by the time `finished` arrives but has not been joined,
     and the next start would destroy it unjoined, which kills the process.
     It is sent even when the wait fails, for the same reason.
+
+    `release` is called once the console holds the frame and before the wait
+    for its end begins, and it is where the thing that actually starts the
+    experiment goes: on this instrument the digitizer's enable is a level a
+    box raises, so the frame has to be asked for while the gate is still low
+    and released afterwards (lab record, task 05). It runs inside the same
+    `try`, so a release that raises still leaves the console stopped and
+    ready for the next frame. What to put in it is `clockwork.acq.loop`'s
+    business, not this module's: nothing here knows what a box is.
 
     Returns the `finished` that ended the frame, and raises rather than
     returning it in three cases:
@@ -139,6 +149,8 @@ def run_frame(
     console.acquire_frame(request)
     scans_before = stream.scans
     try:
+        if release is not None:
+            release()
         status = stream.wait_for_status(FINISHED, timeout=timeout, on_batch=on_batch)
     finally:
         console.stop_frame()

@@ -44,6 +44,7 @@ belongs to one worker thread.
 from __future__ import annotations
 
 import time
+from collections import deque
 from collections.abc import Callable, Iterator
 
 import zmq
@@ -107,6 +108,7 @@ class DataStream:
         """Just the ones that reported a failure, for a caller that wants the
         session's history rather than the frame that raised."""
 
+        self._pushed_back: deque[Batch | Status] = deque()
         self._context = context if context is not None else zmq.Context.instance()
         socket = self._context.socket(zmq.SUB)
         socket.setsockopt(zmq.LINGER, 0)
@@ -131,9 +133,27 @@ class DataStream:
 
     def poll(self, timeout: float = 0.1) -> Batch | Status | None:
         """The next event, or None if `timeout` seconds pass with none."""
+        if self._pushed_back:
+            return self._pushed_back.popleft()
         if not self._socket.poll(int(timeout * 1000), zmq.POLLIN):
             return None
         return self._read()
+
+    def unread(self, event: Batch | Status) -> None:
+        """Put an event back, so the next `poll` returns it again.
+
+        For a caller that has to look at what is waiting without taking it:
+        the loop's enable-gate guard reads whatever arrived while a frame was
+        being released, and a status message among it belongs to whoever waits
+        for the frame to end rather than to the guard. ZeroMQ has no peek, so
+        the alternative would be the guard silently eating a `finished` or an
+        `error` (lab record, task 23).
+
+        Counters are not wound back: an event that was received stays counted,
+        which is what makes `scans` a record of what the console published
+        rather than of what a caller happened to read twice.
+        """
+        self._pushed_back.appendleft(event)
 
     def _read(self) -> Batch | Status:
         frames = self._socket.recv_multipart()

@@ -219,6 +219,25 @@ class FakeConsole:
         what makes them worth simulating (lab record, task 20).
         """
 
+        self.frame_hold_s = 0.0
+        """Seconds to wait inside a frame before publishing anything.
+
+        The one place this stand-in's lack of a clock changes what a correct
+        client looks like. On the instrument a frame is asked for while the
+        digitizer's enable is still low, the client then walks the method's
+        start list to raise it, and the first batch is `NotifyOnScansCount`
+        pushes of recording later -- 64.5 ms at the instrument's period, plus
+        the seconds the console's publisher lags behind (lab record, task 20).
+        Here a frame is published from inside the handler for `acquire frame`,
+        so the batches race the start list and can win, which makes a client
+        that guards against batches arriving too early fail at random.
+
+        A hold puts the ordering back. It is not a model of anything: the
+        instrument's delay is pushes and this is wall clock. Any value
+        comfortably longer than the start list makes the guard deterministic,
+        and the default of zero leaves every other caller's timing alone.
+        """
+
         self.frame_error: str | None = None
         """Published as `error <this>` before a frame's `finished`, if set.
 
@@ -506,6 +525,12 @@ class FakeConsole:
 
     def _run_frame(self, request: FrameRequest) -> None:
         """Publish the frame's batches and its end, with no time passing."""
+        if self.frame_hold_s > 0:
+            # The pushes a real frame spends waiting for its enable to go high;
+            # see `frame_hold_s`. The serve thread is blocked meanwhile, which
+            # is faithful enough: a client walking its start list is talking to
+            # boxes and not to the console.
+            time.sleep(self.frame_hold_s)
         remaining = int(request.frame_length)
         published = 0
         write_error: str | None = None
