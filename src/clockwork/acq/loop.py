@@ -64,6 +64,7 @@ from .wire import (
     AcqError,
     Batch,
     ConsoleAcquisitionError,
+    ConsoleInfo,
     EmptyFrameError,
     Status,
     TofWidth,
@@ -628,7 +629,10 @@ def run_acquisition(
         raise AcquisitionRefused("; ".join(problems))
     for message in method.warnings:
         report(Warned(message))
-    for message in _vertical_warnings(console, instrument):
+    # Asked once and used twice: the window check reads the full scale out of it, and a
+    # recording created below stamps the whole string as the console that acquired it.
+    info = console.info()
+    for message in _vertical_warnings(console, instrument, info):
         report(Warned(message))
     missing = [entry.box for entry in method.start + method.reset
                if entry.box not in boxes]
@@ -655,7 +659,7 @@ def run_acquisition(
             )
             recording = Recording.create(
                 directory, method, geometry, stem=stem, instrument=instrument,
-                adc_name=adc_name, console_version=console.info().text,
+                adc_name=adc_name, console_version=info.text,
                 clock=clock, started=started, overwrite=overwrite,
             )
         loop = _Loop(
@@ -681,32 +685,42 @@ def run_acquisition(
     return dataclasses.replace(run, raw_kept=os.path.isfile(run.raw_path))
 
 
-def _vertical_warnings(console: Console, instrument: Instrument) -> list[str]:
+def _vertical_warnings(
+    console: Console, instrument: Instrument, info: ConsoleInfo | None = None
+) -> list[str]:
     """Whether the window the instrument document describes is the one the card is in.
 
     The stamp records the vertical settings so that two files acquired through different
     ranges can be told apart (lab record, task 25), and a document that has drifted from
-    the machine makes that record wrong rather than absent. Only the offset can be
-    checked: the console reads its full scale from `config.txt` at startup and does not
-    report it back, so half the window is unverifiable until the fork's `get_info` says
-    what it is using (routed to task 24).
+    the machine makes that record wrong rather than absent. **Both halves of the window
+    are checkable since task 24**: the offset is what this client last sent, and the full
+    scale is what `info` reports the console is using. A console that reports no full
+    scale is a stock build or an older fork, and leaves that half unchecked as before.
 
-    A warning and not a refusal, for that reason. A check that can only ever see one of
-    two settings is not a thing to stop a run on, and the message names both numbers and
-    which of them is the machine, so that a trainee can act on it without opening
-    anything.
+    Warnings and not refusals. The two disagreements are stamped differently, since the
+    console is the authority on the full scale and the document is the only source for
+    the offset, and each message says which value the file will carry. Both name the two
+    numbers and which of them is the machine, so that a trainee can act on one without
+    opening anything.
     """
-    declared = instrument.vertical.offset_v
-    actual = console.offset_v
-    if declared is None or actual is None:
-        return []
-    if math.isclose(declared, actual, rel_tol=1e-9, abs_tol=1e-12):
-        return []
-    return [
-        f"the console was set to a channel offset of {actual} V and the instrument "
-        f"document says {declared} V; the file will be stamped with the document's "
-        "value, so one of the two is wrong"
-    ]
+    pairs = (
+        ("channel offset", instrument.vertical.offset_v, console.offset_v,
+         "the file will be stamped with the document's value"),
+        ("full scale", instrument.vertical.full_scale_v,
+         info.full_scale_v if info is not None else None,
+         "the file will be stamped with the console's value"),
+    )
+    messages: list[str] = []
+    for name, declared, actual, stamped in pairs:
+        if declared is None or actual is None:
+            continue
+        if math.isclose(declared, actual, rel_tol=1e-9, abs_tol=1e-12):
+            continue
+        messages.append(
+            f"the console was set to a {name} of {actual} V and the instrument "
+            f"document says {declared} V; {stamped}, so one of the two is wrong"
+        )
+    return messages
 
 
 def _sample_rate(console: Console) -> float:

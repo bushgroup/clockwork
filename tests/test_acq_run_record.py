@@ -253,6 +253,47 @@ def test_the_two_new_keys_sit_in_clockworks_own_block(tmp_path, geometry):
     assert len(ids) == len(set(ids)), "two parameters would collide on one ID"
 
 
+def test_the_stamped_full_scale_is_the_one_the_console_reports() -> None:
+    """One of the two numbers is the card and the other is a file somebody edited
+    (lab record, task 24)."""
+    machine = instrument_module.Instrument(
+        vertical=instrument_module.Vertical(full_scale_v=0.5, offset_v=0.251)
+    )
+    stamped = stamp_globals(
+        make_method(), instrument=machine,
+        console_version=(
+            "App Version: 1.2.0-c1cfd01"
+            " / Fork: bushgroup/AqMD3-Acquisition-Console@clockwork"
+            " / Full Scale: 2.5"
+        ),
+    )
+    values = {getattr(key, "name", key): value for key, value in stamped.items()}
+    assert values["ClockworkFullScale"] == 2.5
+    # The offset has no such contest: the console only knows what it was sent.
+    assert values["ClockworkChannelOffset"] == 0.251
+
+
+def test_a_console_that_reports_no_full_scale_leaves_the_documents() -> None:
+    """Every stock build, and every fork before the one that added the field."""
+    machine = instrument_module.Instrument(
+        vertical=instrument_module.Vertical(full_scale_v=0.5)
+    )
+    stamped = stamp_globals(
+        make_method(), instrument=machine,
+        console_version="App Version: 0.1.0-8c5ed07 / Fork: bushgroup/x@clockwork",
+    )
+    values = {getattr(key, "name", key): value for key, value in stamped.items()}
+    assert values["ClockworkFullScale"] == 0.5
+
+
+def test_a_reported_full_scale_is_stamped_with_no_document_at_all() -> None:
+    """A rig with no instrument document still acquired through a real window."""
+    stamped = stamp_globals(make_method(), console_version="Full Scale: 2.5")
+    values = {getattr(key, "name", key): value for key, value in stamped.items()}
+    assert values["ClockworkFullScale"] == 2.5
+    assert "ClockworkChannelOffset" not in values
+
+
 def test_an_instrument_with_no_window_stamps_no_window() -> None:
     """Absent is a better statement than a made-up number, and a rig in front of a
     function generator has no window to state."""

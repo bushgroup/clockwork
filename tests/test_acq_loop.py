@@ -625,9 +625,9 @@ def test_an_offset_that_agrees_is_not_warned_about(rig):
     assert [event for event in seen if isinstance(event, Warned)] == []
 
 
-def test_only_the_offset_can_be_checked_against_the_console() -> None:
-    """Full scale is a `config.txt` key the console does not report back, so half the
-    window is unverifiable until the fork's `get_info` says what it is using."""
+def test_the_offset_is_checked_against_what_the_client_sent() -> None:
+    """The console only ever knows the offset this client gave it, so the document is
+    the only other source and a disagreement is the document's to fix."""
     from clockwork.acq.loop import _vertical_warnings
     from clockwork.instrument import Instrument, Vertical
 
@@ -645,6 +645,49 @@ def test_only_the_offset_can_be_checked_against_the_console() -> None:
     warnings = _vertical_warnings(Stub(), machine)
     assert len(warnings) == 1
     assert "0.2 V" in warnings[0] and "0.251 V" in warnings[0]
+    assert "document's value" in warnings[0], "the document is what the file carries"
+
+
+def test_the_full_scale_is_checked_against_what_the_console_reports() -> None:
+    """The half of the window that was unverifiable until the fork's `info` reported it
+    (lab record, task 24). Here the console is the authority, not the document."""
+    from clockwork.acq.loop import _vertical_warnings
+    from clockwork.acq.wire import ConsoleInfo
+    from clockwork.instrument import Instrument, Vertical
+
+    machine = Instrument(vertical=Vertical(full_scale_v=0.5, offset_v=0.251))
+
+    class Stub:
+        offset_v = 0.251
+
+    agrees = ConsoleInfo.parse("Full Scale: 0.5")
+    assert _vertical_warnings(Stub(), machine, agrees) == []
+
+    disagrees = ConsoleInfo.parse("Full Scale: 2.5")
+    warnings = _vertical_warnings(Stub(), machine, disagrees)
+    assert len(warnings) == 1
+    assert "full scale" in warnings[0]
+    assert "2.5 V" in warnings[0] and "0.5 V" in warnings[0]
+    assert "console's value" in warnings[0], "the console is what the file carries"
+
+    silent = ConsoleInfo.parse("App Version: 0.1.0-8c5ed07")
+    assert _vertical_warnings(Stub(), machine, silent) == [], (
+        "a console that reports no full scale leaves that half unchecked, as before"
+    )
+
+
+def test_both_halves_of_the_window_can_disagree_at_once() -> None:
+    from clockwork.acq.loop import _vertical_warnings
+    from clockwork.acq.wire import ConsoleInfo
+    from clockwork.instrument import Instrument, Vertical
+
+    machine = Instrument(vertical=Vertical(full_scale_v=0.5, offset_v=0.251))
+
+    class Stub:
+        offset_v = 0.200
+
+    warnings = _vertical_warnings(Stub(), machine, ConsoleInfo.parse("Full Scale: 2.5"))
+    assert len(warnings) == 2
 
 
 def test_a_document_with_no_offset_checks_nothing() -> None:

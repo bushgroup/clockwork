@@ -60,7 +60,7 @@ from mainspring.uimf.writer import CLIENT_PARAM_ID_BASE, ParamDef
 
 from ..instrument import UNCALIBRATED, Instrument
 from ..method import Method, stamp
-from .wire import FrameRequest, TofWidth
+from .wire import ConsoleInfo, FrameRequest, TofWidth
 
 __all__ = [
     "PROVENANCE_KEYS",
@@ -95,8 +95,9 @@ PROVENANCE_KEYS: tuple[tuple[ParamDef, str], ...] = (
               "Channel 1 input offset in volts, as clockwork set it for this acquisition"),
      "channel_offset_v"),
     (ParamDef(CLIENT_PARAM_ID_BASE + 6, "ClockworkFullScale", "System.Double",
-              "Channel 1 full scale in volts in force for this acquisition, as configured; "
-              "the console reads it from config.txt at startup and does not report it back"),
+              "Channel 1 full scale in volts in force for this acquisition, as the console "
+              "reported it, or as the instrument document declared it when the console "
+              "reports none"),
      "full_scale_v"),
 )
 """The stamp's fields as `Global_Params` parameters, each paired with the `stamp()` key
@@ -117,11 +118,13 @@ The last two are the vertical settings in force, which the stamp did not record 
 task 25. Two files acquired through different ranges, or on either side of an
 attenuator, are otherwise indistinguishable once they leave the instrument, and the
 chain in front of this digitizer changed on the day it was cabled up. The offset is
-clockwork's own `vertical` command and the console confirms it; the full scale is a
-`config.txt` key the console reads at startup and does not report back, so what the file
-carries is the value the lab configured. That distinction is in the parameter's own
-description rather than in a third key, because `ParamDescription` is written into
-`Global_Params` beside the value and a reader has both.
+clockwork's own `vertical` command, which the console confirms. The full scale is a
+`config.txt` key the console reads at startup, and since task 24 the fork reports it in
+its `info` reply, so a file carries what the card is set to and falls back to what the
+instrument document declared only against a console that reports none. Which of the two
+a file holds is in the parameter's own description rather than in a third key, because
+`ParamDescription` is written into `Global_Params` beside the value and a reader has
+both.
 """
 
 SA220P_DETECTOR_BITS = 14
@@ -721,7 +724,14 @@ def stamp_globals(
     # they join the record here rather than there. `None` for either is written by
     # nothing: a rig with no configured window states no window (lab record, task 25).
     record["channel_offset_v"] = instrument.vertical.offset_v
-    record["full_scale_v"] = instrument.vertical.full_scale_v
+    # The full scale the console reports beats the one the document declares, because one
+    # of them is the card and the other is a file somebody edited. A console that reports
+    # none leaves the document's value, which is every stock build and every fork before
+    # the one that added it (lab record, task 24). The offset has no such contest: the
+    # console only ever knows what this client last sent it.
+    reported = ConsoleInfo.parse(console_version).full_scale_v if console_version else None
+    record["full_scale_v"] = (reported if reported is not None
+                              else instrument.vertical.full_scale_v)
     values: dict[str, object] = {"AcquisitionMethod": record["method_name"]}
     if adc_name:
         values["ADCName"] = adc_name

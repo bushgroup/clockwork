@@ -492,6 +492,7 @@ class ConsoleInfo:
     version: str = ""
     fork: str = ""
     branch: str = ""
+    full_scale: str = ""
 
     _LABELS = (
         ("Digitizer Model:", "model"),
@@ -500,12 +501,30 @@ class ConsoleInfo:
         ("App:", "app"),
         ("App Version:", "version"),
         ("Fork:", "fork"),
+        ("Full Scale:", "full_scale"),
     )
 
     @property
     def is_fork(self) -> bool:
         """Whether this console reads the six settings from `config.txt`."""
         return bool(self.fork)
+
+    @property
+    def full_scale_v(self) -> float | None:
+        """The channel 1 full scale the console reports it is using, in volts.
+
+        `None` from a console that reports none, which is a stock build or a
+        fork older than the build that added it. Of the six settings the fork
+        moves into `config.txt` this is the only one the protocol reports back,
+        and reported is the difference that matters to a file's provenance: the
+        console reads `FullScaleRange` once at startup, so an instrument
+        document that has drifted from the machine is a document rather than a
+        measurement (lab record, task 24).
+        """
+        try:
+            return float(self.full_scale)
+        except ValueError:
+            return None
 
     @classmethod
     def parse(cls, text: str) -> ConsoleInfo:

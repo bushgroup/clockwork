@@ -67,7 +67,8 @@ import time
 
 import numpy as np
 import zmq
-from mainspring.uimf import encode_intensities
+from mainspring.uimf import Calibration, encode_intensities
+from mainspring.uimf.writer import FRAME_KEYS, GLOBAL_KEYS
 
 from .wire import (
     ACK,
@@ -128,6 +129,7 @@ class FakeConsole:
         version: str = "0.1.0-8c5ed07",
         fork: str = "bushgroup/AqMD3-Acquisition-Console",
         branch: str = "clockwork",
+        full_scale_v: float | None = 0.5,
         instruments: int = 1,
         pusher_period_samples: int = DEFAULT_PERIOD_SAMPLES,
         post_trigger_samples: int = DEFAULT_POST_TRIGGER_SAMPLES,
@@ -149,6 +151,11 @@ class FakeConsole:
         the build that ignores everything `config.txt` says."""
 
         self.branch = branch
+        self.full_scale_v = full_scale_v
+        """The full scale `info` reports, which only a fork does. `None` leaves it
+        out, which is what a stock console and every fork before the build that
+        added it answer."""
+
         self.instruments = instruments
         self.notify_on_scans_count = notify_on_scans_count
         self.scan_period = int(scan_period)
@@ -413,6 +420,8 @@ class FakeConsole:
         )
         if self.fork:
             text += f" / Fork: {self.fork}@{self.branch}"
+            if self.full_scale_v is not None:
+                text += f" / Full Scale: {self.full_scale_v}"
         self._respond(identity, text.encode("utf-8"))
 
     def _do_firmware(self, identity: bytes, _: list[bytes]) -> None:
@@ -578,6 +587,7 @@ class FakeConsole:
         conn = sqlite3.connect(request.file_name, isolation_level=None)
         try:
             conn.execute("PRAGMA synchronous = 0")
+            calibration = self._calibration(conn, request.frame_number)
             rows = []
             for offset in range(scans):
                 scan = first_scan + offset
@@ -594,7 +604,9 @@ class FakeConsole:
                 peak = int(np.argmax(intensity))
                 rows.append((
                     int(request.frame_number), scan, int(intensity.size),
-                    int(intensity[peak]), float(bin_index[peak]),
+                    int(intensity[peak]),
+                    (calibration.mz(float(bin_index[peak])) if calibration.usable
+                     else float(bin_index[peak])),
                     int(intensity.sum()), blob,
                 ))
             if not rows:
@@ -612,6 +624,43 @@ class FakeConsole:
             conn.close()
         return None
 
+    def _calibration(self, conn: sqlite3.Connection, frame: int) -> Calibration:
+        """The calibration the frame states, read back as the console's writer reads it.
+
+        `BPI_MZ` is defined as an m/z and the fork computes one from the frame's own
+        `CalibrationSlope` and `CalibrationIntercept` and the global `BinWidth`, all of
+        which a client writes before it asks for the frame (lab record, task 24). A frame
+        that states no usable calibration keeps the base peak's bin index, which is what
+        the console did on every row before that build and what a file with no mass axis
+        still gets.
+
+        Read per batch rather than remembered, because the console holds no state across
+        batches either: it opens the file, writes, and closes.
+        """
+        found = {}
+        bin_width = 0.0
+        try:
+            for param_id, value in conn.execute(
+                "SELECT ParamID, ParamValue FROM Frame_Params"
+                " WHERE FrameNum = ? AND ParamID IN (?, ?)",
+                (int(frame), FRAME_KEYS["CalibrationSlope"].param_id,
+                 FRAME_KEYS["CalibrationIntercept"].param_id),
+            ):
+                found[int(param_id)] = float(value)
+            row = conn.execute(
+                "SELECT ParamValue FROM Global_Params WHERE ParamID = ?",
+                (GLOBAL_KEYS["BinWidth"].param_id,),
+            ).fetchone()
+            bin_width = float(row[0]) if row else 0.0
+        except (sqlite3.Error, TypeError, ValueError):
+            # A file whose parameters cannot be read is still a file worth writing scans
+            # to, which is what the console does with the same failure.
+            return Calibration(slope=0.0, intercept=0.0, bin_width_ns=0.0, done=False)
+        slope = found.get(FRAME_KEYS["CalibrationSlope"].param_id, 0.0)
+        intercept = found.get(FRAME_KEYS["CalibrationIntercept"].param_id, 0.0)
+        return Calibration(slope=slope, intercept=intercept, bin_width_ns=bin_width,
+                           done=slope > 0.0)
+
     def _scan_spectrum(self, scan: int) -> tuple[list[int], list[int]]:
         """The invented spectrum of one push, which repeats every `scan_period`.
 
@@ -625,8 +674,6 @@ class FakeConsole:
         frames, `single_frame` adds blocks of `Scans` inside one, and both land
         on the same answer only if the period divides `Scans`.
 
-        `BPI_MZ` is written as the base peak's **bin index** rather than its m/z,
-        which is what the console's own source does with that column.
         """
         phase = scan % self.scan_period
         if phase == self.scan_period - 1:

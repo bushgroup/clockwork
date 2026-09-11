@@ -197,6 +197,39 @@ def test_the_info_reply_names_the_fork_when_there_is_one() -> None:
     assert stock.fork == "" and stock.branch == ""
 
 
+def test_the_info_reply_carries_the_full_scale_in_force() -> None:
+    """The one setting of the six the protocol reports back, so a file can be stamped
+    with what the card is set to rather than with what a config file says."""
+    reported = ConsoleInfo.parse(
+        "Digitizer Model: SA220P / Digitizer Serial No.: AQ00070766"
+        " / Digitizer Firmware Version: 2.7.1811 / App: AqMD3_console"
+        " / App Version: 1.2.0-c1cfd01"
+        " / Fork: bushgroup/AqMD3-Acquisition-Console@clockwork"
+        " / Full Scale: 0.5"
+    )
+    assert reported.full_scale == "0.5"
+    assert reported.full_scale_v == 0.5
+    # The field is appended after the fork, so everything before it still parses.
+    assert reported.branch == "clockwork"
+    assert reported.version == "1.2.0-c1cfd01"
+
+    older = ConsoleInfo.parse(
+        "Digitizer Model: SA220P / Digitizer Serial No.: AQ00070766"
+        " / Digitizer Firmware Version: 2.7.1811 / App: AqMD3_console"
+        " / App Version: 0.1.0-8c5ed07"
+        " / Fork: bushgroup/AqMD3-Acquisition-Console@clockwork"
+    )
+    assert older.is_fork, "a fork older than the build that added it is still a fork"
+    assert older.full_scale_v is None
+
+
+def test_a_full_scale_that_is_not_a_number_is_no_full_scale() -> None:
+    """A later console could word it differently; a wrong number is worse than none."""
+    info = ConsoleInfo.parse("App Version: 9.9.9 / Full Scale: whatever it likes")
+    assert info.full_scale == "whatever it likes"
+    assert info.full_scale_v is None
+
+
 def test_an_unrecognised_info_reply_is_kept_whole() -> None:
     info = ConsoleInfo.parse("something a later console says")
     assert info.text == "something a later console says"
