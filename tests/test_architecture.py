@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method",
-                "clockwork.instrument")
+                "clockwork.instrument", "clockwork.transcript")
 
 PROBE = """
 import importlib, sys

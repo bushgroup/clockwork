@@ -45,6 +45,7 @@ second frame's `acquire frame` meets a gate that is already high. See
 from __future__ import annotations
 
 import dataclasses
+import logging
 import math
 import os
 import time
@@ -95,6 +96,15 @@ __all__ = [
     "run_acquisition",
     "send_phases",
 ]
+
+_LOG = logging.getLogger("clockwork.acq.loop")
+"""The transcript's name for the loop's own narrative (`clockwork.transcript`).
+
+Every `Event` this module reports goes here as well as to the caller's `progress`,
+so that a transcript holds what the loop decided beside what the two links
+carried. It is the one of the four names that is not the wire, which matters when
+the two disagree: an `EnableGateError` is this module's judgement about batches
+`clockwork.acq.stream` recorded arriving, and both lines are in the file."""
 
 SILENCE_S = 6.0
 """How long the data stream has to be quiet before a frame is taken to be over.
@@ -486,7 +496,7 @@ def send_phases(
     Raises whatever the box raised, after reporting it, so a refused string stops the
     send rather than leaving a half-loaded instrument that looks armed.
     """
-    report = progress if progress is not None else _ignore
+    report = _reporter(progress)
     for message in method.warnings:
         report(Warned(message))
     missing = [box.name for box in method.boxes if box.name not in boxes]
@@ -623,7 +633,7 @@ def run_acquisition(
     against their frame, which is left provisional in the file, and the run goes on to
     the next one. `abort_after` consecutive failures ends it early and says so.
     """
-    report = progress if progress is not None else _ignore
+    report = _reporter(progress)
     problems = refusals(method)
     if problems:
         raise AcquisitionRefused("; ".join(problems))
@@ -743,6 +753,25 @@ def _frame_timeout(method: Method, geometry: Geometry) -> float:
 
 def _ignore(_: Event) -> None:
     """The progress callback a caller that wants none gets."""
+
+
+def _reporter(progress: Callable[[Event], None] | None) -> Callable[[Event], None]:
+    """The caller's progress callback, with the transcript in front of it.
+
+    Wrapped rather than left to the caller because a window that draws a status
+    line and a bench script that prints one should not each have to remember to
+    write the same events to the file as well. The level is checked per event
+    rather than once, so a transcript opened part way through a run catches the
+    rest of it.
+    """
+    report = progress if progress is not None else _ignore
+
+    def reported(event: Event) -> None:
+        if _LOG.isEnabledFor(logging.DEBUG):
+            _LOG.debug("%s: %s", type(event).__name__, event.text)
+        report(event)
+
+    return reported
 
 
 @dataclass

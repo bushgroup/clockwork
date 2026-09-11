@@ -13,7 +13,9 @@ frame to `finished acquire`, and a frame that published nothing and a frame the 
 reported an error on are both refused rather than reported as successes, and a whole
 acquisition goes through the UIMF path -- clockwork creates the file, a simulated console
 appends its scans, mainspring reads them back, and the fold sums a method frame's
-repetitions to exactly A times one of them. Tasks add sections as they land code.
+repetitions to exactly A times one of them, and a whole stand-in acquisition run with a
+wire transcript open leaves a file naming every frame it acquired -- while the same run
+with none open emits no record at all. Tasks add sections as they land code.
 
 Run:  uv run tools/check_public.py
 """
@@ -69,7 +71,7 @@ def declared_versions() -> dict[str, str]:
 
 
 LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method",
-                "clockwork.instrument")
+                "clockwork.instrument", "clockwork.transcript")
 QT_PREFIXES = ("PySide6", "PyQt", "pyqtgraph", "shiboken")
 
 
@@ -641,6 +643,95 @@ def main() -> int:
                     and not UimfFile(stalled.raw_path).frame_params(1).marked_complete,
                 )
                 console.stop_acquire()
+
+    section("wire transcript")
+    # Task 29. The three bench scripts and the window write one of these beside every
+    # run, and it is the only record of what the boxes and the console actually said;
+    # everything else in either repo is what some caller chose to compute. So the check
+    # is that a whole stand-in acquisition leaves a file naming the frames it acquired,
+    # with both links and the loop's own narrative in it, and that with no transcript
+    # open the same run emits nothing at all.
+    from clockwork import transcript as transcript_module
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, transcript_module.default_name("selfcheck"))
+        boxes = {"box1": mips_module.Box(transport=mips_module.FakeBox(), name="box1")}
+        with acq.FakeConsole() as fake:
+            fake.frame_hold_s = 0.05
+            with acq.DataStream(fake.data_endpoint) as stream, \
+                    acq.Console(fake.command_endpoint) as console:
+                console.configure(offset_v=0.251)
+                with transcript_module.to_file(
+                    path, header="tools/check_public.py, against the stand-ins"
+                ):
+                    acq.send_phases(recipe, boxes)
+                    transcribed = acq.run_acquisition(
+                        recipe, boxes=boxes, console=console, stream=stream,
+                        directory=directory,
+                        post_trigger_samples=fake.post_trigger_samples,
+                        stem="selfcheck-transcript", silence=0.3,
+                    )
+                console.stop_acquire()
+
+        written = open(path, encoding="utf-8").read()
+        check_true(
+            f"a transcript of a whole acquisition is written and closed "
+            f"({os.path.getsize(path)} bytes)",
+            transcribed.complete and written.endswith("\n")
+            and "closed after" in written,
+        )
+        check_true(
+            "and it names every frame the run acquired",
+            all(f"file frame {number}" in written
+                for number in range(1, accumulations + 1)),
+        )
+        check_true(
+            "and carries both links and the loop's own narrative",
+            "mips.wire" in written and "acq.wire" in written
+            and "acq.stream" in written and "acq.loop" in written,
+        )
+        check_true(
+            "the box's bytes are there as repr, with the framing visible",
+            r"b'SMOD,TBL\n'" in written and "! TBLRDY" in written,
+        )
+        check_true(
+            "the table's chunk boundaries are there, and so is the string itself",
+            ">   chunk 1/" in written and "of stall margin" in written
+            and "string: STBLDAT;" in written,
+        )
+        check_true(
+            "the console's commands, its replies and the frames it was asked for "
+            "are there",
+            "> acquire frame | <" in written and "< ack" in written
+            and "acquire frame 1:" in written,
+        )
+        check_true(
+            "a batch is one summary line and never a payload",
+            all(len(line) < 200 for line in written.splitlines()
+                if " batch " in line),
+        )
+
+        # And the other half: nothing is emitted when nothing is listening. The package
+        # attaches no handler and sets no level, so every call site is a level check
+        # that fails and no record is ever built.
+        import logging as _logging
+
+        counted: list[_logging.LogRecord] = []
+
+        class _Count(_logging.Handler):
+            def emit(self, record: _logging.LogRecord) -> None:
+                counted.append(record)
+
+        quiet = _Count()
+        _logging.getLogger("clockwork").addHandler(quiet)
+        try:
+            silent = mips_module.Box(transport=mips_module.FakeBox(), name="box1")
+            silent.send_table("STBLDAT;0:[A:1,100:];")
+            silent.arm()
+        finally:
+            _logging.getLogger("clockwork").removeHandler(quiet)
+        check_true("and a transcript that is not open costs no records at all",
+                   counted == [])
 
     section("hardware")
     skip("a MIPS box answers GVER", "no serial hardware in a self-check; lab record, task 04")

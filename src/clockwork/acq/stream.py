@@ -37,12 +37,24 @@ keeps the socket afterwards, so one subscription lasts a session. What is not
 recoverable is subscribing late: a subscription that has not reached the
 console yet loses whatever was published in the meantime.
 
+*Every message is offered to a transcript*, on `clockwork.acq.stream`: a status
+message verbatim, and a batch as one line saying how many scans it carried over
+what trigger timestamps in how many bytes, numbered within the session because
+this layer does not know what a frame is. Never the payload -- the `mz`, `tic`
+and `time_stamps` arrays are a display product of hundreds of kilobytes, the
+acquired data goes from the console into the UIMF file without passing through
+here, and a transcript that tried to carry them would be the one thing this
+socket cannot afford (`clockwork.transcript`). At the instrument's 500-scan batch
+the summary is about fifteen lines a second, so it keeps up by being small rather
+than by dropping records.
+
 Blocking, like the command socket, and the same thread rule: one `DataStream`
 belongs to one worker thread.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import deque
 from collections.abc import Callable, Iterator
@@ -58,6 +70,9 @@ from .wire import (
     Status,
     decode_batch,
 )
+
+_LOG = logging.getLogger("clockwork.acq.stream")
+"""The transcript's name for the data socket. See `clockwork.transcript`."""
 
 QUEUE_MESSAGES = 200
 """Messages to hold before the oldest are dropped.
@@ -167,6 +182,12 @@ class DataStream:
             batch = decode_batch(frames[1], received_at=received_at)
             self.batches += 1
             self.scans += batch.scans
+            if _LOG.isEnabledFor(logging.DEBUG):
+                stamps = batch.time_stamps
+                span = (f"{int(stamps[0])}-{int(stamps[-1])}" if stamps.size else "none")
+                _LOG.debug("batch %d: %d scans, timestamps %s, %d bins, %d bytes on the wire",
+                           self.batches, batch.scans, span, int(batch.mz.size),
+                           len(frames[1]))
             return batch
         # Anything that is not data is a plain string, which today means the
         # status topic. A topic a later console adds arrives here rather than
@@ -179,6 +200,7 @@ class DataStream:
         self.statuses.append(status)
         if status.is_error:
             self.errors.append(status)
+        _LOG.debug("%s %r", topic, status.text)
         return status
 
     def drain(self, timeout: float = 0.0) -> list[Batch | Status]:

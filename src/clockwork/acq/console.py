@@ -32,6 +32,12 @@ something checks them: `acquiring` for the chain, `running` for an acquisition
 inside it. `session.py` puts the whole sequence in two functions so that a
 caller does not have to hold it in mind.
 
+*Every request and every reply is offered to a transcript.* `clockwork.acq.wire`
+gets a record per command sent, per reply, per refusal, and per timeout with the
+socket reset that follows it, so that a console fault on a bench day survives the
+terminal it scrolled off (`clockwork.transcript`). With no transcript open the
+level check fails and no record is built.
+
 Blocking, and deliberately so: every request waits on a deadline. Nothing here
 may be called from the UI thread. A ZeroMQ socket belongs to the thread that
 made it, so one `Console` belongs to one worker thread and is not shared.
@@ -39,10 +45,12 @@ made it, so one `Console` belongs to one worker thread and is not shared.
 
 from __future__ import annotations
 
+import logging
 import time
 
 import zmq
 
+from ..transcript import MAX_BYTES as _MAX_BYTES
 from .wire import (
     ACK,
     COMMAND_PORT,
@@ -57,6 +65,9 @@ from .wire import (
     TofWidth,
     decode_tof_width,
 )
+
+_LOG = logging.getLogger("clockwork.acq.wire")
+"""The transcript's name for the command socket. See `clockwork.transcript`."""
 
 DEFAULT_TIMEOUT_S = 10.0
 """Long enough for any command that does not wait on the digitizer.
@@ -153,16 +164,19 @@ class Console:
         not, and must not claim to know what that process chose."""
 
         self.last_reply_seconds = 0.0
-        """How long the last answered request waited.
+        """How long the last answered request waited, on `time.perf_counter`.
 
         The console times nothing on its behalf, so this is the only figure a
         client has for how long a command actually cost: the 5.2 s card open,
-        the period measurement, the setup of a frame.
+        the period measurement, the setup of a frame. `perf_counter` because on
+        Windows `monotonic` ticks at about 15.6 ms, which rounds every command
+        but the card open to zero.
         """
 
         self._context = context if context is not None else zmq.Context.instance()
         self._socket: zmq.Socket | None = None
         self._open_socket()
+        _LOG.debug("console at %s, %g s timeout", self.endpoint, self.timeout)
 
     # -- the socket --------------------------------------------------------
 
@@ -206,6 +220,8 @@ class Console:
         """
         if self._socket is None:
             raise AcqError("this Console is closed")
+        if _LOG.isEnabledFor(logging.DEBUG):
+            _LOG.debug("> %s (sent without waiting)", _shown(frames))
         self._socket.send_multipart([b""] + [_frame(part) for part in frames])
 
     def request(
@@ -229,17 +245,28 @@ class Console:
                 "send it with send_only if it is wanted at all"
             )
         deadline = self.timeout if timeout is None else timeout
+        if _LOG.isEnabledFor(logging.DEBUG):
+            _LOG.debug("> %s", _shown(frames))
         self._socket.send_multipart([b""] + [_frame(part) for part in frames])
-        started = time.monotonic()
+        # perf_counter, not monotonic: on Windows `time.monotonic()` ticks at about
+        # 15.6 ms, which reports every command that is not the card open as having
+        # cost nothing at all -- in `last_reply_seconds` and in the transcript line
+        # this figure is written to.
+        started = time.perf_counter()
         if not self._socket.poll(int(deadline * 1000), zmq.POLLIN):
             self._reset_socket()
+            _LOG.debug("! %s unanswered after %g s; socket thrown away and reconnected",
+                       command, deadline)
             raise ConsoleTimeout(
                 f"the console at {self.endpoint} did not answer {command!r} "
                 f"within {deadline:g} s"
             )
         reply = self._socket.recv_multipart()
+        waited = time.perf_counter() - started
         if reply and reply[0] == b"":
             reply = reply[1:]
+        if _LOG.isEnabledFor(logging.DEBUG):
+            _LOG.debug("< %s (%.3f s)", _shown(reply), waited)
         if len(reply) == 1 and _is_error_reply(reply[0]):
             raise ConsoleCommandError(
                 f"the console refused {command!r}: "
@@ -250,7 +277,7 @@ class Console:
                 f"{command!r} answered with {len(reply)} frames, not {replies}: "
                 f"{[part[:64] for part in reply]!r}"
             )
-        self.last_reply_seconds = time.monotonic() - started
+        self.last_reply_seconds = waited
         return reply
 
     def _ack(self, *frames: str, timeout: float | None = None) -> None:
@@ -391,6 +418,16 @@ class Console:
                 "after one has ended it would destroy a thread the console has not joined, "
                 "which kills the console process"
             )
+        if _LOG.isEnabledFor(logging.DEBUG):
+            # The request in words as well as in bytes. Its frame is Snappy-compressed
+            # protobuf, so the line the generic transcript writes for it says only how
+            # big it was, and the numbers in it are what a reader of the file wants.
+            _LOG.debug("  acquire frame %d: %d scans, %d accumulations, offset_bins %d, "
+                       "start_trigger %d, type %s, into %r",
+                       request.frame_number, request.frame_length,
+                       request.nbr_accumulations, request.offset_bins,
+                       request.start_trigger, request.frame_type,
+                       request.file_name or "(nothing, published only)")
         self._ack("acquire frame", request.encode())
         self.running = True
 
@@ -463,6 +500,33 @@ class Console:
 def _frame(part: str | bytes) -> bytes:
     """Command frames are plain strings; only `acquire frame`'s is bytes."""
     return part if isinstance(part, bytes) else part.encode("utf-8")
+
+
+def _shown(frames: "tuple[str | bytes, ...] | list[bytes]") -> str:
+    """One multipart message as a transcript line.
+
+    Almost everything on this socket is text and is shown as text. The three
+    exceptions are binary and stay binary: `acquire frame`'s Snappy-compressed
+    protobuf request, and the message and digest `acquire` and `tof width` answer
+    with. Those are rendered as a size, because a hex dump of a compressed
+    protobuf is not evidence of anything a reader could act on, and because the
+    fields that matter are logged in words where they are built.
+    """
+    parts = []
+    for part in frames:
+        if isinstance(part, str):
+            parts.append(part)
+            continue
+        try:
+            text = part.decode("ascii")
+        except UnicodeDecodeError:
+            parts.append(f"<{len(part)} bytes>")
+            continue
+        if text.isprintable() and len(text) <= _MAX_BYTES:
+            parts.append(text)
+        else:
+            parts.append(f"<{len(part)} bytes>")
+    return " | ".join(parts) if parts else "<empty>"
 
 
 def _is_error_reply(frame: bytes) -> bool:

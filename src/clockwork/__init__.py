@@ -14,13 +14,24 @@ Three layers under one seam, none of which imports Qt:
 and `app`, the PySide6 window on top of them. Anything that imports the three
 lower layers must keep working with no GUI stack installed, which is what lets
 a script drive one box and what `tools/check_public.py` exercises.
+
+`transcript` is a fifth module and is not a layer: it is the one helper that
+turns the wire loggers the three lower layers emit to into a file beside a run's
+results. Importing clockwork configures no logging at all.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 
 __version__ = "0.1.0"
+
+# The library emits records and configures nothing: no handler, no level, no
+# format. `clockwork.transcript.to_file` is the only thing that attaches one,
+# and a caller who wants the records elsewhere attaches their own handler to
+# `clockwork` or to one of the four names `transcript.LOGGERS` documents.
+logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))

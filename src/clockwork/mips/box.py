@@ -24,14 +24,26 @@ timeout is a measurement rather than an assumption.
 
 Blocking, and deliberately so: every read waits on a deadline. Nothing here may
 be called from the UI thread.
+
+*Everything that crosses the link is offered to a transcript.* `clockwork.mips.wire`
+gets a record per write, a record per non-empty read, the `STBLDAT` chunk structure,
+and each asynchronous status line as it is classified, so that a bench day leaves a
+byte-level record of what a box actually said rather than only what a script chose
+to compute from it (`clockwork.transcript`). With no transcript open the level check
+fails and no record is built. The one place this is not done inline is the table
+send; `send_table` says why. A caller that writes on `box.transport` itself is
+transcribed on the read side and not on the write side, and should say what it sent
+with `clockwork.transcript.note`.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
 
+from ..transcript import render as _render
 from . import table as _table
 from .transport import Transport, open_serial
 from .wire import (
@@ -44,6 +56,9 @@ from .wire import (
     error_text,
     table_event,
 )
+
+_LOG = logging.getLogger("clockwork.mips.wire")
+"""The transcript's name for this link. Documented in `clockwork.transcript`."""
 
 DEFAULT_TIMEOUT_S = 2.0
 """Long enough for any command that is not a table load, on a USB link."""
@@ -163,7 +178,20 @@ class Box:
         """Read once and frame whatever came."""
         data = self.transport.read_some(timeout)
         if data:
+            if _LOG.isEnabledFor(logging.DEBUG):
+                _LOG.debug("%s < %s", self.name, _render(data))
             self._tokens.extend(self._reader.feed(data))
+
+    def _file(self, event: TableEvent) -> None:
+        """Queue an asynchronous status line, and say so in the transcript.
+
+        The one derived record on this link: the bytes are already transcribed by
+        whichever read carried them, and this says how they were classified, which
+        is the decision a reader would otherwise have to redo by hand.
+        """
+        self.events.append(event)
+        if _LOG.isEnabledFor(logging.DEBUG):
+            _LOG.debug("%s ! %s", self.name, event.value)
 
     def _sift(self) -> None:
         """Move the status lines out of the token queue and into `events`."""
@@ -173,7 +201,7 @@ class Box:
             if event is None:
                 keep.append(token)
             else:
-                self.events.append(event)
+                self._file(event)
         self._tokens = keep
 
     def _next_token(self, deadline: float, what: str, *, verbatim: bool = False) -> Token:
@@ -191,7 +219,7 @@ class Box:
                 if not verbatim and token.kind is Kind.LINE:
                     event = table_event(token.text)
                     if event is not None:
-                        self.events.append(event)
+                        self._file(event)
                         continue
                 return token
             remaining = deadline - time.monotonic()
@@ -243,9 +271,15 @@ class Box:
                 break
             data = self.transport.read_some(min(0.1, settle))
             if data:
+                if _LOG.isEnabledFor(logging.DEBUG):
+                    _LOG.debug("%s < %s", self.name, _render(data))
                 self._tokens.extend(self._reader.feed(data))
                 last_heard = time.monotonic()
         self._sift()
+        if _LOG.isEnabledFor(logging.DEBUG):
+            _LOG.debug("%s   resync after %.2f s discarded %d token(s), kept %d status line(s)",
+                       self.name, time.monotonic() - started, len(self._tokens),
+                       len(self.events))
         self._tokens.clear()
         self._reader = ResponseReader()
         collected = list(self.events)
@@ -281,7 +315,10 @@ class Box:
         `value=True` for the get-style commands, which answer with a bare ACK
         byte and then the value on a line of its own (§1).
         """
-        self.transport.write(text.encode("ascii") + b"\n")
+        payload = text.encode("ascii") + b"\n"
+        if _LOG.isEnabledFor(logging.DEBUG):
+            _LOG.debug("%s > %s", self.name, _render(payload))
+        self.transport.write(payload)
         return self._await_reply(text, value=value, timeout=timeout)
 
     def _await_reply(
@@ -386,6 +423,19 @@ class Box:
         table flushes the rest of it first.
 
         Raises `BoxRejected` if the box NAKs, after asking `GERR` why.
+
+        **The transcript writes nothing between the chunks.** This is the one
+        path in the package where a record is deferred, and `chunk_gap` is the
+        reason: a formatted line flushed to a file in the gap would add itself to
+        the interval that paces the load, which is a bench measurement and not a
+        preference. The loop appends a tuple per chunk -- no formatting and no
+        I/O, and only when a transcript is open, which is decided once before the
+        loop -- and the chunk lines go out together the instant the string is on
+        the wire. Each carries its own offset from the start of the send, because
+        the timestamp the handler stamps on those lines is when they were flushed
+        and not when the chunk went. What is lost is the detail of a send
+        interrupted part way, and what is kept is that the pacing with a
+        transcript open is the pacing without one.
         """
         predicted: _table.Compiled | None = None
         prediction_error: str | None = None
@@ -402,6 +452,19 @@ class Box:
             raise ValueError("a table string must end with ';' or the box waits for one")
         payload += b"\n"
 
+        chunks = -(-len(payload) // chunk_bytes)
+        tracing = _LOG.isEnabledFor(logging.DEBUG)
+        marks: list[tuple[int, int, float, float]] = []
+        if tracing:
+            _LOG.debug(
+                "%s > STBLDAT %d bytes in %d chunks of %d, %.1f ms apart; the chunk lines "
+                "below are written after the send and carry their own offsets",
+                self.name, len(payload), chunks, chunk_bytes, chunk_gap * 1e3,
+            )
+            # On its own line, and never elided: this string is the evidence any
+            # correction to the wire format's section 2 would be argued from.
+            _LOG.debug("%s >   string: %s", self.name, table_string)
+
         # perf_counter, not monotonic: on Windows `time.monotonic()` ticks at
         # about 15.6 ms, which is coarser than a whole table write, so it
         # quantises exactly the number the stall margin is computed from.
@@ -410,10 +473,25 @@ class Box:
         for at in range(0, len(payload), chunk_bytes):
             chunk_started = time.perf_counter()
             self.transport.write(payload[at : at + chunk_bytes])
-            slowest = max(slowest, time.perf_counter() - chunk_started)
+            chunk_ended = time.perf_counter()
+            slowest = max(slowest, chunk_ended - chunk_started)
+            if tracing:
+                # A list append, which is the same order as the `max` above it.
+                # Nothing is formatted and nothing is written until the loop ends.
+                marks.append((at, min(chunk_bytes, len(payload) - at),
+                              chunk_started - started, chunk_ended - chunk_started))
             if chunk_gap and at + chunk_bytes < len(payload):
                 time.sleep(chunk_gap)
         write_seconds = time.perf_counter() - started
+
+        if tracing:
+            for number, (at, size, offset, cost) in enumerate(marks, start=1):
+                _LOG.debug("%s >   chunk %d/%d at +%.3f s, bytes %d-%d, write %.2f ms",
+                           self.name, number, chunks, offset, at, at + size - 1, cost * 1e3)
+            _LOG.debug("%s >   %d bytes on the wire in %.3f s, slowest chunk %.2f ms, "
+                       "%.2f s of stall margin",
+                       self.name, len(payload), write_seconds, slowest * 1e3,
+                       TOKEN_TIMEOUT_S - slowest)
 
         reply_timeout = timeout
         if reply_timeout is None:
@@ -443,7 +521,10 @@ class Box:
         if timeout is None:
             timeout = self.timeout + 0.01 * wanted
         deadline = time.monotonic() + timeout
-        self.transport.write(f"TBLRPT,{count}\n".encode("ascii"))
+        payload = f"TBLRPT,{count}\n".encode("ascii")
+        if _LOG.isEnabledFor(logging.DEBUG):
+            _LOG.debug("%s > %s, expecting %d lines", self.name, _render(payload), wanted)
+        self.transport.write(payload)
         lines: list[str] = []
         while len(lines) < wanted:
             token = self._next_token(deadline, f"TBLRPT line {len(lines) + 1} of {wanted}")
@@ -481,4 +562,10 @@ class Box:
                 f"box says {report.test_nesting}"
             )
         problems += _table.differences(load.predicted, _table.decode(report.data))
+        if _LOG.isEnabledFor(logging.DEBUG):
+            # A conclusion rather than traffic, and in the transcript because it is
+            # the one that would be cited: a disagreement here is evidence about a
+            # firmware's parser, and §2 is corrected from it.
+            _LOG.debug("%s   TBLRPT round trip: %s", self.name,
+                       "; ".join(problems) if problems else "clean")
         return problems
