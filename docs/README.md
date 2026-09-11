@@ -10,6 +10,9 @@
 - [**Method file and provenance**](method-file-format.md). The flat TOML document a trainee loads
   to run an experiment: each box's strings in three phases, the ordered sequence that starts and
   restarts them, and the stamp that traces every acquisition back to the method that produced it.
+- [**Instrument file**](instrument-file-format.md). The flat TOML document beside the method that
+  records what a file states about the machine rather than the experiment: the m/z calibration and
+  its two forms, and the full scale and channel offset the digitizer acquired through.
 - [**Glossary**](glossary.md). What the terms in these documents, in the package and in a method
   file mean, from SLIM and the pusher pulse to `STBLDAT`, zero suppress and the provenance stamp.
 

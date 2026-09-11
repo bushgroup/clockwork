@@ -146,10 +146,13 @@ traces back to the exact strings sent to every box and the order they went in.
 | `clockwork_version` | The `clockwork` package version that ran the acquisition |
 | `console_version` | The acquisition console's reported version, or `None` if unavailable |
 
-Where these fields land in a finished UIMF file, `Global_Params` or a sidecar file beside it, is
-decided by the writer that creates the file. A method's hash changes if and only if some field in
-the document changes, which makes it a stable key for grouping acquisitions by the method that
-produced them even before that writer exists.
+Those five fields land in the finished UIMF file's `Global_Params`, under parameter IDs clockwork
+owns. Two more join them there from the [instrument file](instrument-file-format.md),
+`ClockworkChannelOffset` and `ClockworkFullScale`, which record the window the acquisition ran
+through. A method's hash changes if and only if some field in the document changes, which makes it
+a stable key for grouping acquisitions by the method that produced them. The file name is not one
+of the fields: a technical replicate is the same method written to a different file, so every
+replicate of one method stamps to the same hash.
 
 ## Validation
 

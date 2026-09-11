@@ -7,7 +7,8 @@ can mask a leak.
 import subprocess
 import sys
 
-LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method")
+LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method",
+                "clockwork.instrument")
 
 PROBE = """
 import importlib, sys

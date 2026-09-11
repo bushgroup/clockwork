@@ -141,6 +141,17 @@ class Console:
         """What the last `horizontal` asked for, so a measured pusher period
         can be turned into seconds without the caller carrying the rate."""
 
+        self.offset_v: float | None = None
+        """What the last `vertical` asked for, and the only vertical setting a
+        client can know.
+
+        Full scale is a `config.txt` key the console reads at startup and does
+        not report back, so the offset is the one number a file's stamp can
+        state on the console's own authority and the one an instrument document
+        can be checked against (lab record, task 25). None until this client has
+        sent one: a client attached to a console another process configured has
+        not, and must not claim to know what that process chose."""
+
         self.last_reply_seconds = 0.0
         """How long the last answered request waited.
 
@@ -305,6 +316,7 @@ class Console:
         carry across (lab record, task 01).
         """
         self._ack("vertical", repr(float(offset_v)))
+        self.offset_v = float(offset_v)
 
     def invert(self, inverted: bool) -> None:
         self._ack("invert", "true" if inverted else "false")

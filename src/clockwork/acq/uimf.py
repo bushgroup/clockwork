@@ -44,7 +44,7 @@ from __future__ import annotations
 import contextlib
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import numpy as np
 from mainspring.uimf import (
@@ -57,6 +57,7 @@ from mainspring.uimf import (
 )
 from mainspring.uimf.writer import CLIENT_PARAM_ID_BASE, ParamDef
 
+from ..instrument import UNCALIBRATED, Instrument
 from ..method import Method, stamp
 from .wire import FrameRequest, TofWidth
 
@@ -89,6 +90,13 @@ PROVENANCE_KEYS: tuple[tuple[ParamDef, str], ...] = (
     (ParamDef(CLIENT_PARAM_ID_BASE + 4, "ClockworkConsoleVersion", "System.String",
               "Version string the acquisition console reported to info"),
      "console_version"),
+    (ParamDef(CLIENT_PARAM_ID_BASE + 5, "ClockworkChannelOffset", "System.Double",
+              "Channel 1 input offset in volts, as clockwork set it for this acquisition"),
+     "channel_offset_v"),
+    (ParamDef(CLIENT_PARAM_ID_BASE + 6, "ClockworkFullScale", "System.Double",
+              "Channel 1 full scale in volts in force for this acquisition, as configured; "
+              "the console reads it from config.txt at startup and does not report it back"),
+     "full_scale_v"),
 )
 """The stamp's fields as `Global_Params` parameters, each paired with the `stamp()` key
 it carries.
@@ -101,7 +109,18 @@ unrecognised name by parsing it against its enum, so a bare `MethodHash` would s
 become a standard parameter the day PNNL defines one.
 
 The method's *name* is not here. PNNL already has a name for it, `AcquisitionMethod`,
-and one fact under two keys is two things to keep in step.
+and one fact under two keys is two things to keep in step. The instrument's name is not
+here either, for the same reason: it goes under PNNL's `InstrumentName`.
+
+The last two are the vertical settings in force, which the stamp did not record until
+task 25. Two files acquired through different ranges, or on either side of an
+attenuator, are otherwise indistinguishable once they leave the instrument, and the
+chain in front of this digitizer changed on the day it was cabled up. The offset is
+clockwork's own `vertical` command and the console confirms it; the full scale is a
+`config.txt` key the console reads at startup and does not report back, so what the file
+carries is the value the lab configured. That distinction is in the parameter's own
+description rather than in a third key, because `ParamDescription` is written into
+`Global_Params` beside the value and a reader has both.
 """
 
 SA220P_DETECTOR_BITS = 14
@@ -278,14 +297,19 @@ class Recording:
         geometry: Geometry,
         writer: UimfWriter,
         globals_: GlobalSpec,
-        calibration: tuple[float, float],
+        instrument: Instrument,
+        clock: Callable[[], float],
+        started: float,
         overwrite: bool,
     ) -> None:
         self.method = method
         self.geometry = geometry
         self.acquisition = method.acquisition
         self.keep_raw = method.acquisition.keep_raw
-        self.calibration = calibration
+        self.instrument = instrument
+        self.calibration = (instrument.calibration.slope, instrument.calibration.intercept)
+        self._clock = clock
+        self._started = started
         self._overwrite = overwrite
         self._raw = writer
         self._raw_globals = globals_
@@ -294,6 +318,7 @@ class Recording:
         self._open_frame: tuple[int, int, int, float] | None = None
         self._frames: dict[int, list[int]] = {}
         self._elapsed: dict[int, float] = {}
+        self._began: dict[int, float] = {}
         self._closed = False
 
     @classmethod
@@ -303,26 +328,39 @@ class Recording:
         method: Method,
         geometry: Geometry,
         *,
-        calibration: tuple[float, float] = (0.0, 0.0),
+        instrument: Instrument = UNCALIBRATED,
         detector_bits: int | None = SA220P_DETECTOR_BITS,
-        instrument_name: str = "",
         adc_name: str = "",
         console_version: str = "",
+        clock: Callable[[], float] = time.monotonic,
+        started: float | None = None,
         overwrite: bool = False,
     ) -> Recording:
         """Create the raw file, with its schema and global parameters, and return the
         recording that will fill it.
 
-        `calibration` is `(slope, intercept)` -- `k0` and `t0` of the m/z calibration --
-        and defaults to zeros, which is written as `CalibrationDone = 0` and means the
-        file carries a bin axis and no mass axis. **The method document has no home for
-        it**: a calibration belongs to the instrument on the day rather than to a
-        trainee's strings, and until there is somewhere to keep it the caller supplies it
-        (lab record, task 06).
+        `instrument` is the machine's own settings -- the m/z calibration, the vertical
+        window, the instrument's name -- and defaults to `UNCALIBRATED`, which writes
+        `CalibrationDone = 0` and stamps no vertical settings, exactly the file this code
+        wrote before `clockwork.instrument` existed. **None of the three is a method
+        field**: the same strings run after a recalibration, or through a different
+        attenuator, are the same method and a different file (lab record, tasks 06
+        and 25). A file acquired uncalibrated is calibratable afterwards from its own
+        parameters, which is why nothing ever blocked on this.
 
         `console_version` is what to stamp as the console that acquired the file, and
         `Console.info().text` is the string to pass: it names the card, its firmware, the
         console's version and commit, and on the lab's build the fork and branch as well.
+
+        `clock` and `started` are the run clock every frame's `StartTime` is measured
+        against, and they default to this recording's own creation. **The acquisition
+        loop owns the clock and passes both down** (`clockwork.acq.loop`, lab record,
+        task 23), so that a run's own record of when a frame began and the file's
+        `StartTime` share one origin rather than two that nearly agree. The default is
+        what makes a `Recording` driven by hand -- a bench rig, a test -- write true
+        start times anyway, instead of writing zeros unless the caller remembers to say
+        otherwise (lab record, task 25). The same clock times the frames, so a test that
+        substitutes one controls both.
 
         The summed companion is not created here. It is created by the first `fold`, so
         that a run which never gets that far does not leave an empty second file.
@@ -332,18 +370,19 @@ class Recording:
         globals_ = GlobalSpec(
             bins=geometry.bins,
             bin_width_ns=geometry.bin_width_ns,
-            instrument_name=instrument_name,
+            instrument_name=instrument.name,
             tof_intensity_type="ADC",
             time_offset_ns=int(round(geometry.time_offset_ns)),
             prescan_tof_pulses=method.acquisition.scans,
             prescan_accumulations=method.acquisition.accumulations,
             detector_bits=detector_bits,
-            extra=stamp_globals(method, adc_name=adc_name,
+            extra=stamp_globals(method, instrument=instrument, adc_name=adc_name,
                                 console_version=console_version),
         )
         writer = UimfWriter(path, globals_, overwrite=overwrite)
         recording = cls.__new__(cls)
-        recording._init(method, geometry, writer, globals_, calibration, overwrite)
+        recording._init(method, geometry, writer, globals_, instrument, clock,
+                        clock() if started is None else float(started), overwrite)
         return recording
 
     # --- paths -------------------------------------------------------------------------
@@ -374,6 +413,12 @@ class Recording:
         `repetition` counts from 1 within `method_frame`, and in `single_frame` mode
         there is only ever one: that console frame holds every repetition, so the frame
         it writes names its method frame and claims to be no repetition of it.
+
+        **`StartTime` is written here**, as minutes since the run clock's origin, which
+        is what a viewer lays a session out along and what was 0.0 on every frame until
+        task 25. Minutes because that is the unit `StartTimeMinutes` is defined in and
+        the legacy `StartTime` column holds; the arithmetic is in one place so that the
+        two files cannot disagree about it.
         """
         self._require_open()
         if self._open_frame is not None:
@@ -398,20 +443,25 @@ class Recording:
         # never seen the method has to tell apart: ungrouped, one repetition of a method
         # frame, or the whole of one.
         whole = acquisition.repetition_mode == "single_frame"
+        now = self._clock()
+        # The first repetition's start time is the method frame's, and the fold writes it
+        # on the summed frame: a summed frame begins when its method frame began, not
+        # when the fold got round to it.
+        self._began.setdefault(method_frame, now)
         spec = FrameSpec(
             scans=acquisition.frame_length,
             accumulations=1,
             calibration_slope=slope,
             calibration_intercept=intercept,
             average_tof_length_ns=self.geometry.average_tof_length_ns,
-            start_time_minutes=0.0,
+            start_time_minutes=(now - self._started) / 60.0,
             method_frame=method_frame,
             repetition=None if whole else repetition,
             repetitions=acquisition.accumulations,
         )
         frame = self._raw.add_frame(spec)
         self._frames.setdefault(method_frame, []).append(frame)
-        self._open_frame = (frame, method_frame, repetition, time.monotonic())
+        self._open_frame = (frame, method_frame, repetition, now)
         return FrameRequest(
             frame_length=acquisition.frame_length,
             file_name=self._raw.path,
@@ -441,7 +491,7 @@ class Recording:
             raise ValueError("no frame is open; begin_frame() first")
         frame, method_frame, _repetition, started = self._open_frame
         self._open_frame = None
-        elapsed = time.monotonic() - started
+        elapsed = self._clock() - started
         span = self._elapsed.get(method_frame, 0.0)
         self._elapsed[method_frame] = span + elapsed
         self._raw.finalise_frame(
@@ -521,6 +571,11 @@ class Recording:
             calibration_slope=self.calibration[0],
             calibration_intercept=self.calibration[1],
             average_tof_length_ns=self.geometry.average_tof_length_ns,
+            # The method frame's first repetition, not the fold's own moment: a summed
+            # frame stands for when the experiment happened, and the fold can run a whole
+            # method frame later than the rows it is adding up.
+            start_time_minutes=(self._began.get(method_frame, self._started)
+                                - self._started) / 60.0,
             method_frame=method_frame,
             repetitions=acquisition.accumulations,
         ))
@@ -597,6 +652,7 @@ class Recording:
 def stamp_globals(
     method: Method,
     *,
+    instrument: Instrument = UNCALIBRATED,
     adc_name: str = "",
     console_version: str = "",
 ) -> dict[str, object]:
@@ -616,11 +672,19 @@ def stamp_globals(
     clockwork.
     """
     record = stamp(method, console_version=console_version or None)
+    # The vertical settings are not the method's and `stamp()` does not produce them, so
+    # they join the record here rather than there. `None` for either is written by
+    # nothing: a rig with no configured window states no window (lab record, task 25).
+    record["channel_offset_v"] = instrument.vertical.offset_v
+    record["full_scale_v"] = instrument.vertical.full_scale_v
     values: dict[str, object] = {"AcquisitionMethod": record["method_name"]}
     if adc_name:
         values["ADCName"] = adc_name
     for key, field in PROVENANCE_KEYS:
         value = record.get(field)
-        if value:
+        # `None` and the empty string are "not known" and are left out; 0.0 is not. A
+        # channel offset of zero volts is a real setting and a falsy one, which is why
+        # this is not the truth test it looks like it wants to be.
+        if value is not None and value != "":
             values[key] = value
     return values

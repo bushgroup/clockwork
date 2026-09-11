@@ -68,7 +68,8 @@ def declared_versions() -> dict[str, str]:
     return out
 
 
-LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method")
+LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method",
+                "clockwork.instrument")
 QT_PREFIXES = ("PySide6", "PyQt", "pyqtgraph", "shiboken")
 
 
@@ -395,7 +396,23 @@ def main() -> int:
 
     from mainspring.uimf import UimfFile
 
+    from clockwork import instrument as instrument_module
     from clockwork import method as method_module
+
+    # An instrument document the way SLIMPHONY's reads: a calibration, so the file has a
+    # mass axis and `CalibrationDone` is 1, and the window the acquisition ran through
+    # (lab record, task 25). Every value here is one a public clone can hold; the lab's
+    # own document is lab material.
+    machine = instrument_module.Instrument(
+        name="self-check",
+        calibration=instrument_module.Calibration.from_tenths_of_ns(
+            7.38123e-05, 769.0495, _dt.date(2026, 9, 9)
+        ),
+        vertical=instrument_module.Vertical(full_scale_v=0.5, offset_v=0.251),
+    )
+    check_true("the two forms of one calibration agree to a part in 1e9",
+               abs(machine.calibration.slope - 0.738123) < 1e-9
+               and abs(machine.calibration.intercept - 0.07690495) < 1e-11)
 
     accumulations, scans = 3, 32
     document = {
@@ -417,7 +434,8 @@ def main() -> int:
                     acq.Console(fake.command_endpoint) as console:
                 console.configure(offset_v=0.251)
                 acq.start_chain(console, stream, timeout=10.0, settle=2.0, quiet=0.1)
-                recording = acq.Recording.create(directory, recipe, geometry)
+                recording = acq.Recording.create(directory, recipe, geometry,
+                                                 instrument=machine)
                 raw, summed = recording.raw_path, recording.summed_path
                 check_true("the file exists before the first frame is asked for",
                            os.path.isfile(raw))
@@ -442,6 +460,26 @@ def main() -> int:
                    and parameters.scans == scans)
         check_true("the companion says which method frame it came from",
                    parameters.method_frame == 1)
+
+        # What the run record adds to a file beyond the method (lab record, task 25).
+        raw_file = UimfFile(raw)
+        check_true("every frame carries a calibration, so the file has a mass axis",
+                   all(raw_file.frame_params(n).calibration_done
+                       for n in raw_file.frame_numbers())
+                   and parameters.calibration_done)
+        starts = [float(raw_file.frame_params(n).extra["StartTimeMinutes"])
+                  for n in raw_file.frame_numbers()]
+        check_true(f"StartTime runs off a run clock rather than staying 0 ({starts[-1]:.6f} "
+                   "minutes at the last frame)",
+                   starts[0] == 0.0 and starts[-1] > 0.0
+                   and starts == sorted(starts))
+        check_true("the summed frame starts when its first repetition did",
+                   float(parameters.extra["StartTimeMinutes"]) == starts[0])
+        stamped = opened.global_params().extra
+        check_true("the vertical settings in force are stamped into both files",
+                   stamped["ClockworkFullScale"] == "0.5"
+                   and stamped["ClockworkChannelOffset"] == "0.251"
+                   and raw_file.global_params().extra["ClockworkFullScale"] == "0.5")
         one = UimfFile(raw).read_frame(1)
         total = opened.read_frame(1)
         exact = all(

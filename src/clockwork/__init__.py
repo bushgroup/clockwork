@@ -8,6 +8,8 @@ Three layers under one seam, none of which imports Qt:
               digitizer, plus creation of the UIMF file it appends scans to
     method    the saved experiment: per-box strings and acquisition settings,
               stamped into every acquisition as provenance
+    instrument the machine rather than the experiment: the m/z calibration and
+              the digitizer's vertical settings, which no method carries
 
 and `app`, the PySide6 window on top of them. Anything that imports the three
 lower layers must keep working with no GUI stack installed, which is what lets

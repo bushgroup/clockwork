@@ -161,7 +161,8 @@ def test_the_method_is_stamped_into_the_file(tmp_path):
     assert extra["AcquisitionMethod"] == "test method", "PNNL's own key names the method"
     stamped = stamp_globals(method, console_version=version)
     for key, _field in PROVENANCE_KEYS:
-        assert extra[key.name] == str(stamped[key]), key.name
+        if key in stamped:
+            assert extra[key.name] == str(stamped[key]), key.name
     assert "[acquisition]" in extra["ClockworkMethodText"], "the method travels in full"
     assert extra["ClockworkVersion"] == clockwork.__version__
 
