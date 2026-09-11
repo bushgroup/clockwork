@@ -23,6 +23,14 @@ whole ring buffer and lets everything else through. A sender that paces
 correctly and one that does not both pass here. Only a bench box separates
 them.
 
+The ARB command set of §6 is here on the same terms: a box given a module
+count stores what those commands set and reads it back, and models nothing a
+module does with the value. A box given no modules NAKs all of them with the
+firmware's own error 115. That is enough to send a real method's setup block
+somewhere other than the instrument, and enough to rehearse a readback script
+against; it is not enough to tell anyone what a module holds at power-up,
+which is a question only a box can answer.
+
 pyserial is imported inside `open_serial` rather than at module scope, so
 importing `clockwork.mips` costs nothing and needs nothing on a machine that
 will never open a port.
@@ -125,6 +133,134 @@ _ACK = b"\x06\n\r"
 _ACK_ONLY = b"\x06"
 _NAK = b"\x15?\n\r"
 
+# --------------------------------------------------------------------------
+# The ARB command surface of §6, as far as a stand-in can carry it
+# --------------------------------------------------------------------------
+#
+# Every command below stores what it is given and hands it back, and models
+# nothing a module does with it. That is worth having anyway: the instrument's
+# ARB boxes take a block of these once (the lab record's instrument map) and
+# read them back afterwards, so a script that sends a block and compares the
+# readback has something to run against before it meets a box.
+#
+# The split between the two tables is the document's, not a convenience. §6
+# gives a `G` counterpart for the rows below and gives none for
+# `_ARB_SET_ONLY`, so those are settable here and unreadable, exactly as they
+# are on a box. Which of them a real firmware will in fact answer is one of
+# the things the lab record's task 10 goes to find out, and a fake that
+# answered them all would teach a probe the wrong lesson.
+
+_ARB_GETTABLE: dict[str, str] = {
+    "SARBMODE": "GARBMODE",
+    "SWFREQ": "GWFREQ",
+    "SWFVRNG": "GWFVRNG",
+    "SWFVOFF": "GWFVOFF",
+    "SWFVAUX": "GWFVAUX",
+    "SWFDIR": "GWFDIR",
+    "SWFTYP": "GWFTYP",
+    "SWFVRAMP": "GWFVRAMP",
+    "SARBOFFA": "GARBOFFA",
+    "SARBOFFB": "GARBOFFB",
+    "SARBPPP": "GARBPPP",
+    "SARBADD": "GARBADD",
+    "SALTENA": "GALTENA",
+    "SALTTRG": "GALTTRG",
+    "SALTHWD": "GALTHWD",
+    "SALTTMODE": "GALTTMODE",
+    "SALTWFM": "GALTWFM",
+    "SALTDLY": "GALTDLY",
+    "SALTPLY": "GALTPLY",
+    "SALTRENA": "GALTRENA",
+    "SALTRNG": "GALTRNG",
+    "SALTFENA": "GALTFENA",
+    "SALTFRQ": "GALTFRQ",
+}
+"""Per-module `S…`/`G…` pairs (§6.2, §6.4). First argument is the module."""
+
+_ARB_SET_ONLY: tuple[str, ...] = (
+    "SARBCCLK",
+    "SARBEXT",
+    "SARBSYNLN",
+    "SARBCMPLN",
+    "SARBCPEX",
+    "SARBHISR",
+    "SARBDBRD",
+    "SWFENA",
+    "SWFDIS",
+)
+"""Per-module commands §6 documents with no getter at all.
+
+`SARBCCLK` is the one that matters most: it selects which module the common
+clock freezes, so which region a compression table's `s` stops, and the only
+record of how a box is set is the string that set it."""
+
+_ARB_DEFAULTS: dict[str, str] = {
+    "SARBMODE": "TWAVE",
+    "SWFREQ": "0",
+    "SWFVRNG": "0",
+    "SWFVOFF": "0",
+    "SWFVAUX": "0",
+    "SWFDIR": "FWD",
+    "SWFTYP": "SIN",
+    "SWFVRAMP": "0",
+    "SARBOFFA": "0",
+    "SARBOFFB": "0",
+    "SARBPPP": "32",
+    "SARBADD": "0",
+    "SALTENA": "FALSE",
+    "SALTTRG": "NA",
+    "SALTHWD": "FALSE",
+    "SALTTMODE": "LEVEL",
+    "SALTWFM": "COMP",
+    "SALTDLY": "0",
+    "SALTPLY": "0",
+    "SALTRENA": "FALSE",
+    "SALTRNG": "0",
+    "SALTFENA": "FALSE",
+    "SALTFRQ": "0",
+}
+"""What a module here holds before anything sets it.
+
+§6 states two of these: `SARBPPP` is 32 by default and `SALTWFM`'s `COMP` is
+marked the default type. The rest are a stand-in so that a readback has
+something to return, and carry no authority whatever. What a real module holds
+at power-up is exactly what the lab record's task 10 goes to the box to read."""
+
+_COMPRESSOR_GETTABLE: dict[str, str] = {
+    "SARBCTBL": "GARBCTBL",
+    "SARBCMODE": "GARBCMODE",
+    "SARBCORDER": "GARBCORDER",
+    "SARBCTD": "GARBCTD",
+    "SARBCTC": "GARBCTC",
+    "SARBCTN": "GARBCTN",
+    "SARBCTNC": "GARBCTNC",
+    "SARBCSW": "GARBCSW",
+    "SARBCDIS": "GARBCDIS",
+}
+"""Box-wide compressor state (§6.6). One state machine per box, not per module."""
+
+_COMPRESSOR_SET_ONLY: tuple[str, ...] = ("SARBCMP", "SARBCOFF", "SARBALTTS", "SARBDISCI")
+
+_COMPRESSOR_DEFAULTS: dict[str, str] = {
+    "SARBCTBL": "",
+    "SARBCMODE": "Normal",
+    "SARBCORDER": "0",
+    "SARBCTD": "0",
+    "SARBCTC": "0",
+    "SARBCTN": "0",
+    "SARBCTNC": "0",
+    "SARBCSW": "Open",
+    "SARBCDIS": "FALSE",
+}
+"""Stand-ins on the same footing as `_ARB_DEFAULTS`, and with the same caveat."""
+
+_ARB_NO_ARGUMENT: tuple[str, ...] = ("ARBSYNC", "TARBTRG")
+
+_ARB_GET_TO_SET: dict[str, str] = {get: put for put, get in _ARB_GETTABLE.items()}
+_COMPRESSOR_GET_TO_SET: dict[str, str] = {
+    get: put for put, get in _COMPRESSOR_GETTABLE.items()
+}
+
 
 class FakeBox:
     """A MIPS controller simulated well enough to develop a sender against.
@@ -142,14 +278,55 @@ class FakeBox:
         version: str = "1.263, June 20, 2026",
         trigger: str = "EDGE",
         ring_buffer_bytes: int = RING_BUFFER_BYTES,
+        arb_modules: int = 0,
+        arb_version: str = "2.21",
+        do_channels: int = 16,
+        dcb_channels: int = 16,
     ) -> None:
         self.name = name
         self.version = version
         self.trigger = trigger
         self.ring_buffer_bytes = ring_buffer_bytes
+        self.arb_modules = arb_modules
+        """How many ARB modules this box answers for, and `GCHAN,ARB`.
+
+        Zero by default, which is the box the bench run of the lab record's
+        task 04 met: every §6 command then NAKs error 115, *no ARB module in
+        system*, which is the firmware's own code for it and not a guess. Give
+        it a count to stand in for one of the instrument's ARB boxes.
+
+        Whether `GCHAN,ARB` counts modules or dual-output boards is itself
+        open, and this reports whatever it was given either way."""
+
+        self.arb_version = arb_version
+        """What every module answers to `GARBVER`. A knob, not a claim: §6.4
+        gates the alternate waveform on >= 2.1 and its `CUR` type on >= 2.21,
+        and the default here clears both so that a rehearsal exercises the
+        path a capable module takes."""
+
+        self.do_channels = do_channels
+        self.dcb_channels = dcb_channels
+        """`GCHAN,DO` and `GCHAN,DCB`; 16 each on the bench box (task 04)."""
+
+        self.arb: dict[int, dict[str, str]] = {
+            module: dict(_ARB_DEFAULTS) for module in range(1, arb_modules + 1)
+        }
+        """Per-module settings, by module index and set-command stem."""
+
+        self.compressor: dict[str, str] = dict(_COMPRESSOR_DEFAULTS)
+        """Box-wide compressor state (§6.6), including the compression table."""
+
+        self.compressor_triggers = 0
+        """How many times `TARBTRG` has been sent. The state machine it starts
+        is not modelled at all, so this is a count of asks, not of passes."""
+
         self.mode = "LOC"
         self.status = "IDLE"
         self.error = 0
+        self.table_buffer = 1
+        """`STBLNUM`/`GTBLNUM`, the active table buffer. Stored, never acted on:
+        this stand-in holds one table."""
+
         self.ext_freq = 0
         """The declared external clock frequency, 0 until `SEXTFREQ` says otherwise."""
         self.replies_enabled = True
@@ -257,6 +434,8 @@ class FakeBox:
         argument = argument.strip()
         handler = getattr(self, "_do_" + name.lower(), None)
         if handler is None:
+            if self._arb(name, argument):
+                return
             self._nak(1)  # invalid command
             return
         handler(argument)
@@ -277,6 +456,38 @@ class FakeBox:
 
     def _do_gtblfrq(self, _: str) -> None:
         self._value("42000000")
+
+    def _do_gchan(self, argument: str) -> None:
+        """`GCHAN,<DO|DCB|ARB>`: how much of each kind this box is fitted with.
+
+        The cheapest thing a host can ask a box it has never met, and the one
+        that says whether a method written for an ARB box can run on it at all.
+        """
+        counts = {
+            "DO": self.do_channels,
+            "DCB": self.dcb_channels,
+            "ARB": self.arb_modules,
+        }
+        found = counts.get(argument.upper())
+        if found is None:
+            self._nak(22)  # invalid channel request
+            return
+        self._value(str(found))
+
+    def _do_stblnum(self, argument: str) -> None:
+        try:
+            buffer = int(argument)
+        except ValueError:
+            self._nak(2)
+            return
+        if not 1 <= buffer <= 5:
+            self._nak(2)
+            return
+        self.table_buffer = buffer
+        self._ack()
+
+    def _do_gtblnum(self, _: str) -> None:
+        self._value(str(self.table_buffer))
 
     def _do_sextfreq(self, argument: str) -> None:
         """§4: declare the external clock's frequency. Stored, never executed on.
@@ -401,6 +612,87 @@ class FakeBox:
         ]
         lines += [f"{byte:x}" for byte in wanted]
         self._emit(("\n".join(lines) + "\n").encode("ascii"))
+
+    # -- the ARB modules (§6) ----------------------------------------------
+
+    def _arb_present(self) -> bool:
+        """Answer for a box with no ARB modules fitted, and say so on the wire."""
+        if self.arb_modules:
+            return True
+        self._nak(115)  # no ARB module in system
+        return False
+
+    def _arb_module(self, argument: str) -> tuple[int | None, str]:
+        """Split `<mod>[,<value>]`, rejecting a module this box does not hold.
+
+        The error codes are the firmware's own for a board that is not there
+        (14 and 15). Whether a real controller range-checks a module index at
+        all is unverified, and a probe that asks for a module past the last one
+        is how that gets settled.
+        """
+        index, _, value = argument.partition(",")
+        try:
+            module = int(index.strip())
+        except ValueError:
+            self._nak(2)
+            return None, ""
+        if module < 1:
+            self._nak(14)
+            return None, ""
+        if module > self.arb_modules:
+            self._nak(15)
+            return None, ""
+        return module, value.strip()
+
+    def _arb(self, name: str, argument: str) -> bool:
+        """Handle one §6 command, or say it is none of them.
+
+        Returns whether the command was recognised, so one that is none of
+        them still falls through to the NAK any unknown command gets.
+        """
+        if name in _ARB_NO_ARGUMENT:
+            if self._arb_present():
+                if name == "TARBTRG":
+                    self.compressor_triggers += 1
+                self._ack()
+            return True
+
+        if name in _COMPRESSOR_GETTABLE or name in _COMPRESSOR_SET_ONLY:
+            if self._arb_present():
+                if name in _COMPRESSOR_GETTABLE:
+                    self.compressor[name] = argument
+                self._ack()
+            return True
+
+        if name in _COMPRESSOR_GET_TO_SET:
+            if self._arb_present():
+                self._value(self.compressor[_COMPRESSOR_GET_TO_SET[name]])
+            return True
+
+        if name == "GARBVER":
+            if self._arb_present():
+                module, _ = self._arb_module(argument)
+                if module is not None:
+                    self._value(self.arb_version)
+            return True
+
+        if name in _ARB_GETTABLE or name in _ARB_SET_ONLY:
+            if self._arb_present():
+                module, value = self._arb_module(argument)
+                if module is not None:
+                    if name in _ARB_GETTABLE:
+                        self.arb[module][name] = value
+                    self._ack()
+            return True
+
+        if name in _ARB_GET_TO_SET:
+            if self._arb_present():
+                module, _ = self._arb_module(argument)
+                if module is not None:
+                    self._value(self.arb[module][_ARB_GET_TO_SET[name]])
+            return True
+
+        return False
 
     def describe_error(self) -> str:
         """The last error as words, for a test's failure message."""

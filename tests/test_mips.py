@@ -536,3 +536,76 @@ def test_silencing_the_status_lines_is_honoured() -> None:
     assert box.drain(0.02) == []
     with pytest.raises(BoxTimeout):
         box.wait_for(TableEvent.READY, timeout=0.05)
+
+
+# --------------------------------------------------------------------------
+# The ARB command surface
+# --------------------------------------------------------------------------
+
+
+def test_a_box_reports_what_it_is_fitted_with() -> None:
+    box = Box(transport=FakeBox(arb_modules=2, do_channels=16, dcb_channels=16))
+    assert box.command("GCHAN,ARB", value=True) == "2"
+    assert box.command("GCHAN,DO", value=True) == "16"
+    assert box.command("GCHAN,DCB", value=True) == "16"
+
+
+def test_a_box_with_no_arb_modules_refuses_the_whole_command_set() -> None:
+    box = Box(transport=FakeBox())
+    assert box.command("GCHAN,ARB", value=True) == "0"
+    for command in ("SWFREQ,1,15000", "ARBSYNC", "TARBTRG", "SARBCTBL,J10[HR]1"):
+        with pytest.raises(BoxRejected) as raised:
+            box.command(command)
+        assert raised.value.code == 115  # no ARB module in system
+
+
+def test_an_arb_setup_block_reads_back() -> None:
+    box = Box(transport=FakeBox(arb_modules=4))
+    for command in ("SWFREQ,3,15000", "SWFVRNG,3,15", "SWFDIR,1,REV", "SALTWFM,1,REV"):
+        box.command(command)
+    assert box.command("GWFREQ,3", value=True) == "15000"
+    assert box.command("GWFVRNG,3", value=True) == "15"
+    assert box.command("GWFDIR,1", value=True) == "REV"
+    assert box.command("GALTWFM,1", value=True) == "REV"
+    # Untouched modules keep their own values rather than the box's last write.
+    assert box.command("GWFREQ,4", value=True) == "0"
+
+
+def test_the_commands_with_no_documented_getter_have_none_here_either() -> None:
+    """A probe that finds one on a real box has found something (task 10).
+
+    `SARBCCLK` selects which module the common clock freezes, and nothing in
+    the protocol document reads it back; the same holds for the two line-role
+    commands. A stand-in that invented getters would hide exactly the question
+    a box is being asked.
+    """
+    box = Box(transport=FakeBox(arb_modules=4))
+    box.command("SARBCCLK,3,TRUE")
+    box.command("SARBSYNLN,3,1")
+    for absent in ("GARBCCLK,3", "GARBSYNLN,3", "GARBCMPLN,3"):
+        with pytest.raises(BoxRejected) as raised:
+            box.command(absent, value=True)
+        assert raised.value.code == 1  # invalid command
+
+
+def test_a_module_the_box_does_not_hold_is_rejected() -> None:
+    box = Box(transport=FakeBox(arb_modules=2))
+    assert box.command("GARBVER,2", value=True) == "2.21"
+    with pytest.raises(BoxRejected) as raised:
+        box.command("GARBVER,3", value=True)
+    assert raised.value.code == 15  # board number too high, or board not present
+    with pytest.raises(BoxRejected) as raised:
+        box.command("GARBVER,0", value=True)
+    assert raised.value.code == 14
+
+
+def test_a_compression_table_reads_back_byte_for_byte() -> None:
+    """The engine syntax-checks nothing on load (section 6.6), so the readback
+    is the only check a host has that the string arrived intact."""
+    fake = FakeBox(arb_modules=4)
+    box = Box(transport=fake)
+    table = "J30[HRsD90m3CD10m3ND208rD16.7628sD10.0253r]100"
+    box.command(f"SARBCTBL,{table}")
+    assert box.command("GARBCTBL", value=True) == table
+    box.command("TARBTRG")
+    assert fake.compressor_triggers == 1

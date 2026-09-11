@@ -236,6 +236,36 @@ def main() -> int:
             exc.code == 1,
         )
 
+    # The ARB half of the same stand-in. An instrument ARB box takes a block of
+    # these once and is read back afterwards; a box with no modules refuses
+    # them with the firmware's own code for it (docs/mips-wire-format.md §6).
+    arb = mips.Box(transport=mips.FakeBox(arb_modules=4), name="fake-arb")
+    for setting in ("SWFREQ,1,15000", "SWFVRNG,1,15", "SALTWFM,1,REV", "ARBSYNC"):
+        arb.command(setting)
+    check_true(
+        "an ARB setup block is accepted and reads back "
+        f"({arb.command('GWFREQ,1', value=True)} Hz, "
+        f"{arb.command('GALTWFM,1', value=True)})",
+        arb.command("GWFREQ,1", value=True) == "15000"
+        and arb.command("GALTWFM,1", value=True) == "REV",
+    )
+    table = "J10[HRsm1CD12m1ND4.0272r]100"
+    arb.command(f"SARBCTBL,{table}")
+    check_true(
+        "a compression table reads back byte for byte, which is the only check "
+        "there is of one (§6.6)",
+        arb.command("GARBCTBL", value=True) == table,
+    )
+    try:
+        mips.Box(transport=mips.FakeBox()).command("SWFREQ,1,15000")
+        check_true("a box with no ARB modules refuses an ARB command", False)
+    except mips.BoxRejected as exc:
+        check_true(
+            f"a box with no ARB modules refuses an ARB command ({exc.code}, "
+            f"{mips.error_text(exc.code)})",
+            exc.code == 115,
+        )
+
     section("acquisition console")
     from clockwork import acq
 
