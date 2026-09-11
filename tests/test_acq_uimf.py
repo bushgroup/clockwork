@@ -60,9 +60,9 @@ def make_method(
             "repetition_mode": repetition_mode,
             "keep_raw": keep_raw,
         },
-        "boxes": [{"name": "mips-a", "port": "COM3", "load": ["STBLDAT;..."],
+        "boxes": [{"name": "box1", "port": "COM3", "load": ["STBLDAT;..."],
                    "arm": ["SMOD,TBL"]}],
-        "start": [["mips-a", "TBLSTRT"]],
+        "start": [["box1", "TBLSTRT"]],
     })
 
 

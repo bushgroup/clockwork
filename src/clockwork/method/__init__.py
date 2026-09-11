@@ -172,7 +172,7 @@ def _identifier(value: object, path: str, problems: list[str]) -> str | None:
     """A name or a port: non-empty, and not surrounded by whitespace.
 
     Whitespace here is rejected rather than stripped, unlike a command string:
-    a box named `"A "` matches nothing in the start list, and "no such box" is a
+    a box named `"box2 "` matches nothing in the start list, and "no such box" is a
     worse message than the one this produces.
     """
     text = _non_empty_str(value, path, problems)

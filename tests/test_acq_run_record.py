@@ -62,8 +62,8 @@ def make_method(*, accumulations: int = 2, frames: int = 1, stem: str = "260911_
             "file_stem": stem,
             "repetition_mode": repetition_mode,
         },
-        "boxes": [{"name": "a", "port": "COM1", "load": ["STBLDAT;..."]}],
-        "start": [["a", "TBLSTRT"]],
+        "boxes": [{"name": "box1", "port": "COM1", "load": ["STBLDAT;..."]}],
+        "start": [["box1", "TBLSTRT"]],
     })
 
 

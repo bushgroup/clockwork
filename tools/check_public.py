@@ -450,8 +450,8 @@ def main() -> int:
         "metadata": {"name": "self-check", "created": _dt.date(2026, 9, 10)},
         "acquisition": {"frames": 1, "scans": scans, "accumulations": accumulations,
                         "file_stem": "selfcheck"},
-        "boxes": [{"name": "a", "port": "COM1", "load": ["STBLDAT;..."]}],
-        "start": [["a", "TBLSTRT"]],
+        "boxes": [{"name": "box1", "port": "COM1", "load": ["STBLDAT;..."]}],
+        "start": [["box1", "TBLSTRT"]],
     }
     recipe = method_module.from_dict(document)
     with tempfile.TemporaryDirectory() as directory:
@@ -548,11 +548,11 @@ def main() -> int:
     loop_document["acquisition"] = dict(document["acquisition"]) | {
         "file_stem": "selfcheck-loop"}
     loop_document["boxes"] = [{
-        "name": "a", "port": "COM1", "setup": ["STBLCLK,EXT"],
+        "name": "box1", "port": "COM1", "setup": ["STBLCLK,EXT"],
         "load": [f"STBLDAT;0:[A:1,0:B:1,10:B:0,{scans + 1}:A:0,{scans + 2}:];"],
         "arm": ["SMOD,TBL"],
     }]
-    loop_document["reset"] = [["a", "SMOD,LOC"], ["a", "SMOD,TBL"]]
+    loop_document["reset"] = [["box1", "SMOD,LOC"], ["box1", "SMOD,TBL"]]
     recipe = method_module.from_dict(loop_document)
 
     check_true(
@@ -564,7 +564,7 @@ def main() -> int:
     )
 
     with tempfile.TemporaryDirectory() as directory:
-        boxes = {"a": mips_module.Box(transport=mips_module.FakeBox(), name="a")}
+        boxes = {"box1": mips_module.Box(transport=mips_module.FakeBox(), name="box1")}
         seen: list[acq.Event] = []
         acq.send_phases(recipe, boxes, progress=seen.append)
         check_true(
@@ -626,7 +626,7 @@ def main() -> int:
                 # three serial round trips on the instrument and instant against a
                 # stand-in, so the window the guard watches has to be put back.
                 fake.frame_hold_s = 0.0
-                slow = {"a": mips_module.Box(transport=SlowBox(), name="a")}
+                slow = {"box1": mips_module.Box(transport=SlowBox(), name="box1")}
                 acq.send_phases(recipe, slow)
                 stalled = acq.run_acquisition(
                     recipe, boxes=slow, console=console, stream=stream,

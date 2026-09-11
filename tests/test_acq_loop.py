@@ -72,7 +72,10 @@ HOLD = 0.05
 """What `FakeConsole.frame_hold_s` stands in for: the pushes a real frame spends waiting
 for its enable to go high while the loop walks the start list."""
 
-ARB_METHOD_BOXES = ("mips-a", "mips-b", "mips-c")
+BOX = "box1"
+"""The one box most of these tests need. A box name is a free-form string a method
+supplies, so the suite invents its own rather than naming an instrument's."""
+
 ARB_MODULES = 4
 """Enough modules for the golden methods' `SWFREQ,4,...` and `SARBCCLK,4,...`."""
 
@@ -102,15 +105,15 @@ def make_method(
             "keep_raw": keep_raw,
         },
         "boxes": [{
-            "name": "mips-a",
+            "name": BOX,
             "port": "COM3",
             "setup": ["STBLCLK,EXT", "STBLTRG,POS"],
             "load": [f"STBLDAT;0:[A:1,0:B:1,500:B:0,{scans + 1}:A:0,{scans + 2}:];"],
             "arm": ["SMOD,TBL"],
         }],
-        "start": [["mips-a", "TBLSTRT"]],
-        "reset": reset if reset is not None else [["mips-a", "SMOD,LOC"],
-                                                  ["mips-a", "SMOD,TBL"]],
+        "start": [[BOX, "TBLSTRT"]],
+        "reset": reset if reset is not None else [[BOX, "SMOD,LOC"],
+                                                  [BOX, "SMOD,TBL"]],
     })
 
 
@@ -142,6 +145,14 @@ def make_boxes(*names: str, arb_modules: int = 0, transport=None) -> dict[str, B
                   else FakeBox(arb_modules=arb_modules), name=name)
         for name in names
     }
+
+
+def boxes_for(loaded, **kwargs) -> dict[str, Box]:
+    """A stand-in box per box the method names.
+
+    The roster comes off the method rather than out of this file, so a golden method
+    that renames its boxes needs no edit here."""
+    return make_boxes(*[box.name for box in loaded.boxes], **kwargs)
 
 
 class SlowBox(FakeBox):
@@ -206,7 +217,7 @@ def test_single_frame_with_more_than_one_frame_is_refused_before_anything_is_sen
     ran and be offset by the serial latency (lab record, task 05)."""
     method = make_method(repetition_mode="single_frame", frames=2)
     assert len(refusals(method)) == 1
-    boxes = make_boxes("mips-a")
+    boxes = make_boxes(BOX)
     with pytest.raises(AcquisitionRefused, match="never lowers"):
         rig.acquire(method, boxes)
     assert not os.listdir(rig.directory)
@@ -223,7 +234,7 @@ def test_one_single_frame_and_every_per_repetition_method_are_acquirable():
 
 def test_send_phases_sends_setup_load_and_arm_in_the_order_written():
     method = make_method()
-    boxes = make_boxes("mips-a")
+    boxes = make_boxes(BOX)
     seen: list[acq.Event] = []
     send_phases(method, boxes, progress=seen.append)
     assert isinstance(seen[0], BoxReady)
@@ -234,7 +245,7 @@ def test_send_phases_sends_setup_load_and_arm_in_the_order_written():
 
 
 def test_setup_can_be_left_out_for_a_box_that_has_had_it_since_power_up():
-    boxes = make_boxes("mips-a")
+    boxes = make_boxes(BOX)
     seen: list[acq.Event] = []
     send_phases(make_method(), boxes, setup=False, progress=seen.append)
     phases = [event.phase for event in seen if isinstance(event, PhaseSent)]
@@ -245,24 +256,24 @@ def test_a_table_is_streamed_in_paced_chunks_rather_than_written_in_one_go():
     """The box has no flow control and drops what overruns its 4 KB input buffer without
     saying so, so a long table written in one call loses its tail."""
     transport = FakeBox()
-    box = Box(transport=transport, name="mips-a")
+    box = Box(transport=transport, name=BOX)
     events = ",".join(f"{tick}:A:1" for tick in range(100, 4000, 2))
     method = method_module.from_dict({
         "schema_version": 2,
         "metadata": {"name": "long table", "created": dt.date(2026, 9, 11)},
         "acquisition": {"frames": 1, "scans": SCANS, "accumulations": 1,
                         "file_stem": "long"},
-        "boxes": [{"name": "mips-a", "port": "COM3",
+        "boxes": [{"name": BOX, "port": "COM3",
                    "load": [f"STBLDAT;0:[A:1,{events},8000:];"], "arm": ["SMOD,TBL"]}],
-        "start": [["mips-a", "TBLSTRT"]],
+        "start": [[BOX, "TBLSTRT"]],
     })
-    send_phases(method, {"mips-a": box})
+    send_phases(method, {BOX: box})
     assert transport.dropped_bytes == 0
     assert len(transport.written) > 1
 
 
 def test_a_box_that_refuses_a_string_stops_the_send_and_says_which():
-    boxes = make_boxes("mips-a")
+    boxes = make_boxes(BOX)
     method = make_method()
     method = dataclasses.replace(method, boxes=(
         dataclasses.replace(method.boxes[0], setup=("NOSUCHCMD",)),
@@ -285,7 +296,7 @@ def test_a_methods_own_warnings_are_passed_straight_through():
     )
     assert method.warnings
     seen: list[acq.Event] = []
-    send_phases(method, make_boxes("mips-a"), progress=seen.append)
+    send_phases(method, make_boxes(BOX), progress=seen.append)
     assert [event.message for event in seen if isinstance(event, Warned)] \
         == list(method.warnings)
 
@@ -295,7 +306,7 @@ def test_a_methods_own_warnings_are_passed_straight_through():
 
 def test_a_whole_per_repetition_acquisition_writes_both_files(rig):
     method = make_method()
-    boxes = make_boxes("mips-a")
+    boxes = make_boxes(BOX)
     send_phases(method, boxes)
     run = rig.acquire(method, boxes)
 
@@ -319,7 +330,7 @@ def test_a_whole_per_repetition_acquisition_writes_both_files(rig):
 
 def test_a_single_frame_acquisition_folds_the_blocks_inside_its_one_frame(rig):
     method = make_method(repetition_mode="single_frame")
-    boxes = make_boxes("mips-a")
+    boxes = make_boxes(BOX)
     send_phases(method, boxes)
     run = rig.acquire(method, boxes)
 
@@ -350,7 +361,7 @@ def test_the_console_is_asked_for_a_frame_before_the_start_list_is_walked(rig, t
             super().acquire_frame(request)
 
     method = make_method()
-    boxes = {"mips-a": Box(transport=LoggingBox(), name="mips-a")}
+    boxes = {BOX: Box(transport=LoggingBox(), name=BOX)}
     send_phases(method, boxes)
     console = LoggingConsole(rig.fake.command_endpoint, timeout=10.0)
     console.configure(offset_v=0.251)
@@ -372,7 +383,7 @@ def test_a_frame_is_over_when_the_stream_falls_silent_not_when_it_says_finished(
     finished from one that was cut off, and the console is still inserting rows for a
     frame whose `finished` has gone out (lab record, task 20)."""
     method = make_method(accumulations=1)
-    boxes = make_boxes("mips-a")
+    boxes = make_boxes(BOX)
     send_phases(method, boxes)
     run = rig.acquire(method, boxes)
     record = run.frames[0]
@@ -386,7 +397,7 @@ def test_a_frame_is_over_when_the_stream_falls_silent_not_when_it_says_finished(
 
 def test_the_progress_stream_reports_every_stage_in_order(rig):
     method = make_method()
-    boxes = make_boxes("mips-a")
+    boxes = make_boxes(BOX)
     seen: list[acq.Event] = []
     send_phases(method, boxes)
     rig.acquire(method, boxes, progress=seen.append)
@@ -404,7 +415,7 @@ def test_the_progress_stream_reports_every_stage_in_order(rig):
 
 def test_a_replicate_walks_the_reset_list_and_re_sends_no_table(rig):
     method = make_method()
-    boxes = make_boxes("mips-a")
+    boxes = make_boxes(BOX)
     send_phases(method, boxes)
     first = rig.acquire(method, boxes)
 
@@ -424,7 +435,7 @@ def test_a_replicate_walks_the_reset_list_and_re_sends_no_table(rig):
 
 def test_a_replicate_that_reuses_a_stem_collides_rather_than_overwriting(rig):
     method = make_method()
-    boxes = make_boxes("mips-a")
+    boxes = make_boxes(BOX)
     send_phases(method, boxes)
     rig.acquire(method, boxes)
     with pytest.raises(FileExistsError):
@@ -438,7 +449,7 @@ def test_a_frame_that_publishes_nothing_is_recorded_and_the_run_goes_on(rig):
     """A console that failed on its first fetch ends its frame with the same `finished`
     a good frame ends with, so an empty frame is the one signal there is."""
     method = make_method()
-    boxes = make_boxes("mips-a")
+    boxes = make_boxes(BOX)
     send_phases(method, boxes)
     seen: list[acq.Event] = []
 
@@ -462,7 +473,7 @@ def test_a_frame_that_publishes_nothing_is_recorded_and_the_run_goes_on(rig):
 
 def test_an_error_the_console_publishes_is_a_frames_outcome_not_the_runs(rig):
     method = make_method(accumulations=2)
-    boxes = make_boxes("mips-a")
+    boxes = make_boxes(BOX)
     send_phases(method, boxes)
     rig.fake.frame_error = "Invalid value (1000) for parameter nbrElementsToFetch"
     run = rig.acquire(method, boxes)
@@ -474,7 +485,7 @@ def test_an_error_the_console_publishes_is_a_frames_outcome_not_the_runs(rig):
 
 def test_a_run_gives_up_after_enough_frames_fail_in_a_row(rig):
     method = make_method(accumulations=6)
-    boxes = make_boxes("mips-a")
+    boxes = make_boxes(BOX)
     send_phases(method, boxes)
     rig.fake.frame_batches = 0
     run = rig.acquire(method, boxes, abort_after=2)
@@ -491,7 +502,7 @@ def test_a_batch_before_the_start_list_has_finished_fails_the_frame(rig):
     table that left the enable high, and the enable lead off a pulled-up input."""
     rig.fake.frame_hold_s = 0.0
     method = make_method(accumulations=1)
-    boxes = make_boxes("mips-a", transport=SlowBox)
+    boxes = make_boxes(BOX, transport=SlowBox)
     send_phases(method, boxes)
     run = rig.acquire(method, boxes)
     assert [record.outcome for record in run.frames] == ["EnableGateError"]
@@ -503,7 +514,7 @@ def test_a_batch_before_the_start_list_has_finished_fails_the_frame(rig):
 def test_the_guard_can_be_turned_off(rig):
     rig.fake.frame_hold_s = 0.0
     method = make_method(accumulations=1)
-    boxes = make_boxes("mips-a", transport=SlowBox)
+    boxes = make_boxes(BOX, transport=SlowBox)
     send_phases(method, boxes)
     run = rig.acquire(method, boxes, guard_gate=False)
     assert run.complete
@@ -524,7 +535,7 @@ def test_the_guard_leaves_a_status_message_for_whoever_waits_on_it(rig):
 
 def test_keep_raw_false_leaves_only_the_companion(rig):
     method = make_method(keep_raw=False)
-    boxes = make_boxes("mips-a")
+    boxes = make_boxes(BOX)
     send_phases(method, boxes)
     run = rig.acquire(method, boxes)
     assert run.complete
@@ -536,7 +547,7 @@ def test_keep_raw_false_leaves_only_the_companion(rig):
 def test_a_run_that_folded_nothing_keeps_its_raw_file_whatever_keep_raw_says(rig):
     """Discarding is irreversible and there is nothing to have been replaced by."""
     method = make_method(keep_raw=False, accumulations=2)
-    boxes = make_boxes("mips-a")
+    boxes = make_boxes(BOX)
     send_phases(method, boxes)
     rig.fake.frame_batches = 0
     run = rig.acquire(method, boxes, abort_after=1)
@@ -551,7 +562,7 @@ def test_the_detection_response_golden_method_acquires(rig):
     method = golden("detection-response", accumulations=1)
     assert refusals(method) == []
     assert method.acquisition.repetition_mode == "per_repetition"
-    boxes = make_boxes(*ARB_METHOD_BOXES, arb_modules=ARB_MODULES)
+    boxes = boxes_for(method, arb_modules=ARB_MODULES)
     send_phases(method, boxes)
     run = rig.acquire(method, boxes)
     assert run.complete
@@ -564,16 +575,17 @@ def test_the_bradykinin_clock_golden_method_acquires_with_its_cross_box_start_or
     method = golden("bradykinin-clock")
     assert refusals(method) == []
     assert method.acquisition.repetition_mode == "single_frame"
-    assert [step.box for step in method.start] == ["mips-b", "mips-c", "mips-a"]
-    boxes = make_boxes(*ARB_METHOD_BOXES, arb_modules=ARB_MODULES)
+    ordered = [step.box for step in method.start]
+    assert len(set(ordered)) == 3, "three boxes, each started once"
+    assert method.start[-1].command == "TBLSTRT", "the box that releases the edge goes last"
+    boxes = boxes_for(method, arb_modules=ARB_MODULES)
     seen: list[acq.Event] = []
     send_phases(method, boxes)
     run = rig.acquire(method, boxes, progress=seen.append)
     assert run.complete
     walked = [(event.box, event.command) for event in seen
               if isinstance(event, PhaseSent) and event.phase == "start"]
-    assert walked == [("mips-b", "TARBTRG"), ("mips-c", "TARBTRG"),
-                      ("mips-a", "TBLSTRT")]
+    assert walked == [(step.box, step.command) for step in method.start]
     summed = UimfFile(run.summed_path)
     assert summed.frame_params(1).scans == SCANS
     assert summed.frame_params(1).accumulations == ACCUMULATIONS
@@ -590,7 +602,7 @@ def test_an_offset_that_disagrees_with_the_instrument_document_is_warned_about(r
     from clockwork.instrument import Instrument, Vertical
 
     method = make_method()
-    boxes = make_boxes("mips-a")
+    boxes = make_boxes(BOX)
     send_phases(method, boxes)
     seen: list[acq.Event] = []
     machine = Instrument(name="SLIM3", vertical=Vertical(full_scale_v=0.5, offset_v=0.2))
@@ -605,7 +617,7 @@ def test_an_offset_that_agrees_is_not_warned_about(rig):
     from clockwork.instrument import Instrument, Vertical
 
     method = make_method()
-    boxes = make_boxes("mips-a")
+    boxes = make_boxes(BOX)
     send_phases(method, boxes)
     seen: list[acq.Event] = []
     machine = Instrument(vertical=Vertical(full_scale_v=0.5, offset_v=0.251))
