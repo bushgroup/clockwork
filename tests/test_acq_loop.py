@@ -442,6 +442,74 @@ def test_a_replicate_that_reuses_a_stem_collides_rather_than_overwriting(rig):
         rig.acquire(method, boxes, replicate=True)
 
 
+# --- the re-arm fallback -----------------------------------------------------------------
+
+
+def software_triggered(**kwargs):
+    """A method whose box is configured the way the instrument's sequencer is.
+
+    `STBLTRG,SW` rather than the suite's usual `POS`, which is the whole of the
+    difference: `FakeBox` re-arms a table after an *external* trigger, as section 3 of the
+    wire format documents, and drops to local mode after a software one, which section 3
+    does not document either way. The stand-in's choice is the pessimistic reading of the
+    open question, and it is the reading `rearm_with_reset` exists for.
+    """
+    document = method_module.to_dict(make_method(**kwargs))
+    document["boxes"][0]["setup"] = ["STBLCLK,EXT", "STBLTRG,SW"]
+    return method_module.from_dict(document)
+
+
+def test_a_box_whose_table_does_not_re_arm_fails_its_frames_rather_than_hanging(rig):
+    """The shape of the "no" the bench is looking for (lab record, tasks 05 and 28).
+
+    A refused start step is the frame's failure and not the run's, so the run goes on and
+    says per frame what happened, rather than stopping on a traceback that names one
+    command.
+    """
+    method = software_triggered()
+    boxes = boxes_for(method)
+    send_phases(method, boxes)
+    run = rig.acquire(method, boxes, abort_after=None)
+    assert run.frames[0].acquired
+    assert [record.outcome for record in run.frames[1:]] == ["BoxRejected"] * (
+        ACCUMULATIONS - 1)
+    assert "TBLSTRT" in run.frames[1].detail
+
+
+def test_rearm_with_reset_re_arms_before_every_console_frame_but_the_run_s_first(rig):
+    """Including the first repetition of the second method frame, which is the one a
+    repetition counter misses: `repetition` starts again at 1 for each method frame while
+    the table it has to re-arm was spent by the previous frame's last repetition.
+    """
+    method = software_triggered(frames=2)
+    boxes = boxes_for(method)
+    send_phases(method, boxes)
+    seen: list[acq.Event] = []
+    run = rig.acquire(method, boxes, rearm_with_reset=True, progress=seen.append)
+    assert run.complete
+
+    resets = [event for event in seen
+              if isinstance(event, PhaseSent) and event.phase == "reset"]
+    starts = [event for event in seen
+              if isinstance(event, PhaseSent) and event.phase == "start"]
+    # Two commands per reset, one before every console frame except the run's first.
+    assert len(starts) == 2 * ACCUMULATIONS
+    assert len(resets) == 2 * (2 * ACCUMULATIONS - 1)
+
+
+def test_rearm_with_reset_is_off_unless_asked_for(rig):
+    """It is a fallback unlocked by a bench answer, not the loop's own opinion, so a box
+    that does re-arm is never made to pay for one that does not."""
+    method = make_method(frames=2)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    seen: list[acq.Event] = []
+    run = rig.acquire(method, boxes, progress=seen.append)
+    assert run.complete
+    assert not [event for event in seen
+                if isinstance(event, PhaseSent) and event.phase == "reset"]
+
+
 # --- failures --------------------------------------------------------------------------
 
 

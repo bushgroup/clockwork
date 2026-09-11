@@ -856,10 +856,18 @@ class _Loop:
             self.report(BatchSeen(method_frame, repetition, batch))
 
         def release() -> None:
-            if self.rearm_with_reset and repetition > 1:
+            if self.rearm_with_reset and (method_frame, repetition) > (1, 1):
                 # The fallback the sync design names for a box whose table does not
                 # re-arm itself after a software trigger. Unlocked by a bench answer,
                 # not by this loop's opinion.
+                #
+                # Every console frame but the very first of the run needs it, which is
+                # not the same as every repetition but the first: `repetition` counts
+                # within a method frame and starts again at 1 for the next one, while
+                # the table that has to be re-armed was spent by the previous method
+                # frame's last repetition. A run's own first frame is excluded because
+                # `send_phases` armed the box, and a replicate's because `run` has just
+                # walked the same reset list.
                 self._walk(self.method.reset, "reset")
             self._walk(self.method.start, "start")
             if self.guard_gate:
