@@ -113,7 +113,7 @@ wheels = [
 [[package]]
 name = "mainspring"
 version = "1.0.0"
-source = { git = "https://github.com/bushgroup/mainspring?branch=main#e191a66d1c06d641d6fcecc9c96af101d20c6448" }
+source = { git = "https://github.com/bushgroup/mainspring?branch=main#0da425c5e7cd6269d24f4d45e495308a3870715f" }
 dependencies = [
     { name = "numpy" },
     { name = "pyqtgraph" },
