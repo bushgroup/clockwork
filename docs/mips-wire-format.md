@@ -517,6 +517,27 @@ second of table time. That is unacceptable for long experiments.
 **Clockwork should assume common-clock + common-trigger wiring**
 (consistent with the TOF-pusher-derived trigger design, lab record).
 
+### DIO outputs are shared state between tables and the host
+
+A table event on channel `A`-`P` does not own the digital-output lines privately. It writes the
+same one-byte-per-half image (`MIPSconfigData.DOlsb` for `A`-`H`, `DOmsb` for `I`-`P`, one bit per
+channel) that the host can write directly with `SDIO` (§4): the ISR's DIO branch (`Table.cpp`,
+`Chan` in `'A'..'P'`) calls the identical `SDIO_Set_Image()` that `SDIO_Serial()` calls from the
+host command path. Nothing in the firmware distinguishes a host-issued change from a table-issued
+one, and nothing serializes them against each other: whichever call writes the image byte last is
+the value `DOrefresh` pushes to the hardware shift registers next.
+
+`SDIO_Set_Image()`'s read-modify-write (`DOlsb |= mask` / `DOlsb &= ~mask`) is not wrapped in the
+atomic block that `DigitalOut()` uses when it clocks the shift registers over SPI. A table's DIO
+writes run inside the RA-match ISR; the host's `SDIO` runs from the main-loop `ProcessSerial()`
+call. An ISR that fires between the read and the write of that main-loop call can interleave with
+it, so a host `SDIO` on one channel and a table event on another channel sharing the same byte
+(`A`-`H` share `DOlsb`, `I`-`P` share `DOmsb`) can lose one of the two updates. This is exactly the
+arrangement a `per_repetition` table pulsing DIOB every repetition while the host lowers DIOA
+between frames creates, since DIOA and DIOB are both `DOlsb` bits. Whether the two calls land close
+enough in time to actually collide is a bench question, not one the source settles (lab record,
+task 26).
+
 ### Timing limits (compiler constraints)
 
 From `TableCheck()` constants and the vendor guideline:
@@ -572,9 +593,10 @@ Grouped from `MIPScommands.txt` + dispatch table in `Serial.cpp`
 | `SEXTFREQ`/`GEXTFREQ` | Hz | Declare external clock frequency |
 | `STBLTSKS`/`GTBLTSKS`, `TBLTSKENA` | `TRUE\|FALSE` | Run system tasks in table idle time (needs `SEXTFREQ` on ext clock; use with care) |
 | `STBLUSBTST`/`GTBLUSBTST` | `TRUE\|FALSE` | USB link test during table loop |
+| `SDIO` | `<chan A-P>,<0\|1>` | Set one digital output directly from the host, independent of any loaded table; accepted in LOC or TBL mode |
 
-Three commands in this table behave in ways the row cannot carry, and
-all three matter to a sequencer:
+Four commands in this table behave in ways the row cannot carry, and
+all four matter to a sequencer:
 
 **`SMOD` refuses the mode it is already in.** `SetTableMode()`
 (`Table.cpp`) tests the current mode before doing anything: `SMOD,LOC`
@@ -631,6 +653,33 @@ actually running.
 `ReportTable()` is called nowhere else; the call inside the successful
 `STBLDAT` path is commented out, so a dump only ever happens because the
 host asked for one.
+
+**`SDIO` takes effect immediately, in any mode, and can race a running
+table's own DIO writes.** `SDIO_Serial()` (`DIO.cpp`) sets the requested
+bit in the shared digital-output image and pushes it to the hardware
+shift registers before returning ACK. Neither `ExecuteCommand()`'s
+dispatch (`Serial.cpp`) nor `SDIO_Serial()` itself checks whether the
+box is in LOC or TBL mode, so the command is accepted in either,
+including while a table is running. A table's own DIO events write the
+identical image through the identical function, `SDIO_Set_Image()`, at
+LDAC time, and neither call is serialized against the other: see the
+"DIO outputs are shared state between tables and the host" note in §3
+for the byte-level race this creates when a host write and a table's
+own DIO event share a channel's image byte. Whether the two calls
+collide often enough to matter for the multi-frame `single_frame` case
+this command is meant to serve is still a bench question (lab record,
+task 26).
+
+**`SDIO`'s channel validation admits `Q`-`X` and aliases them onto
+outputs `I`-`P`.** `SDIO_Serial()` accepts any `CH[0]` in `'A'..'X'`,
+but `SDIO_Set_Image()` computes the bit as `1 << ((chan - 'A') & 7)`
+and routes `chan >= 'I'` to `DOmsb` with no further check. `Q`-`X` are
+the digital *inputs* everywhere else in this protocol (§1's channel
+table), but `chan - 'A'` for `Q` is 16, `16 & 7` is 0, the same bit
+`I` occupies, so `SDIO,Q,1` silently sets output `I` instead of
+touching an input. `Q` through `X` map onto `I` through `P` in that
+same wrapped order. A sequencer must reject `Q`-`X` before sending
+`SDIO`; the firmware will not.
 
 **Not every command above exists on every firmware.** `GTBLSTA` is
 absent from v1.163t (Nov 2019), where it NAKs as an invalid command
