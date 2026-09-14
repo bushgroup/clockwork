@@ -900,9 +900,23 @@ Module-side interpretation (module firmware `ARB.ino`, v1.24 baseline):
   EEPROM via the UI Save). `ARBSYNC` enables it transiently for the
   pulse. So for a module to follow table `s` events, its UI Sync input
   must be configured, even though the table path drives the line
-  directly and never uses that input. Verify per module (§7). The UI
-  "Dir input" is analogous: a front-panel-only DI attachment that flips
-  TW direction on an input change (TWI-paced, not tick-accurate).
+  directly and never reads that input.
+
+  The input chosen matters. Attaching one also installs an interrupt
+  handler that pulses the same broadcast sync line for 1 µs on every
+  qualifying edge of that input (`ARBsyncISR`), so an input carrying a
+  real signal re-phases every listening module at that signal's rate,
+  independently of any table. One instrument was found with all four of
+  a box's modules pointed at the input that carries the per-repetition
+  release edge, which re-phases those modules once per repetition (lab
+  record, task 10). The handler pulses only when the line is already
+  low, so it does not fight a table-driven level. A failed attach is
+  worse than no attach: `attached()` returns false when the input is out
+  of range or already in use, and the controller then sends the TWI sync
+  enable as false. Verify per module (§7).
+
+  The UI "Dir input" is analogous: a front-panel-only DI attachment that
+  flips TW direction on an input change (TWI-paced, not tick-accurate).
 - **Compress**, level-sensitive, if the module's compress-follow flag
   is set (`SARBCPEX,<mod>,TRUE`): line HIGH = compress mode (the
   module latches its compression order and switches waveform), LOW =
