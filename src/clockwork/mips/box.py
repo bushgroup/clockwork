@@ -53,6 +53,7 @@ from .wire import (
     ResponseReader,
     TableEvent,
     Token,
+    dio_command,
     error_text,
     table_event,
 )
@@ -385,6 +386,24 @@ class Box:
     def abort(self) -> None:
         """`TBLABRT`: leave table mode now."""
         self.command("TBLABRT")
+
+    def set_dio(self, channel: str, high: bool) -> None:
+        """`SDIO`: drive one digital output from the host. **LOC mode only.**
+
+        The command is accepted in any mode, and in table mode it does not move
+        the line: the latch that applies the digital-output image is the LDAC
+        pin, which entering table mode hands to the table timer, so a host
+        pulse writes a pin the processor no longer drives. The bit is not lost,
+        it is pending, and the table's next event applies it at a time the host
+        did not choose (§4). So a caller that means to move a line puts the box
+        in `local()` first and arms it again afterwards.
+
+        This does not send `SMOD,LOC` itself. Which mode a box should be left
+        in is the caller's sequence and not this method's business, and a
+        silent round trip through local mode would be a worse surprise than
+        the one it prevented.
+        """
+        self.command(dio_command(channel, high))
 
     def local(self) -> None:
         """`SMOD,LOC`, which a table load needs unless the box is READY.

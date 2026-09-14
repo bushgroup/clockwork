@@ -241,6 +241,9 @@ _COMPRESSOR_GETTABLE: dict[str, str] = {
 
 _COMPRESSOR_SET_ONLY: tuple[str, ...] = ("SARBCMP", "SARBCOFF", "SARBALTTS", "SARBDISCI")
 
+_DIO_OUTPUTS = "ABCDEFGHIJKLMNOP"
+"""The digital outputs `SDIO` can drive. `Q`-`X` are inputs and alias onto `I`-`P`."""
+
 _COMPRESSOR_DEFAULTS: dict[str, str] = {
     "SARBCTBL": "",
     "SARBCMODE": "Normal",
@@ -340,6 +343,17 @@ class FakeBox:
         self.mode = "LOC"
         self.status = "IDLE"
         self.error = 0
+        self.dio_image: dict[str, bool] = dict.fromkeys(_DIO_OUTPUTS, False)
+        """What the box believes its digital outputs are, and what `GDIO` answers."""
+
+        self.dio_pins: dict[str, bool] = dict.fromkeys(_DIO_OUTPUTS, False)
+        """What a scope on those outputs would see.
+
+        The two differ whenever an `SDIO` arrives in table mode, where the image
+        changes and the latch that would apply it belongs to the table timer
+        (§4). Nothing here runs a table, so a staged write stays staged; what
+        this models is that the host cannot see the difference."""
+
         self.table_buffer = 1
         """`STBLNUM`/`GTBLNUM`, the active table buffer. Stored, never acted on:
         this stand-in holds one table."""
@@ -526,6 +540,43 @@ class FakeBox:
 
     def _do_gextfreq(self, _: str) -> None:
         self._value(str(self.ext_freq))
+
+    def _do_sdio(self, argument: str) -> None:
+        """`SDIO`, with the three ways it surprises a host, all modelled (§4).
+
+        Accepted in any mode and applied to the image in any mode, but the pins
+        only follow in LOC: in table mode the latch belongs to the table timer,
+        so the write is staged and the line does not move. `dio_pins` is what a
+        scope would see and `dio_image` is what the box believes.
+        """
+        channel, _, value = argument.partition(",")
+        channel, value = channel.strip().upper(), value.strip()
+        if len(channel) != 1 or not ("A" <= channel <= "X") or value not in ("0", "1"):
+            self._nak(2)
+            return
+        self._ack()
+        # The aliasing the firmware does and does not report: Q-X wrap onto
+        # I-P, so a host that sends one corrupts an output it did not name.
+        written = _DIO_OUTPUTS[(ord(channel) - ord("A")) % 8 + (
+            8 if channel >= "I" else 0)]
+        self.dio_image[written] = value == "1"
+        if self.mode == "LOC":
+            self.dio_pins[written] = self.dio_image[written]
+
+    def _do_gdio(self, argument: str) -> None:
+        """`GDIO`: an output from the image, an input from the hardware.
+
+        Reading back an output therefore cannot tell a latched write from a
+        pending one, which is the reason a host cannot confirm `SDIO` worked.
+        """
+        channel = argument.strip().upper()
+        if len(channel) != 1 or not ("A" <= channel <= "X"):
+            self._nak(2)
+            return
+        if channel >= "Q":
+            self._value("0")  # no digital input is driven on this stand-in
+            return
+        self._value("1" if self.dio_image.get(channel) else "0")
 
     def _do_stblclk(self, argument: str) -> None:
         if self.mode != "LOC":

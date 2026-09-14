@@ -552,9 +552,16 @@ call. An ISR that fires between the read and the write of that main-loop call ca
 it, so a host `SDIO` on one channel and a table event on another channel sharing the same byte
 (`A`-`H` share `DOlsb`, `I`-`P` share `DOmsb`) can lose one of the two updates. This is exactly the
 arrangement a `per_repetition` table pulsing DIOB every repetition while the host lowers DIOA
-between frames creates, since DIOA and DIOB are both `DOlsb` bits. Whether the two calls land close
-enough in time to actually collide is a bench question, not one the source settles (lab record,
-task 26).
+between frames creates, since DIOA and DIOB are both `DOlsb` bits.
+
+**The race is reachable only if the host writes while a table is running, and on this hardware a
+host write in table mode does not reach the pins anyway.** The latch that applies the image is the
+`LDAC` line, pin 11, which is also the table timer's TIOA output and which entering table mode
+hands to the timer peripheral, so a host `SDIO` between two frames changes the image and waits for
+a latch the table controls (§4). A host that changes a line from LOC, which is the sequence §4
+recommends, meets neither the race nor the dead latch. Whether the two calls can collide at all on
+a software-LDAC box, where the host's pulse does work in table mode, is a bench question the
+source does not settle (lab record, task 26).
 
 ### Timing limits (compiler constraints)
 
@@ -611,7 +618,8 @@ Grouped from `MIPScommands.txt` + dispatch table in `Serial.cpp`
 | `SEXTFREQ`/`GEXTFREQ` | Hz | Declare external clock frequency |
 | `STBLTSKS`/`GTBLTSKS`, `TBLTSKENA` | `TRUE\|FALSE` | Run system tasks in table idle time (needs `SEXTFREQ` on ext clock; use with care) |
 | `STBLUSBTST`/`GTBLUSBTST` | `TRUE\|FALSE` | USB link test during table loop |
-| `SDIO` | `<chan A-P>,<0\|1>` | Set one digital output directly from the host, independent of any loaded table; accepted in LOC or TBL mode |
+| `SDIO` | `<chan A-P>,<0\|1>` | Set one digital output directly from the host, independent of any loaded table. Accepted in any mode; **effective only in LOC**, see below |
+| `GDIO` | `<chan A-X>` | Read one line: an output `A`-`P` from the image register, an input `Q`-`X` from the hardware. **It cannot confirm an output actually moved**, see below |
 
 Four commands in this table behave in ways the row cannot carry, and
 all four matter to a sequencer:
@@ -672,21 +680,62 @@ actually running.
 `STBLDAT` path is commented out, so a dump only ever happens because the
 host asked for one.
 
-**`SDIO` takes effect immediately, in any mode, and can race a running
-table's own DIO writes.** `SDIO_Serial()` (`DIO.cpp`) sets the requested
-bit in the shared digital-output image and pushes it to the hardware
-shift registers before returning ACK. Neither `ExecuteCommand()`'s
-dispatch (`Serial.cpp`) nor `SDIO_Serial()` itself checks whether the
-box is in LOC or TBL mode, so the command is accepted in either,
-including while a table is running. A table's own DIO events write the
-identical image through the identical function, `SDIO_Set_Image()`, at
-LDAC time, and neither call is serialized against the other: see the
-"DIO outputs are shared state between tables and the host" note in §3
-for the byte-level race this creates when a host write and a table's
-own DIO event share a channel's image byte. Whether the two calls
-collide often enough to matter for the multi-frame `single_frame` case
-this command is meant to serve is still a bench question (lab record,
-task 26).
+**`SDIO` is accepted in every mode and takes effect only in LOC.**
+`SDIO_Serial()` (`DIO.cpp`) validates its two arguments, ACKs, sets the
+requested bit in the shared digital-output image, clocks the image out
+to the hardware shift registers with `DOrefresh`, and then latches it
+with `PulseLDAC`. Neither `ExecuteCommand()`'s dispatch (`Serial.cpp`)
+nor `SDIO_Serial()` checks the mode, so the command is accepted, ACKed
+and image-applied in LOC and TBL alike. **The latch is what stops
+working in table mode.** `PulseLDAC` is `digitalWrite` on the pin named
+`LDAC`, which is **pin 11**; pin 11 is TIOA of timer channel 8, which is
+the table engine's timer, and `Variants.h` says `TMR_Table` "must be 8
+because of hardware needs". Entering table mode, `SetupTimer()` calls
+`MIPStimer::setTIOAeffect()`, which begins by handing that pin to the
+timer peripheral with `PIO_Configure()`, and releases the processor's
+own LDAC control alongside it. From `SMOD,TBL` until the box is local
+again, a software pulse writes a PIO register for a pin the PIO no
+longer drives, and the outputs do not move.
+
+Measured, with a table loaded and armed and the digitizer as the
+detector: `SDIO,A,1` is ACKed and DIOA does not move; the identical
+command after `SMOD,LOC` raises it at once (lab record, task 26).
+
+**An `SDIO` sent in table mode is pending, not discarded.** The bit is
+in the image and in the shift registers, so the next latch applies it,
+and in table mode the next latch is the table's own next event. A host
+that sends one and reads the ACK as "done" has scheduled an output
+change for a time it did not choose. **To move a line by command, put
+the box in LOC first**: `SMOD,LOC`, `SDIO`, `SMOD,TBL`, which is the
+round trip a re-arm already costs and which leaves the loaded table
+loaded. This is read off the firmware and is the one part of the
+paragraph not yet measured; the measurement is a scope on the line
+across a table event after an `SDIO` sent in TBL mode.
+
+Two exceptions restore the software latch, both by making `SetupTimer()`
+use `setTIOAeffectNOIO()`, which leaves pin 11 with the PIO: a
+controller of `Rev` 1 or lower, and **software LDAC**, which
+`STBLCLK,EXTS` turns on by itself and `SOFTLDAC,TRUE` forces. On those
+paths `SDIO` moves the line in table mode as the row above says.
+
+A table's own DIO events write the identical image through the identical
+function, `SDIO_Set_Image()`, at LDAC time, and neither call is
+serialized against the other: see the "DIO outputs are shared state
+between tables and the host" note in §3 for the byte-level race this
+creates when a host write and a table's own DIO event share a channel's
+image byte. In LOC that race cannot arise, because no table is running,
+which is a second reason to change a line from local mode only.
+
+**`GDIO` on an output reads the image, not the pin, so it cannot confirm
+a write.** `GDIO_Serial()` (`DIO.cpp`) branches on the channel: `Q`-`X`
+are read from the hardware with `DigitalIn()`, which is correct and is
+the way to read a digital input, while `A`-`P` are answered from the
+`DOlsb`/`DOmsb` image. An `SDIO` sent in table mode therefore reads back
+as applied while the line has not moved, because the image is exactly
+what that `SDIO` changed. There is no host-visible way to tell a latched
+output from a pending one; a scope is the only witness. Note that the
+aliasing hazard below is `SDIO`'s alone: `GDIO` routes `Q`-`X` to the
+inputs properly.
 
 **`SDIO`'s channel validation admits `Q`-`X` and aliases them onto
 outputs `I`-`P`.** `SDIO_Serial()` accepts any `CH[0]` in `'A'..'X'`,
@@ -1177,6 +1226,15 @@ inspection, not scriptable):
   one waveform period, from the manual; the module firmware that
   implements it isn't public) if Layer 1 timing budgets come to depend
   on the exact value.
+- **Whether an `SDIO` sent in table mode is applied at the table's next
+  event.** §4 reads the firmware as leaving the bit in the image and in
+  the shift registers with only the latch missing, which makes the
+  command a deferred write rather than a discarded one, and that is a
+  worse failure than the no-op it looks like. Scope the line across a
+  table event after an `SDIO` in TBL mode. Also worth the same probe:
+  whether `I`-`P` behave differently from `A`-`H`, since `DigitalOut()`
+  strobes the MSB half with its own latch pin at address 7 and only the
+  LSB half waits for `LDAC`.
 - **Which external clock edge a tick-0 event lands on**, for a
   `STBLCLK,EXT` + `STBLTRG,SW` table. §3 reads the firmware as the
   first edge after `TBLSTRT`, one edge later than "at trigger time",

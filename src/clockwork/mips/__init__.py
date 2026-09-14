@@ -65,6 +65,7 @@ from .table import (
 from .transport import FakeBox, SerialTransport, Transport, open_serial
 from .wire import (
     ACK,
+    DIO_OUTPUTS,
     ERR_ALREADY_LOCAL,
     NAK,
     RING_BUFFER_BYTES,
@@ -73,6 +74,7 @@ from .wire import (
     ResponseReader,
     TableEvent,
     Token,
+    dio_command,
     error_text,
     table_event,
 )
@@ -104,9 +106,11 @@ __all__ = [
     "TimePoint",
     "Token",
     "Transport",
+    "DIO_OUTPUTS",
     "ValueKind",
     "compile_table",
     "decode",
+    "dio_command",
     "differences",
     "digital_events",
     "encode",

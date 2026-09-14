@@ -30,6 +30,7 @@ from clockwork.mips import (
     decode,
     differences,
     digital_events,
+    dio_command,
     encode,
     error_text,
     parse_report,
@@ -142,6 +143,64 @@ def test_dc_bias_channels_are_stored_zero_based_and_opaque() -> None:
 def test_digital_outputs_store_the_value_character() -> None:
     entry = compile_table("STBLDAT;0:[A:1,10:A:1,100:];").tables[0].points[0].entries[0]
     assert (entry.chan, entry.kind, entry.value) == (ord("A"), ValueKind.CHAR, ord("1"))
+
+
+def test_sdio_moves_the_line_in_local_mode() -> None:
+    fake = FakeBox()
+    box = Box(transport=fake, name="dunlin")
+    box.set_dio("A", True)
+    assert fake.dio_image["A"] is True
+    assert fake.dio_pins["A"] is True
+
+
+def test_sdio_in_table_mode_is_acked_and_does_not_move_the_line() -> None:
+    """Measured on a box, and the firmware says why: the latch that applies the
+    digital-output image is the LDAC pin, which entering table mode hands to the
+    table's timer, so a host pulse writes a pin the PIO no longer drives. The write
+    is staged rather than lost (lab record, task 26)."""
+    fake = FakeBox()
+    box = Box(transport=fake, name="dunlin")
+    box.send_table("STBLDAT;0:[A:1,0:A:1,100:];")
+    box.set_dio("A", True)
+    box.arm()
+    box.set_dio("A", False)
+    assert fake.dio_image["A"] is False
+    assert fake.dio_pins["A"] is True
+
+
+def test_reading_a_digital_output_back_cannot_confirm_it_moved() -> None:
+    """`GDIO` answers an output from the image, which is exactly what a pending
+    `SDIO` changed, so it reports the write as applied while the pin has not moved."""
+    fake = FakeBox()
+    box = Box(transport=fake, name="dunlin")
+    box.send_table("STBLDAT;0:[A:1,0:A:1,100:];")
+    box.set_dio("A", True)
+    box.arm()
+    box.set_dio("A", False)
+    assert box.command("GDIO,A", value=True) == "0"
+    assert fake.dio_pins["A"] is True
+
+
+def test_a_digital_input_channel_is_refused_before_it_reaches_a_box() -> None:
+    """The firmware takes `Q`-`X` and wraps them onto outputs `I`-`P`, so
+    `SDIO,Q,1` drives output `I` and reports success. The host has to refuse it."""
+    with pytest.raises(ValueError, match="digital input"):
+        dio_command("Q", True)
+    with pytest.raises(ValueError, match="A to P"):
+        dio_command("Z", False)
+    with pytest.raises(ValueError, match="A to P"):
+        dio_command("AB", True)
+    assert dio_command("A", True) == "SDIO,A,1"
+    assert dio_command("P", False) == "SDIO,P,0"
+
+
+def test_the_stand_in_reproduces_the_aliasing_rather_than_hiding_it() -> None:
+    """A raw string can still carry one, and then the box does what a box does."""
+    fake = FakeBox()
+    box = Box(transport=fake, name="dunlin")
+    box.command("SDIO,Q,1")
+    assert fake.dio_image["I"] is True
+    assert fake.dio_image["A"] is False
 
 
 def test_a_loop_header_is_not_an_event_on_the_line_it_is_named_after() -> None:

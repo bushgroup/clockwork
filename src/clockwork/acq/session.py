@@ -63,6 +63,8 @@ def start_chain(
     timeout: float = ACQUIRE_TIMEOUT_S,
     settle: float = 5.0,
     quiet: float = 1.0,
+    ungate: bool = False,
+    io_port: int = 2,
 ) -> TofWidth:
     """`acquire`, then stop the open-ended acquisition it starts, and clear up after it.
 
@@ -72,6 +74,26 @@ def start_chain(
     and stopping it publishes a `finished` of its own plus however many batches
     it managed in the meantime. Those are consumed here, so that what the
     stream holds afterwards belongs to the frames.
+
+    **`ungate` is the bootstrap, and it is off until the bench says otherwise.**
+    The measurement inside `acquire` needs twenty trigger timestamps, and the
+    card counts none while Control I/O 2 is an enable input held low, which is
+    where a sequencer's DIO sits before its table has ever run. So the chain
+    cannot be opened at all on a cold instrument, and every run of the bench
+    day worked only because the line had been raised by hand first (lab record,
+    task 26). `ungate=True` disables the enable input for the measurement and
+    enables it again afterwards, which is what the bench scripts do by hand.
+
+    It is off by default because a failure of the second half is silent. The
+    console re-configures the port without an `apply_setup` after it, the
+    chain's own `apply_setup` has already happened by then, and `acquire frame`
+    does not apply setup either; if the enable does not reach the card, every
+    frame acquires ungated and looks exactly like a frame that worked. Nothing
+    downstream notices, because the enable-gate guard only sees a batch
+    published *before* the start list finished and the first batch of an
+    ungated frame arrives about 135 ms after `acquire frame` against a start
+    list of a few milliseconds. Turn it on when a bench run has shown the gate
+    still in force on a chain built this way.
 
     `settle` is how long to wait for that `finished`. Missing it is not an
     error: it is one message on a socket that drops what it cannot deliver, and
@@ -87,8 +109,17 @@ def start_chain(
     so a generous value costs a second and a mean one costs accuracy (lab
     record, task 20).
     """
-    width = console.acquire(timeout=timeout)
-    console.stop_frame()
+    if ungate:
+        console.disable_io_port(io_port)
+    try:
+        width = console.acquire(timeout=timeout)
+        console.stop_frame()
+    finally:
+        # Put the enable back whatever happened, including on the timeout that
+        # says the card saw no triggers: leaving the card ungated after a failed
+        # chain is the one outcome worse than the failure.
+        if ungate:
+            console.enable_io_port(io_port)
     for event in stream.events(timeout=settle):
         if isinstance(event, Status) and event.text == FINISHED:
             break

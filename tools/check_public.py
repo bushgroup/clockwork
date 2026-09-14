@@ -231,7 +231,26 @@ def main() -> int:
         fake.dropped_bytes == 0 and box.verify_table(long_load) == [],
     )
 
+    # `SDIO` is accepted in every mode and only moves a line in LOC: in table mode
+    # the latch belongs to the table's timer, so the write is staged and `GDIO`,
+    # which answers from the image, reports it as done anyway (§4).
+    box.set_dio("A", True)
+    moved_in_local = fake.dio_pins["A"] and box.command("GDIO,A", value=True) == "1"
     box.arm()
+    box.set_dio("A", False)
+    check_true(
+        "SDIO moves a line in local mode, is staged in table mode, and reads back as "
+        "done either way",
+        moved_in_local and fake.dio_pins["A"] and box.command("GDIO,A", value=True) == "0",
+    )
+    try:
+        mips.dio_command("Q", True)
+        check_true("a digital input is refused before it reaches a box", False)
+    except ValueError:
+        check_true("a digital input is refused before it reaches a box", True)
+    box.local()
+    box.arm()
+
     box.trigger()
     seen = box.drain(0.05)
     check_true(

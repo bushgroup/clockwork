@@ -196,3 +196,25 @@ degrades gracefully for anything missing.
 def error_text(code: int) -> str:
     """Describe a `GERR` code, without pretending to recognise all of them."""
     return ERROR_CODES.get(code, f"error {code}")
+
+
+DIO_OUTPUTS = "ABCDEFGHIJKLMNOP"
+"""The digital output channels. `Q`-`X` are the digital *inputs*."""
+
+
+def dio_command(channel: str, high: bool) -> str:
+    """One validated `SDIO`, the only way this package should build one.
+
+    The validation is not politeness. `SDIO_Serial()` accepts any letter from
+    `A` to `X`, but the bit it sets is `1 << ((chan - 'A') & 7)` routed to the
+    MSB half for anything from `I` up, so `Q`-`X` wrap onto outputs `I`-`P`:
+    `SDIO,Q,1` silently drives output `I` instead of rejecting a request to
+    write an input. The firmware will not refuse it, so a host has to (§4).
+    """
+    if len(channel) != 1 or channel not in DIO_OUTPUTS:
+        inputs = " It is a digital input; the box would alias it onto an output."
+        raise ValueError(
+            f"{channel!r} is not a digital output; MIPS names them A to P."
+            + (inputs if len(channel) == 1 and "Q" <= channel <= "X" else "")
+        )
+    return f"SDIO,{channel},{1 if high else 0}"

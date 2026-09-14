@@ -612,6 +612,7 @@ def run_acquisition(
     arm_timeout: float = ARM_TIMEOUT_S,
     start_step_gap: float = START_STEP_GAP_S,
     guard_gate: bool = True,
+    ungate_chain: bool = False,
     rearm_with_reset: bool = False,
     abort_after: int | None = ABORT_AFTER_FAILURES,
     instrument: Instrument = UNCALIBRATED,
@@ -650,6 +651,11 @@ def run_acquisition(
     the start list's steps in time as well as in order, which the ARB boxes need and
     which two consecutive serial writes do not supply.
 
+    `ungate_chain` is passed to `start_chain` and is how a cold instrument opens its
+    chain at all: the period measurement needs triggers the card will not count while
+    the enable input is held low. It is off by default and `start_chain`'s docstring
+    says why, which is that the failure it can have is silent (lab record, task 26).
+
     Returns a `Run` describing what happened, including the frames that did not work: an
     empty frame, a console error and a frame that never ended are outcomes recorded
     against their frame, which is left provisional in the file, and the run goes on to
@@ -682,7 +688,7 @@ def run_acquisition(
     started = clock()
     owns_chain = width is None
     if width is None:
-        width = start_chain(console, stream)
+        width = start_chain(console, stream, ungate=ungate_chain)
     try:
         if recording is None:
             if directory is None or post_trigger_samples is None:

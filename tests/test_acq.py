@@ -23,6 +23,7 @@ from clockwork.acq import (
     GATE_GRANULARITY_SAMPLES,
     SCAN_NUM_SMALLINT_MAX,
     SECONDS_PER_SAMPLE_2GSPS,
+    AcqError,
     Batch,
     Console,
     ConsoleAcquisitionError,
@@ -456,6 +457,40 @@ def test_start_chain_leaves_the_stream_holding_nothing(
     assert [status.text for status in stream.statuses] == [FINISHED]
     assert stream.batches == fake.open_batches
     assert stream.poll(0.2) is None
+
+
+def test_start_chain_leaves_the_enable_input_alone_by_default(
+    client: Console, stream: DataStream, fake: FakeConsole
+) -> None:
+    client.configure(offset_v=0.251)
+    assert fake.io_ports_enabled == [2]
+    start_chain(client, stream, timeout=5.0, settle=2.0)
+    assert fake.io_ports_enabled == [2]
+
+
+def test_start_chain_can_ungate_the_period_measurement_and_gate_again(
+    client: Console, stream: DataStream, fake: FakeConsole
+) -> None:
+    """The bootstrap: the measurement inside `acquire` needs twenty triggers and
+    the card counts none while the enable input is held low, which is where a
+    sequencer's DIO sits before its table has ever run (lab record, task 26)."""
+    client.configure(offset_v=0.251)
+    start_chain(client, stream, timeout=5.0, settle=2.0, ungate=True)
+    assert fake.io_ports_enabled == [2]
+    sent = [command for command, *_ in fake.commands]
+    assert sent.index("disable io port") < sent.index("acquire")
+    assert sent.index("acquire") < len(sent) - 1 - sent[::-1].index("enable io port")
+
+
+def test_an_ungated_chain_that_fails_still_puts_the_enable_back(
+    client: Console, stream: DataStream, fake: FakeConsole
+) -> None:
+    """Leaving the card ungated after a failed chain is worse than the failure."""
+    client.configure(offset_v=0.251)
+    fake.refuse["acquire"] = "timeout in acquisition, trig_count: 0"
+    with pytest.raises(AcqError):
+        start_chain(client, stream, timeout=5.0, settle=2.0, ungate=True)
+    assert fake.io_ports_enabled == [2]
 
 
 # --------------------------------------------------------------------------
