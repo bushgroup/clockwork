@@ -211,6 +211,16 @@ def main() -> int:
     )
     check_true("TBLRPT reads back the table that was sent", box.verify_table(load) == [])
 
+    # `[A:1,` opens a table named 'A' and drives nothing; a reader sees an event raising
+    # DIOA. Asking the compiled table rather than the string is the only way to tell.
+    named_loop = mips.compile_table("STBLDAT;0:[A:1,0:B:1,500:B:0,5001:A:0,5002:];")
+    raises_it = mips.compile_table("STBLDAT;0:[A:1,0:A:1:B:1,500:B:0,5500:A:0,5501:];")
+    check_true(
+        "a loop header is not read as an event on the line it is named after",
+        mips.digital_events(named_loop, "A") == ((0, 5001, "0"),)
+        and mips.digital_events(raises_it, "A") == ((0, 0, "1"), (0, 5500, "0")),
+    )
+
     # A long table has to be chunked: the box's 4096-byte input buffer drops
     # what overruns it without saying so (docs/mips-wire-format.md §1).
     long_events = ",".join(f"{tick}:A:1" for tick in range(100, 2000, 2))
@@ -559,7 +569,14 @@ def main() -> int:
         "file_stem": "selfcheck-loop"}
     loop_document["boxes"] = [{
         "name": "box1", "port": "COM1", "setup": ["STBLCLK,EXT"],
-        "load": [f"STBLDAT;0:[A:1,0:B:1,10:B:0,{scans + 1}:A:0,{scans + 2}:];"],
+        # DIOA and DIOB raised together at the loop's tick 0, DIOA lowered a whole
+        # console batch past the last counted scan. Both numbers off `clockwork.method`
+        # rather than written out, because a table that drives the digitizer's enable
+        # somewhere other than where the rule says is the way a `per_repetition` frame
+        # fails, and it fails looking like a cabling fault.
+        "load": [f"STBLDAT;0:[A:1,0:A:1:B:1,10:B:0,"
+                 f"{method_module.enable_fall_tick(scans)}:A:0,"
+                 f"{method_module.table_period(scans)}:];"],
         "arm": ["SMOD,TBL"],
     }]
     loop_document["reset"] = [["box1", "SMOD,LOC"], ["box1", "SMOD,TBL"]]

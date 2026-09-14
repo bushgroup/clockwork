@@ -29,6 +29,7 @@ from clockwork.mips import (
     compile_table,
     decode,
     differences,
+    digital_events,
     encode,
     error_text,
     parse_report,
@@ -141,6 +142,34 @@ def test_dc_bias_channels_are_stored_zero_based_and_opaque() -> None:
 def test_digital_outputs_store_the_value_character() -> None:
     entry = compile_table("STBLDAT;0:[A:1,10:A:1,100:];").tables[0].points[0].entries[0]
     assert (entry.chan, entry.kind, entry.value) == (ord("A"), ValueKind.CHAR, ord("1"))
+
+
+def test_a_loop_header_is_not_an_event_on_the_line_it_is_named_after() -> None:
+    """The trap that cost a bench day: `[A:1,` opens a table *named* `'A'` that runs
+    once, and reads exactly like an event raising DIOA. A `per_repetition` table written
+    this way drives DIOA precisely once, downwards (lab record, task 33)."""
+    compiled = compile_table("STBLDAT;0:[A:1,0:B:1,500:B:0,5001:A:0,5002:];")
+    assert compiled.tables[0].label == "'A'"
+    assert digital_events(compiled, "A") == ((0, 5001, "0"),)
+    assert digital_events(compiled, "B") == ((0, 0, "1"), (0, 500, "0"))
+
+
+def test_digital_events_reads_a_table_that_does_raise_the_line() -> None:
+    compiled = compile_table("STBLDAT;0:[A:1,0:A:1:B:1,500:B:0,5500:A:0,5501:];")
+    assert digital_events(compiled, "A") == ((0, 0, "1"), (0, 5500, "0"))
+
+
+def test_digital_events_names_the_table_each_event_came_from() -> None:
+    """A leading offset is a table of its own, so a pre-loop event is table 0 and the
+    loop's own tick 0 is table 1; the ticks are each table's own."""
+    compiled = compile_table("STBLDAT;0:A:1[A:1,0:B:1,5002:];")
+    assert digital_events(compiled, "A") == ((0, 0, "1"),)
+    assert digital_events(compiled, "B") == ((1, 0, "1"),)
+
+
+def test_digital_events_refuses_a_channel_that_is_not_a_digital_output() -> None:
+    with pytest.raises(ValueError, match="A to P"):
+        digital_events(compile_table(EXAMPLE), "Q")
 
 
 def test_arb_channels_store_float_bits() -> None:

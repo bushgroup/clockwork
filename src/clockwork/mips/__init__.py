@@ -58,6 +58,7 @@ from .table import (
     compile_table,
     decode,
     differences,
+    digital_events,
     encode,
     parse_report,
 )
@@ -107,6 +108,7 @@ __all__ = [
     "compile_table",
     "decode",
     "differences",
+    "digital_events",
     "encode",
     "error_text",
     "open_serial",

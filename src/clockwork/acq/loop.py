@@ -77,6 +77,7 @@ __all__ = [
     "FRAME_TIMEOUT_FLOOR_S",
     "FRAME_TIMEOUT_SLACK",
     "SILENCE_S",
+    "START_STEP_GAP_S",
     "AcquisitionRefused",
     "BatchSeen",
     "BoxReady",
@@ -115,6 +116,24 @@ all of them do, the first measured 0.4 to 0.9 s after the end and the last as mu
 *between* messages rather than against that total, because the wait restarts on every
 one. Stopping earlier reports a frame as short when it was only slow, and writes the
 completion marker onto a frame the console is still filling.
+"""
+
+START_STEP_GAP_S = 0.020
+"""How long to leave between one start-list step and the next.
+
+The list guarantees order on the wire and nothing about interval: measured across 54
+repetitions of a two-box run, `TARBTRG` and the `TBLSTRT` after it left the host 0 to
+147 ms apart, median 4 ms, and on 13 of them in the same millisecond (lab record,
+task 33). What the order is *for* is an ARB box whose compression table has to be
+sitting at its first `HR` before the release edge arrives, and that box does not get
+there when `TARBTRG` is acknowledged: the compressor's trigger handler arms a timer at
+the box's saved trigger delay (`SARBCTD`, milliseconds) and walks no table at all until
+that timer fires. So the cushion has to exceed the delay the box is holding, and two
+consecutive serial writes do not reliably provide any cushion whatever.
+
+Twenty milliseconds against a repetition that costs seconds. It is insurance and not a
+derivation: the number to beat is the boxes' own `SARBCTD`, which is why a method sets
+that explicitly rather than inheriting whatever a box remembers.
 """
 
 ARM_TIMEOUT_S = 5.0
@@ -591,6 +610,7 @@ def run_acquisition(
     silence: float = SILENCE_S,
     empty_settle: float = EMPTY_SETTLE_S,
     arm_timeout: float = ARM_TIMEOUT_S,
+    start_step_gap: float = START_STEP_GAP_S,
     guard_gate: bool = True,
     rearm_with_reset: bool = False,
     abort_after: int | None = ABORT_AFTER_FAILURES,
@@ -626,7 +646,9 @@ def run_acquisition(
     is derived from the pusher period the console measured; the constants say why one
     fixed number will not do. `silence` is how long the data stream has to be quiet
     before a frame is over, and `empty_settle` how long a frame that published nothing
-    is given to prove otherwise before it is called empty.
+    is given to prove otherwise before it is called empty. `start_step_gap` separates
+    the start list's steps in time as well as in order, which the ARB boxes need and
+    which two consecutive serial writes do not supply.
 
     Returns a `Run` describing what happened, including the frames that did not work: an
     empty frame, a console error and a frame that never ended are outcomes recorded
@@ -681,6 +703,7 @@ def run_acquisition(
             method=method, boxes=boxes, console=console, stream=stream,
             recording=recording, report=report, silence=silence,
             empty_settle=empty_settle, arm_timeout=arm_timeout, guard_gate=guard_gate,
+            start_step_gap=start_step_gap,
             rearm_with_reset=rearm_with_reset, abort_after=abort_after,
             clock=clock, started=started,
             frame_timeout=(frame_timeout if frame_timeout is not None
@@ -798,11 +821,15 @@ class _Loop:
     abort_after: int | None
     clock: Callable[[], float]
     started: float
+    start_step_gap: float = START_STEP_GAP_S
 
     frames: list[FrameRecord] = field(default_factory=list)
     folds: list[FoldRecord] = field(default_factory=list)
     stopped_early: str | None = None
     _consecutive_failures: int = 0
+    _folder: ThreadPoolExecutor | None = None
+    _pending: list[Future[FoldRecord]] = field(default_factory=list)
+    _fold_due: int | None = None
 
     # -- the run -----------------------------------------------------------------------
 
@@ -820,7 +847,8 @@ class _Loop:
         # the console writes it. A fold of the last method frame is joined below rather
         # than waited on here, which is what "overlapping the next frame" means.
         folder = ThreadPoolExecutor(max_workers=1, thread_name_prefix="clockwork-fold")
-        pending: list[Future[FoldRecord]] = []
+        self._folder = folder
+        self._pending = []
         try:
             for method_frame in range(1, acquisition.frames + 1):
                 for repetition in range(1, acquisition.console_frames + 1):
@@ -833,17 +861,32 @@ class _Loop:
                     # The fold would succeed, write an empty frame to the companion, and
                     # so let `keep_raw = false` delete the raw file on the strength of a
                     # companion that replaces nothing.
-                    pending.append(folder.submit(self._fold, method_frame))
-                pending = self._collect(pending, wait=False)
+                    #
+                    # Held rather than submitted: the next method frame's first
+                    # repetition has a start list to walk, and a fold running across it
+                    # stretches serial round trips that normally cost single-figure
+                    # milliseconds to hundreds -- measured at 226 ms on a `TBLSTRT`,
+                    # which is a box that started its table long before the host knew,
+                    # and so a frame the loop cannot tell from one released against a
+                    # gate that was already high (lab record, task 33). Almost none of
+                    # the overlap is given up: the fold still runs through that
+                    # repetition's acquisition and its silence.
+                    self._fold_due = method_frame
+                self._pending = self._collect(self._pending, wait=False)
                 if self.stopped_early is not None:
                     break
         finally:
-            self._collect(pending, wait=True)
+            # A run that ended with a fold still held -- the last method frame's, or a
+            # run that stopped early -- submits it here, where there is no start list
+            # left to disturb.
+            self._submit_deferred_fold()
+            self._collect(self._pending, wait=True)
             # The companion's SQLite connection belongs to the thread that made it,
             # which is this worker, so it is closed from here and not by whoever closes
             # the recording afterwards.
             folder.submit(self.recording.close_companion).result()
             folder.shutdown(wait=True)
+            self._folder = None
 
         return Run(
             method=self.method,
@@ -856,6 +899,19 @@ class _Loop:
             replicate=replicate,
             stopped_early=self.stopped_early,
         )
+
+    def _submit_deferred_fold(self) -> None:
+        """Start the fold a previous method frame is owed, now that nothing waits on it.
+
+        Called once the start list has been walked and the gate checked, which is the
+        one stretch of a run where the folding thread must not be competing for the
+        interpreter: everything between `acquire frame` and the release is a serial
+        round trip whose *answer* is what tells the loop the experiment has begun.
+        """
+        if self._fold_due is None or self._folder is None:
+            return
+        self._pending.append(self._folder.submit(self._fold, self._fold_due))
+        self._fold_due = None
 
     def _collect(
         self, pending: list[Future[FoldRecord]], *, wait: bool
@@ -903,9 +959,10 @@ class _Loop:
                 # `send_phases` armed the box, and a replicate's because `run` has just
                 # walked the same reset list.
                 self._walk(self.method.reset, "reset")
-            self._walk(self.method.start, "start")
+            self._walk(self.method.start, "start", gap=self.start_step_gap)
             if self.guard_gate:
                 self._check_gate(method_frame, repetition)
+            self._submit_deferred_fold()
 
         try:
             try:
@@ -998,6 +1055,15 @@ class _Loop:
         and both produce a full frame of plausible data at the wrong offset (lab record,
         task 05).
 
+        That reading holds only while the start list really does cost a few round trips.
+        A box releases its table when it *parses* the command, and the host learns of it
+        when the echo comes back, so a slow acknowledgement is recording the guard
+        cannot distinguish from a stale gate: the one time this fired on hardware, a
+        `TBLSTRT` took 226 ms to answer against the 0-7 ms of every other frame in the
+        run, and the frame it failed was a good one (lab record, task 33). What made the
+        acknowledgement slow was the fold of the previous method frame, which is why the
+        fold is now started after this check rather than before it.
+
         Whatever is not a batch goes back on the stream: a status message belongs to the
         wait for this frame's end, not to the guard.
         """
@@ -1026,15 +1092,22 @@ class _Loop:
 
     # -- boxes -------------------------------------------------------------------------
 
-    def _walk(self, steps: Sequence[Step], phase: str) -> None:
+    def _walk(self, steps: Sequence[Step], phase: str, *, gap: float = 0.0) -> None:
         """One ordered method-level sequence, box by box, in the order written.
 
         The order is part of the experiment rather than a convenience: a box whose
         compression table must already be waiting at its first hold is told to run
         before the box that issues the release edge is triggered, and `TBLSTRT` is last
         because it is what starts everything.
+
+        `gap` separates the steps in time as well as in order. Order alone leaves them
+        as close together as two serial writes happen to be, which is sometimes not
+        apart at all, and the box that has to be waiting needs a real interval
+        (`START_STEP_GAP_S`).
         """
-        for step in steps:
+        for index, step in enumerate(steps):
+            if index and gap:
+                time.sleep(gap)
             _send(self.boxes[step.box], step.box, phase, step.command, self.report,
                   arm_timeout=self.arm_timeout)
 

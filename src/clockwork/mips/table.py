@@ -211,6 +211,37 @@ def channel_token(chan: int) -> str:
     return f"chan{chan}"
 
 
+def digital_events(
+    compiled: Compiled, channel: str
+) -> tuple[tuple[int, int, str], ...]:
+    """Every event on one digital output `A`-`P`, as (table, tick, value).
+
+    What this is for: asking a table string whether it drives a line at all, and
+    where. A reader cannot do that by eye, because a loop header's `name:cycles`
+    is written exactly like a `Channel:Value` event -- `0:[A:1,0:B:1,...` opens a
+    table *named* `'A'` that runs once and never touches DIOA, and reads at a
+    glance as though it raises it. A table meant to raise the digitizer's enable
+    and silently doing nothing of the kind is the way that trap actually
+    presented (lab record, task 33).
+
+    The tick is the one written in the (sub)table the event belongs to, and the
+    table index is which of a string's concatenated tables that is. No attempt
+    is made to put the tables on a single time axis: a repeat count, a leading
+    offset and the tick-0 handover of §3 all bear on that, and none of them
+    bears on the question above.
+    """
+    if len(channel) != 1 or not ("A" <= channel <= "P"):
+        raise ValueError(f"{channel!r} is not a digital output; §2 names them A to P")
+    wanted = ord(channel)
+    return tuple(
+        (index, point.count, chr(entry.value & 0xFF))
+        for index, table in enumerate(compiled.tables)
+        for point in table.points
+        for entry in point.entries
+        if entry.chan == wanted
+    )
+
+
 # --------------------------------------------------------------------------
 # String -> predicted layout
 # --------------------------------------------------------------------------

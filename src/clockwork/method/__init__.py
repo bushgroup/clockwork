@@ -61,6 +61,15 @@ Kept, because discarding it is irreversible and it is the only record of how one
 repetition differed from the next (lab record, task 02).
 """
 
+NOTIFY_ON_SCANS_COUNT = 500
+"""The console's batch size: `NotifyOnScansCount` in its `config.txt`.
+
+Not a method setting -- it belongs to the console and clockwork only reads it --
+but the enable window below is measured in it, so the number this package
+assumes has to be written down somewhere. A run that meets a console configured
+differently passes its own value to `enable_fall_tick`.
+"""
+
 
 class MethodError(ValueError):
     """A method document failed to parse or validate.
@@ -108,6 +117,39 @@ class Acquisition:
         if self.repetition_mode == "single_frame":
             return 1
         return self.accumulations
+
+
+def enable_fall_tick(
+    frame_length: int, notify_on_scans_count: int = NOTIFY_ON_SCANS_COUNT
+) -> int:
+    """The tick a sequencer table must lower the digitizer's enable on.
+
+    One number, in one place, because three things derive it and they must not
+    drift: the note the design lives in, the bench script that rewrites a table
+    for a shorter run, and the tests. `table_period` is the loop period that
+    goes with it.
+
+    Why a whole batch is `docs/console-protocol.md`, "A frame needs triggers
+    past the ones it counts": the console holds a batch until it has seen the
+    next trigger's marker and fetches markers a whole batch of hunks at a time,
+    and a record in which everything was suppressed carries one hunk, which is
+    the worst case. So the margin is `notify_on_scans_count` and not the one
+    push that the count alone would suggest.
+
+    Erring late costs the frame nothing: a push past the last counted scan is
+    one the console has already stopped counting. Erring early leaves the
+    console one batch short and the frame never finishes -- measured, a whole
+    `NotifyOnScansCount` short, on every frame of every run that tried it (lab
+    record, task 33).
+    """
+    return frame_length + notify_on_scans_count
+
+
+def table_period(
+    frame_length: int, notify_on_scans_count: int = NOTIFY_ON_SCANS_COUNT
+) -> int:
+    """The loop period that goes with `enable_fall_tick`: one tick past it."""
+    return enable_fall_tick(frame_length, notify_on_scans_count) + 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -526,6 +568,7 @@ def stamp(method: Method, *, console_version: str | None = None) -> dict[str, ob
 __all__ = [
     "DEFAULT_KEEP_RAW",
     "DEFAULT_REPETITION_MODE",
+    "NOTIFY_ON_SCANS_COUNT",
     "REPETITION_MODES",
     "SCHEMA_VERSION",
     "MethodError",
@@ -539,6 +582,8 @@ __all__ = [
     "loads",
     "load",
     "dumps",
+    "enable_fall_tick",
     "save",
     "stamp",
+    "table_period",
 ]

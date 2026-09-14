@@ -55,7 +55,7 @@ from clockwork.acq import (
     run_acquisition,
     send_phases,
 )
-from clockwork.mips import Box, BoxRejected, FakeBox
+from clockwork.mips import Box, BoxRejected, FakeBox, compile_table, digital_events
 
 SCANS = 32
 """Two of the fake's 16-scan spectrum periods, so a fold has something to add."""
@@ -78,6 +78,20 @@ supplies, so the suite invents its own rather than naming an instrument's."""
 
 ARB_MODULES = 4
 """Enough modules for the golden methods' `SWFREQ,4,...` and `SARBCCLK,4,...`."""
+
+
+def per_repetition_table(scans: int) -> str:
+    """The sequencer's table for a `per_repetition` frame of `scans` scans.
+
+    The shape and the two load-bearing numbers are `clockwork.method`'s, not this
+    suite's: DIOA and DIOB raised together at the loop's tick 0, DIOB dropped at 500,
+    and DIOA dropped a whole console batch past the last counted scan. Written out here
+    because the digitizer's enable being DIOA is an instrument fact and not a property
+    of a method document, so nothing in the package generates this string.
+    """
+    return (f"STBLDAT;0:[A:1,0:A:1:B:1,500:B:0,"
+            f"{method_module.enable_fall_tick(scans)}:A:0,"
+            f"{method_module.table_period(scans)}:];")
 
 
 # --- fixtures --------------------------------------------------------------------------
@@ -108,7 +122,7 @@ def make_method(
             "name": BOX,
             "port": "COM3",
             "setup": ["STBLCLK,EXT", "STBLTRG,POS"],
-            "load": [f"STBLDAT;0:[A:1,0:B:1,500:B:0,{scans + 1}:A:0,{scans + 2}:];"],
+            "load": [per_repetition_table(scans)],
             "arm": ["SMOD,TBL"],
         }],
         "start": [[BOX, "TBLSTRT"]],
@@ -577,6 +591,78 @@ def test_a_batch_before_the_start_list_has_finished_fails_the_frame(rig):
     assert "already recording" in run.frames[0].detail
     assert "enable lead" in run.frames[0].detail
     assert not UimfFile(run.raw_path).frame_params(1).marked_complete
+
+
+def test_the_table_a_per_repetition_method_carries_actually_raises_the_enable(rig):
+    """The check that would have caught the defect the first hardware run met.
+
+    The table that failed differed from this one by four characters: it opened
+    `0:[A:1,0:B:1` rather than `0:[A:1,0:A:1:B:1`, which is a loop named `'A'` and no
+    event on DIOA anywhere, and so a frame with the digitizer's enable never raised
+    (lab record, task 33).
+    """
+    method = make_method()
+    compiled = compile_table(method.box(BOX).load[0])
+    rise, fall = digital_events(compiled, "A")
+    assert rise[1:] == (0, "1")
+    assert fall[1:] == (method_module.enable_fall_tick(method.acquisition.frame_length),
+                        "0")
+    assert compiled.tables[-1].max_count == method_module.table_period(
+        method.acquisition.frame_length)
+
+
+def test_the_start_list_is_spaced_and_not_only_ordered(rig):
+    """Order on the wire is not an interval: two consecutive serial writes left the
+    host in the same millisecond on 13 of 54 measured repetitions, and the ARB box the
+    order exists for is not at its first hold until its own trigger delay has run
+    (lab record, task 33)."""
+    method = make_method()
+    method = dataclasses.replace(method, start=(
+        method_module.Step(BOX, "TARBTRG"), method_module.Step(BOX, "TBLSTRT"),
+    ))
+    boxes = make_boxes(BOX, arb_modules=ARB_MODULES)
+    send_phases(method, boxes)
+    sent: list[tuple[float, str]] = []
+
+    def watch(event: acq.Event) -> None:
+        if isinstance(event, PhaseSent) and event.phase == "start":
+            sent.append((time.perf_counter(), event.command))
+
+    rig.acquire(method, boxes, start_step_gap=0.05, progress=watch)
+    assert [command for _, command in sent[:2]] == ["TARBTRG", "TBLSTRT"]
+    assert sent[1][0] - sent[0][0] >= 0.05
+
+
+def test_the_fold_starts_after_the_next_frame_has_been_released(rig, monkeypatch):
+    """A fold running across a start list stretches the serial round trips that are the
+    only thing telling the loop the experiment has begun: measured at 226 ms on a
+    `TBLSTRT` against 0-7 ms everywhere else in the same run, which failed a good frame
+    through the gate guard (lab record, task 33)."""
+    began: list[float] = []
+    original = acq.Recording.fold
+
+    def timed(self, method_frame):
+        began.append(time.perf_counter())
+        return original(self, method_frame)
+
+    monkeypatch.setattr(acq.Recording, "fold", timed)
+
+    released: list[float] = []
+
+    def watch(event: acq.Event) -> None:
+        if isinstance(event, PhaseSent) and event.phase == "start":
+            released.append(time.perf_counter())
+
+    method = make_method(frames=2, accumulations=1)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = rig.acquire(method, boxes, progress=watch)
+
+    assert run.complete and len(run.folds) == 2
+    assert len(began) == 2 and len(released) == 2
+    # Method frame 1's fold is owed the moment its last repetition ends; it must not
+    # begin until method frame 2's start list has gone out.
+    assert began[0] > released[1]
 
 
 def test_the_guard_can_be_turned_off(rig):

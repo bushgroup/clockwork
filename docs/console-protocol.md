@@ -120,6 +120,18 @@ is not determined: the acquisition thread publishes its `finished` as its last a
 command thread publishes `finished acquire`, and nothing sequences the two. A client waiting for
 one should ignore the other rather than assume which arrives first.
 
+**A frame needs triggers past the ones it counts, and more of them than the last batch holds.**
+The zero-suppressed read loop releases a batch of `NotifyOnScansCount` scans only once it has
+seen the marker of the *next* trigger, and it takes markers from the card in all-or-nothing
+fetches of one whole batch's worth of marker hunks. A trigger contributes one hunk plus one per
+gate in its record, so a frame stops the digitizer at exactly `frame_length` triggers loses its
+final batch and never publishes `finished`: the pushes needed past the last counted scan are
+about `NotifyOnScansCount` divided by hunks per trigger, and a record in which every sample was
+suppressed carries a single hunk, which makes the whole batch the worst case. A client that gates
+the digitizer has to hold the gate open for `NotifyOnScansCount` further pushes; measured, a
+frame gated off one push past its last counted scan ended exactly one batch short, every time.
+`clockwork.method.enable_fall_tick` is this rule.
+
 ## Messages (`message.proto`, proto3)
 
 `UimfRequestMessage`, the argument of `acquire frame`, Snappy-compressed:

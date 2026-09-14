@@ -252,6 +252,19 @@ Count:Channel:Value[:Channel:Value...]
   cycles, 100-tick period, starting 25 ticks after trigger:
   `STBLDAT;25:[A:10,10:A:1,25:A:0:5:34.5,100:];`
 
+**A loop header is written exactly like an event, and the parser tells
+them apart by position alone.** `name:cycles` immediately after `[` and
+`Channel:Value` inside the loop are the same two tokens separated by the
+same colon, and the digital outputs are named `A` to `P` while the
+convention for naming a table is a single letter. So `0:[A:1,0:B:1,...`
+opens a table *named* `'A'` that runs **once** and never touches DIOA,
+and a table meant to raise DIOA that omits its event drives the line in
+one direction only. Nothing rejects such a string: it compiles, loads,
+round-trips through `TBLRPT` byte for byte and runs, and the only
+symptom is whatever the undriven line was supposed to do. Compile the
+string and read the events off the compiled tables before trusting a
+table to drive a line; `clockwork.mips.digital_events` is that check.
+
 ### Channel codes
 
 From `Table.cpp` (authoritative) and vendor Table 1:
@@ -428,7 +441,12 @@ Consequence of the ISR pre-load design: the **first** event of a table
 at tick 0 is staged by `SetupNextEntry()` before the table is released,
 so it is applied as the table starts rather than one staging interrupt
 later (with the qualification below); events must leave the ISR enough
-time to stage the next event (see timing limits below).
+time to stage the next event (see timing limits below). Confirmed on a
+box at firmware 1.243t: a table whose first event is a digital output at
+the loop's own tick 0 drove that output on every pass, on a scope, over
+48 consecutive releases of the same loaded table (lab record, task 33).
+An event at that position is neither skipped nor merged into the loop
+header.
 
 **"At release" is not the same instant as the trigger when the trigger
 is `SW` and the clock is external.** The TIOA toggle that latches a
@@ -1104,7 +1122,7 @@ gates off *n−1* of every *n* waveform cycles on the compress module
 | `SARBCTC`/`GARBCTC` | ms | Compress time per cycle |
 | `SARBCTN`/`GARBCTN` | ms | Normal time per compress cycle |
 | `SARBCTNC`/`GARBCTNC` | ms | Non-compressed cycle time |
-| `TARBTRG` | none | Software compressor trigger |
+| `TARBTRG` | none | Software compressor trigger. Walks no table: see below |
 | `SARBCSW`/`GARBCSW` | `Open\|Close` | Gate switch output state |
 | `SARBCDIS`/`GARBCDIS` | `TRUE\|FALSE` | Disable the compression table engine |
 | `SARBCMP` | `TRUE\|FALSE` | Compressor-mode-enabled config flag |
@@ -1123,6 +1141,21 @@ normal/compress mode, `J`*n**order* per-module compression order,
 lowercase = falling). Numeric arguments may be floats where the
 quantity is a time/voltage. Unknown characters are skipped without
 error; the table is not syntax-checked on load.
+
+**A trigger reaches the table's first operation only after the trigger
+delay.** `ARBcompressorTriggerISR()` calls
+`ARBgetNextOperationFromTable(true)`, whose `init` branch resets the
+loop stack and the table index and returns without reading a character;
+it then arms the compressor's timer at `C_Td` and returns.
+`ARBcompressorTimerISR()` is what walks the table, so the first
+operation runs `C_Td` after the trigger and not at it. `C_Td` is
+`SARBCTD`, the saved per-box **trigger delay in milliseconds**, which
+`ARBcompressor_loop()` recomputes from the board's configuration every
+100 ms. A compression table that opens with a `H`*<input>* halt is
+therefore not waiting at that halt until `SARBCTD` has elapsed, and a
+host that sends `TARBTRG` and then immediately releases the edge the
+halt waits for will miss it. Set `SARBCTD` explicitly rather than
+inheriting whatever a box has saved; `GARBCTD` reads it back.
 
 ---
 
@@ -1192,6 +1225,15 @@ exists, rather than a one-off manual check:
   the zero-based DC-bias channel numbering. DC-bias values stay
   unpredictable by construction (§2). Confirmed on firmware 1.163t, one
   box, one table shape.
+- **Round-trip latency is not a per-transport constant, and the tail
+  matters.** Measured over about 120 frames of a two-box acquisition on
+  firmware 1.243t (lab record, task 33), a `TBLSTRT` or `TARBTRG` was
+  acknowledged in 0 to 7 ms, and the same command on the same link took
+  115, 183, 200 and 226 ms while the host was also writing a file. A
+  box releases its table when it **parses** the command, so a host that
+  treats the acknowledgement as the moment the experiment began is
+  wrong by the whole round trip. Budget for the tail, and do not
+  schedule other work across a release.
 - Round-trip latency of a get-style command (`GVER`) measured 16 ms on
   USB CDC, and the wall-clock cost of streaming a real trainee table is
   still unmeasured, per transport. Both are inputs

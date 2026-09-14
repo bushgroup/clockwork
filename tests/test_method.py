@@ -115,6 +115,33 @@ def test_single_frame_frame_length_is_the_whole_method_frame() -> None:
     assert m.acquisition.console_frames == 1
 
 
+def test_the_enable_window_is_a_whole_batch_past_the_last_counted_scan() -> None:
+    """One constant, in one place, and it is `NotifyOnScansCount` and not one push.
+
+    The console publishes nothing until it has seen the trigger *after* the batch it is
+    filling, and takes markers from the card only in whole batches' worth; a record with
+    everything suppressed carries one marker hunk, which is the worst case and makes the
+    margin the whole batch. Measured: at `scans + 1` and `scans + 100` every frame of
+    every run stopped exactly `NotifyOnScansCount` short, and `scans + 250` upwards
+    completed (lab record, task 33).
+    """
+    assert method.NOTIFY_ON_SCANS_COUNT == 500
+    assert method.enable_fall_tick(5000) == 5500
+    assert method.table_period(5000) == 5501
+
+
+def test_the_enable_window_follows_a_console_configured_differently() -> None:
+    assert method.enable_fall_tick(5000, 250) == 5250
+    assert method.table_period(5000, 250) == 5251
+
+
+def test_the_enable_window_is_taken_from_the_frame_not_the_scan_count() -> None:
+    """`single_frame` counts a whole method frame off the digitizer in one go, so it is
+    `frame_length` and not `scans` that the enable has to outlast."""
+    m = method.loads(SAMPLE.replace('"per_repetition"', '"single_frame"'))
+    assert method.enable_fall_tick(m.acquisition.frame_length) == 1000 + 500
+
+
 def test_repetition_mode_and_keep_raw_default() -> None:
     text = SAMPLE.replace('repetition_mode = "per_repetition"\n', "").replace(
         "keep_raw = true\n", ""
