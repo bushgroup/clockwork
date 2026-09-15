@@ -221,6 +221,19 @@ def main() -> int:
         and mips.digital_events(raises_it, "A") == ((0, 0, "1"), (0, 5500, "0")),
     )
 
+    # A compression table's `]N` is the third place the accumulation count is written
+    # (lab record, task 31). The walk mirrors the firmware's: an op, the digits that may
+    # follow it, and the one raw character five of the ops then take, which is why `HR`
+    # and `m1C` cannot be counted by looking for brackets alone (§6.6).
+    check_true(
+        "a compression table's pass count is read off the string",
+        mips.compression_passes("SARBCTBL,J10[HRsm1CD12m1ND4.0272r]100") == (100,)
+        and mips.compression_passes(
+            "SARBCTBL,J30[HRsD90m3CD10m3ND208rD16.7628sD10.0253r]100") == (100,)
+        and mips.compression_passes("SARBCTBL,J10[HRr]") == (1,)
+        and mips.compression_passes("SARBCTBL,HR") == (),
+    )
+
     # A long table has to be chunked: the box's 4096-byte input buffer drops
     # what overruns it without saying so (docs/mips-wire-format.md §1).
     long_events = ",".join(f"{tick}:A:1" for tick in range(100, 2000, 2))
@@ -605,7 +618,11 @@ def main() -> int:
     loop_document["metadata"] = {"name": "self-check loop",
                                  "created": _dt.date(2026, 9, 11)}
     loop_document["acquisition"] = dict(document["acquisition"]) | {
-        "file_stem": "selfcheck-loop"}
+        "file_stem": "selfcheck-loop",
+        # Which output carries the digitizer's gate is a fact about the cabling and not
+        # a property of a document, so a method states it; nothing in the package knows
+        # it otherwise, and the checks below read the enable's edges out of the table.
+        "enable": {"box": "box1", "channel": "A"}}
     loop_document["boxes"] = [{
         "name": "box1", "port": "COM1", "setup": ["STBLCLK,EXT"],
         # DIOA and DIOB raised together at the loop's tick 0, DIOA lowered a whole
@@ -621,12 +638,72 @@ def main() -> int:
     loop_document["reset"] = [["box1", "SMOD,LOC"], ["box1", "SMOD,TBL"]]
     recipe = method_module.from_dict(loop_document)
 
+    # A `single_frame` method carries the other table shape, which is the trainee's own:
+    # the loop runs on the box for `accumulations` passes of `scans` ticks and the enable
+    # is raised once before it and never lowered. Both shapes are written out here
+    # because a method whose table is the wrong one for its mode is refused for
+    # contradicting itself (lab record, task 31), so the self-check has to hold each.
+    single_frame_boxes = [dict(loop_document["boxes"][0]) | {
+        "load": [f"STBLDAT;0:A:1[A:{accumulations},0:B:1,10:B:0,{scans}:];"]}]
+
+    def single_frame_document(**acquisition: object) -> dict:
+        return loop_document | {
+            "boxes": single_frame_boxes,
+            "acquisition": dict(loop_document["acquisition"])
+            | {"repetition_mode": "single_frame", "frames": 2} | acquisition,
+        }
+
+    ungoverned = single_frame_document()
+    ungoverned["acquisition"] = {key: value
+                                 for key, value in ungoverned["acquisition"].items()
+                                 if key != "enable"}
     check_true(
         "single_frame with more than one method frame is refused, and nothing else is",
-        len(acq.refusals(method_module.from_dict(
-            loop_document | {"acquisition": dict(loop_document["acquisition"])
-                             | {"repetition_mode": "single_frame", "frames": 2}}))) == 1
+        len(acq.refusals(method_module.from_dict(ungoverned))) == 1
         and acq.refusals(recipe) == [],
+    )
+
+    # Task 31: the counts `[acquisition]` states against the counts the trainee's own
+    # strings embed. Every one of these fails silently on the instrument -- a fold that
+    # sums the wrong pushes, a frame that never completes, a frame that acquires nothing
+    # -- so each is a refusal before a box is opened, and the message names both numbers.
+    def one_refusal(**acquisition: object) -> str:
+        problems = acq.refusals(method_module.from_dict(
+            loop_document | {"acquisition": dict(loop_document["acquisition"])
+                             | acquisition}))
+        return problems[0] if len(problems) == 1 else f"{len(problems)} refusals"
+
+    check_true(
+        "a per_repetition table whose period is not the method's scans is refused, "
+        "naming both numbers",
+        f"{scans + 1}" in one_refusal(scans=scans + 1)
+        and str(method_module.enable_fall_tick(scans)) in one_refusal(scans=scans + 1),
+    )
+    dropped = dict(loop_document["boxes"][0])
+    dropped["load"] = [dropped["load"][0].replace("0:A:1:B:1", "0:B:1")]
+    check_true(
+        "a sequencer table that never raises the digitizer's enable is refused, since "
+        "the loop header reads like the event and is not it",
+        [problem for problem in acq.refusals(method_module.from_dict(
+            loop_document | {"boxes": [dropped]})) if "never raises A" in problem],
+    )
+    check_true(
+        "a single_frame table that loops a different number of times from the "
+        "accumulations is refused, and the trainee's own shape is not",
+        acq.refusals(method_module.from_dict(single_frame_document(frames=1))) == []
+        and len(acq.refusals(method_module.from_dict(
+            single_frame_document(frames=1, accumulations=accumulations + 1)))) == 1,
+    )
+    compressed = dict(loop_document["boxes"][0])
+    compressed["load"] = [*compressed["load"], "SARBCTBL,J10[HRsm1CD12r]2"]
+    check_true(
+        "a compression table's pass count is read off the string and refused where it "
+        "disagrees, and a method that could not be read is warned about instead",
+        len(acq.refusals(method_module.from_dict(
+            loop_document | {"boxes": [compressed]}))) == 1
+        and acq.cautions(method_module.from_dict(
+            loop_document | {"boxes": [dict(compressed)
+                                       | {"load": ["SARBCTBL,J10[HRsm1CD12r"]}]})),
     )
 
     with tempfile.TemporaryDirectory() as directory:
@@ -744,13 +821,8 @@ def main() -> int:
                 # because a host `SDIO` in table mode is latched by the table's next
                 # event and not by the host (lab record, task 26).
                 fake.frame_hold_s = 0.05
-                looping = method_module.from_dict(loop_document | {
-                    "acquisition": dict(loop_document["acquisition"]) | {
-                        "repetition_mode": "single_frame", "frames": 2,
-                        "file_stem": "selfcheck-loop-single",
-                        "enable": {"box": "box1", "channel": "A"},
-                    },
-                })
+                looping = method_module.from_dict(single_frame_document(
+                    file_stem="selfcheck-loop-single"))
                 check_true(
                     "a single_frame method that names its gate line is not refused",
                     acq.refusals(looping) == [],

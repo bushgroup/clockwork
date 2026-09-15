@@ -46,6 +46,18 @@ only mechanism that moves the line at a time the host chooses: a host write in t
 mode is latched by the table's next event instead, up to a whole table period later
 (lab record, task 26). It needs `acquisition.enable` to say which line, and refuses the
 combination without it. See `AcquisitionRefused`.
+
+**A method is checked against its own strings before anything is sent.** The counts
+`[acquisition]` states are written a second time inside the trainee's strings -- the
+sequencer table's loop count and period, each compression table's `]N`, and the ticks
+the sequencer raises and lowers the digitizer's enable on -- and nothing used to compare
+them. Each way they can disagree fails silently: a loop count short of `accumulations`
+folds the wrong pushes together, one past it never finishes the frame, an enable lowered
+early leaves the frame a batch short, and a table that never raises it at all acquires
+nothing (lab record, tasks 31 and 33). So `refusals` reads the strings and refuses a
+contradiction between two numbers that both parsed, and `cautions` says which strings
+could not be read well enough to check, which reaches a caller as a `Warned` event
+rather than stopping anything.
 """
 
 from __future__ import annotations
@@ -60,8 +72,28 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from ..instrument import UNCALIBRATED, Instrument
-from ..method import NOTIFY_ON_SCANS_COUNT, Enable, Method, Step
-from ..mips import Box, MipsError, TableEvent, dio_command
+from ..method import (
+    NOTIFY_ON_SCANS_COUNT,
+    Acquisition,
+    Enable,
+    Method,
+    Step,
+    enable_fall_tick,
+    table_period,
+)
+from ..mips import (
+    UNNAMED,
+    Box,
+    Compiled,
+    MipsError,
+    Table,
+    TableEvent,
+    TableSyntaxError,
+    compile_table,
+    compression_passes,
+    digital_events,
+    dio_command,
+)
 from .console import Console
 from .session import EMPTY_SETTLE_S, run_frame, start_chain
 from .stream import DataStream, StreamTimeout
@@ -104,6 +136,7 @@ __all__ = [
     "Run",
     "RunBegun",
     "Warned",
+    "cautions",
     "refusals",
     "run_acquisition",
     "send_phases",
@@ -578,10 +611,13 @@ class Run:
 def refusals(method: Method) -> list[str]:
     """Why this method cannot be acquired, one line each; empty if it can.
 
-    The judgement `run_acquisition` makes before it touches a box, separated out so that
-    a window can make it while a trainee is still editing.
+    The judgement `run_acquisition` and `send_phases` both make before they touch a box,
+    separated out so that a window can make it while a trainee is still editing.
 
-    There are two, and both are about the digitizer's enable.
+    Two are about the digitizer's enable and are below. The rest come from
+    `_consistency`, which reads the counts out of the method's own strings and refuses
+    where one of them contradicts `[acquisition]`; `cautions` is the other half of that
+    judgement, the strings it could not read.
 
     **`single_frame` with more than one method frame and no `acquisition.enable`.** The
     whole point of that mode is that the trainee's table runs its own loop, and such a
@@ -623,7 +659,312 @@ def refusals(method: Method) -> list[str]:
             "acquire one frame at a time, or write a table that lowers the enable one "
             "tick past its last counted scan"
         )
-    return problems
+    return problems + _consistency(method)[0]
+
+
+def cautions(method: Method) -> list[str]:
+    """Which of this method's strings could not be checked against it, and why.
+
+    The other half of `refusals`, and the reason the two are separate. A string that
+    parsed and disagrees with `[acquisition]` is a contradiction and the run cannot be
+    right, so it is refused; a string this package could not read well enough to compare
+    is not evidence of anything, and a trainee's verbatim string is not clockwork's to
+    reject for being unusual (Matt, 2026-09-14). These reach a caller as `Warned` events
+    from `send_phases` and `run_acquisition` and stop nothing.
+    """
+    return _consistency(method)[1]
+
+
+def _consistency(method: Method) -> tuple[list[str], list[str]]:
+    """The counts `[acquisition]` states against the counts its strings embed.
+
+    Returns (contradictions, cautions). Closes the lab record's task 31, which is the
+    `slimphony-map.md` FLAG "the accumulation count is written in three places": for the
+    CLOCK method the sequencer's table loops `A:100`, both compression tables end `]100`
+    and `accumulations` is 100, the loop's period is 5000 ticks and `scans` is 5000, and
+    until this nothing compared any of them. A trainee editing `A:100` to `A:50` for a
+    quicker run and leaving `accumulations` alone is the ordinary way they part company.
+
+    **What each disagreement costs is the reason this is v1 work and not the deferred
+    compiler's.** Every one of them fails silently. Under `single_frame` the console is
+    told a frame is `scans * accumulations` long, so a table that loops fewer times fills
+    a frame that never completes and one that loops more fills it early, after which the
+    fold's `ScanNum mod scans` sums the wrong pushes together with nothing reported
+    anywhere. Under `per_repetition` a table that stops re-arming early times out every
+    later repetition, and one that runs on leaves the enable high into the next frame,
+    which is the offset frame the gate guard exists to catch. An enable lowered before
+    `enable_fall_tick` leaves the console a whole batch short on every frame, measured
+    (lab record, task 33). An enable never raised at all acquires nothing, which is how
+    the BUFFLEHEAD day's first failure presented.
+
+    **It reads the few numbers the sequence depends on and does not become an
+    interpreter.** Timing, channels and waveforms are the v2 compiler's.
+    """
+    acquisition = method.acquisition
+    tables = [(box.name, command) for box in method.boxes for command in box.load
+              if _head(command) == "STBLDAT"]
+    compressions = [(box.name, command) for box in method.boxes for command in box.load
+                    if _head(command) == "SARBCTBL"]
+    problems: list[str] = []
+    unreadable: list[str] = []
+    _check_compression(acquisition, compressions, problems, unreadable)
+    _check_sequencer(acquisition, tables, problems, unreadable)
+    return problems, unreadable
+
+
+def _head(command: str) -> str:
+    """The command word of a method string, however its arguments are punctuated."""
+    return command.split(",", 1)[0].split(";", 1)[0].strip().upper()
+
+
+def _expected_passes(acquisition: Acquisition) -> int:
+    """How many times one load of a table runs, which the repetition mode decides.
+
+    `single_frame` puts a whole method frame in one console frame, so the trainee's
+    strings loop `accumulations` times; `per_repetition` gives each repetition its own
+    console frame and its own start edge, so they run once (lab record, task 14).
+    """
+    if acquisition.repetition_mode == "single_frame":
+        return acquisition.accumulations
+    return 1
+
+
+def _check_compression(
+    acquisition: Acquisition,
+    compressions: list[tuple[str, str]],
+    problems: list[str],
+    unreadable: list[str],
+) -> None:
+    """Each `SARBCTBL`'s top-level `]N` against the passes the mode expects."""
+    expected = _expected_passes(acquisition)
+    for name, command in compressions:
+        try:
+            passes = compression_passes(command)
+        except ValueError as exc:
+            unreadable.append(f"{name}'s compression table was not checked: {exc}")
+            continue
+        if len(passes) > 1:
+            unreadable.append(
+                f"{name}'s compression table has {len(passes)} top-level loops and "
+                "which of them is the accumulation loop cannot be told from the string, "
+                "so its pass count was not checked"
+            )
+            continue
+        # No loop at all is one pass, said the other way (wire format, section 6.6).
+        count = passes[0] if passes else 1
+        if count != expected:
+            problems.append(
+                f"{name}'s compression table runs {count} pass(es) and "
+                f"{_passes_mean(acquisition)} is {expected}: under repetition_mode "
+                f"{acquisition.repetition_mode!r} one load of a compression table covers "
+                f"{'a whole method frame' if expected != 1 else 'one repetition'}, so "
+                f"the two have to agree. The string is {command.strip()!r}"
+            )
+
+
+def _passes_mean(acquisition: Acquisition) -> str:
+    """What the expected pass count is called in the document, for a message."""
+    if acquisition.repetition_mode == "single_frame":
+        return "acquisition.accumulations"
+    return "one pass per console frame under 'per_repetition'"
+
+
+def _check_sequencer(
+    acquisition: Acquisition,
+    tables: list[tuple[str, str]],
+    problems: list[str],
+    unreadable: list[str],
+) -> None:
+    """The sequencer's `STBLDAT` loop count, loop period and enable edges."""
+    if not tables:
+        unreadable.append(
+            "no box loads an STBLDAT table, so the loop count, the loop period and the "
+            "digitizer's enable were not checked against this method"
+        )
+        return
+    if len(tables) > 1:
+        unreadable.append(
+            f"{len(tables)} boxes load an STBLDAT table and which of them is the "
+            "sequencer cannot be told from the strings, so the loop count, the loop "
+            "period and the digitizer's enable were not checked"
+        )
+        return
+    name, command = tables[0]
+    try:
+        compiled = compile_table(command)
+    except TableSyntaxError as exc:
+        unreadable.append(f"{name}'s table was not checked: {exc}")
+        return
+    found = _loop_table(compiled)
+    if found is None:
+        unreadable.append(
+            f"{name}'s table holds {len([t for t in compiled.tables if t.name != UNNAMED])}"
+            " named sub-tables and which of them is the sequence cannot be told from the "
+            "string, so its loop count and period were not checked"
+        )
+        return
+    at, loop = found
+    expected = _expected_passes(acquisition)
+    if loop.repeat != expected:
+        problems.append(
+            f"{name}'s table loops {loop.repeat} time(s) and {_passes_mean(acquisition)} "
+            f"is {expected}: under repetition_mode {acquisition.repetition_mode!r} one "
+            f"run of the table covers "
+            f"{'a whole method frame' if expected != 1 else 'one repetition'}, so the "
+            "two have to agree"
+        )
+    _check_enable(acquisition, name, compiled, at, loop, problems, unreadable)
+
+
+def _loop_table(compiled: Compiled) -> tuple[int, Table] | None:
+    """The sub-table the sequence loops in and its index, or None where several could be.
+
+    One named sub-table is the ordinary shape and is the one that carries the repeat
+    count. A string with none -- a bare `0:A:1,5000:;` -- runs its one table once, which
+    is a loop count of 1 said differently and is what the last table already reports. The
+    index is the position `digital_events` reports an event against, so the two agree
+    about which sub-table a tick belongs to.
+    """
+    named = [(at, table) for at, table in enumerate(compiled.tables)
+             if table.name != UNNAMED]
+    if len(named) == 1:
+        return named[0]
+    if not named:
+        if not compiled.tables:
+            return None
+        return len(compiled.tables) - 1, compiled.tables[-1]
+    return None
+
+
+def _check_enable(
+    acquisition: Acquisition,
+    name: str,
+    compiled: Compiled,
+    at: int,
+    loop: Table,
+    problems: list[str],
+    unreadable: list[str],
+) -> None:
+    """Where the sequencer's table raises and lowers the digitizer's gate.
+
+    Needs `acquisition.enable` to say which line: which output carries the gate is a
+    fact about the cabling and not a property of a document, and Matt chose the
+    declaration over a hardcoded `A` (2026-09-14, lab record, task 26). A method that
+    does not declare it gets a caution and keeps the two count comparisons above, which
+    are the whole of the original three-places question.
+    """
+    enable = acquisition.enable
+    period = loop.max_count
+    if enable is None:
+        unreadable.append(
+            "acquisition.enable is not declared, so the tick the table raises the "
+            "digitizer's enable on and the tick it lowers it on were not checked. Add "
+            'it as { box = "...", channel = "..." } naming the output wired to the '
+            "card's Control I/O 2"
+        )
+        # Without it the fall cannot be found, so both loop periods a correct table can
+        # have are accepted rather than one of them being guessed at.
+        if period not in (acquisition.scans, table_period(acquisition.frame_length)):
+            problems.append(
+                f"{name}'s table loops over {period} ticks and acquisition.scans is "
+                f"{acquisition.scans}: one pass of the table is one ion mobility "
+                "experiment and one tick is one pusher push, so the period is either "
+                f"{acquisition.scans} or, where the table lowers the digitizer's enable "
+                f"itself, {table_period(acquisition.frame_length)}"
+            )
+        return
+    if enable.box != name:
+        unreadable.append(
+            f"acquisition.enable names box {enable.box!r} and the only STBLDAT table is "
+            f"{name}'s, so the enable's edges were not checked"
+        )
+        return
+    try:
+        events = digital_events(compiled, enable.channel)
+    except ValueError as exc:
+        unreadable.append(f"acquisition.enable.channel: {exc}")
+        return
+    rises = [(index, tick) for index, tick, value in events if value == "1"]
+    falls = [(index, tick) for index, tick, value in events if value == "0"]
+    if not rises:
+        problems.append(
+            f"{name}'s table never raises {enable.channel}, which acquisition.enable "
+            "names as the digitizer's gate, so every frame of this method would acquire "
+            f"nothing. Note that the `{enable.channel}:n` in a loop header names the "
+            "table and does not drive the line; the event has to be written again inside "
+            "the loop (lab record, task 33)"
+        )
+        return
+    if rises[0][1] != 0:
+        problems.append(
+            f"{name}'s table raises {enable.channel} at tick {rises[0][1]} rather than at "
+            "tick 0, so the digitizer would take no record until then and the frame "
+            f"would begin {rises[0][1]} pushes into the sequence"
+        )
+    _check_enable_fall(acquisition, name, enable, at, loop, period, falls, problems)
+
+
+def _check_enable_fall(
+    acquisition: Acquisition,
+    name: str,
+    enable: Enable,
+    at: int,
+    loop: Table,
+    period: int,
+    falls: list[tuple[int, int]],
+    problems: list[str],
+) -> None:
+    """Whether the gate comes down, and whether it comes down where the rule says.
+
+    `clockwork.method.enable_fall_tick` and `table_period` are the rule and the only
+    copy of it: the enable stays high a whole `NotifyOnScansCount` past the last counted
+    scan, because the console holds a batch until it has seen the next trigger's marker
+    and fetches markers a batch of hunks at a time (lab record, task 33).
+    """
+    console_frames = acquisition.frames * acquisition.console_frames
+    if not falls:
+        if console_frames > 1 and acquisition.repetition_mode != "single_frame":
+            problems.append(
+                f"{name}'s table never lowers {enable.channel} and this method asks for "
+                f"{console_frames} console frames: Control I/O 2 is a level, so every "
+                "frame after the first would meet a gate the previous one left high and "
+                "begin recording before its start list ran. Lower it at tick "
+                f"{enable_fall_tick(acquisition.frame_length)} and give the loop a "
+                f"period of {table_period(acquisition.frame_length)}"
+            )
+        elif period != acquisition.scans:
+            problems.append(
+                f"{name}'s table loops over {period} ticks and acquisition.scans is "
+                f"{acquisition.scans}: one pass is one ion mobility experiment and one "
+                "tick is one pusher push, so a table that does not lower the digitizer's "
+                f"enable has a period of {acquisition.scans}"
+            )
+        return
+    index, tick = falls[-1]
+    if index == at and loop.repeat > 1:
+        problems.append(
+            f"{name}'s table lowers {enable.channel} at tick {tick} inside a loop that "
+            f"runs {loop.repeat} times, so the digitizer's gate would come down after "
+            "the first pass and the remaining passes would be recorded by nothing"
+        )
+        return
+    wanted = enable_fall_tick(acquisition.frame_length)
+    if tick != wanted:
+        problems.append(
+            f"{name}'s table lowers {enable.channel} at tick {tick} and the rule for "
+            f"acquisition.frame_length = {acquisition.frame_length} puts it at {wanted}: "
+            f"the gate stays high a whole console batch ({NOTIFY_ON_SCANS_COUNT} pushes) "
+            "past the last counted scan, because the console holds a batch until it has "
+            "seen the next trigger's marker. Lowering it earlier leaves every frame one "
+            "batch short and it never finishes; later holds the card open on pushes the "
+            "frame has stopped counting (lab record, task 33)"
+        )
+    elif period != table_period(acquisition.frame_length):
+        problems.append(
+            f"{name}'s table loops over {period} ticks and lowers {enable.channel} at "
+            f"{tick}, so its period has to be {table_period(acquisition.frame_length)}, "
+            "one tick past the fall"
+        )
 
 
 def _enable_steps(enable: Enable) -> tuple[Step, ...]:
@@ -681,7 +1022,10 @@ def send_phases(
     send rather than leaving a half-loaded instrument that looks armed.
     """
     report = _reporter(progress)
-    for message in method.warnings:
+    problems = refusals(method)
+    if problems:
+        raise AcquisitionRefused("; ".join(problems))
+    for message in list(method.warnings) + cautions(method):
         report(Warned(message))
     missing = [box.name for box in method.boxes if box.name not in boxes]
     if missing:
@@ -848,7 +1192,7 @@ def run_acquisition(
     problems = refusals(method)
     if problems:
         raise AcquisitionRefused("; ".join(problems))
-    for message in method.warnings:
+    for message in list(method.warnings) + cautions(method):
         report(Warned(message))
     # Asked once and used twice: the window check reads the full scale out of it, and a
     # recording created below stamps the whole string as the console that acquired it.

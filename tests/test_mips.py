@@ -27,6 +27,7 @@ from clockwork.mips import (
     TableSyntaxError,
     ValueKind,
     compile_table,
+    compression_passes,
     decode,
     differences,
     digital_events,
@@ -229,6 +230,51 @@ def test_digital_events_names_the_table_each_event_came_from() -> None:
 def test_digital_events_refuses_a_channel_that_is_not_a_digital_output() -> None:
     with pytest.raises(ValueError, match="A to P"):
         digital_events(compile_table(EXAMPLE), "Q")
+
+
+# --- the compression table, as far as its loop counts ------------------------------------
+
+
+def test_the_golden_compression_tables_give_up_their_pass_counts() -> None:
+    """The third place the accumulation count is written (lab record, task 31). Both of
+    the CLOCK method's compression tables end `]100`, which is the `accumulations` its
+    `[acquisition]` states and the count its sequencer table loops."""
+    assert compression_passes("SARBCTBL,J10[HRsm1CD12m1ND4.0272r]100") == (100,)
+    assert compression_passes(
+        "SARBCTBL,J30[HRsD90m3CD10m3ND208rD16.7628sD10.0253r]100") == (100,)
+
+
+def test_a_bare_loop_end_is_one_pass_and_no_loop_at_all_is_none() -> None:
+    """`count` defaults to 1 where no digit follows an op, so `]` runs its body once
+    (wire format, section 6.6). A table with no loop reports nothing rather than one,
+    because "one pass" and "not a loop" are different answers to the caller."""
+    assert compression_passes("SARBCTBL,J10[HRr]") == (1,)
+    assert compression_passes("SARBCTBL,HRsD90r") == ()
+
+
+def test_only_the_outermost_loops_are_counted() -> None:
+    """An inner loop multiplies the body, not the table's passes."""
+    assert compression_passes("SARBCTBL,J10[HR[sD1r]5]100") == (100,)
+    assert compression_passes("SARBCTBL,[HRr]2[sr]3") == (2, 3)
+
+
+def test_an_op_that_swallows_the_next_character_does_not_hide_a_bracket() -> None:
+    """Five ops take one raw character after them, and a reader that counted brackets
+    without knowing which would read that character as an op. None of the five ever
+    takes a bracket, which is why the walk is safe -- and why it has to be a walk."""
+    assert compression_passes("SARBCTBL,[HRm1CS]1g]2G]3r]4") == (4,)
+
+
+def test_a_compression_table_that_cannot_be_read_says_so_rather_than_guessing() -> None:
+    """The box syntax-checks nothing on load and skips what it does not know, so an
+    unbalanced table is a string this host cannot check rather than one the box would
+    reject; the caller warns rather than refusing (lab record, task 31)."""
+    with pytest.raises(ValueError, match="unclosed"):
+        compression_passes("SARBCTBL,J10[HRsm1CD12r")
+    with pytest.raises(ValueError, match="no '\\['"):
+        compression_passes("SARBCTBL,J10]100")
+    with pytest.raises(ValueError, match="not a SARBCTBL"):
+        compression_passes("STBLDAT;0:[A:1,100:];")
 
 
 def test_arb_channels_store_float_bits() -> None:

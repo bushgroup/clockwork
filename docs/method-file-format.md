@@ -159,6 +159,11 @@ much as a whole table period later. Measured on the bench, that was 76 ms at a t
 ticks and 351 ms at 5000. Local mode is the only state in which the host decides when the line
 moves, and it leaves the loaded table in place.
 
+Declaring the line buys one more thing. It is how clockwork knows which of a table's digital events
+to read when it checks a method against its own strings, below, so a method that names the gate has
+its table checked for raising and lowering the gate where the mode requires. A method that leaves
+the key out keeps the rest of that check and is told which part was skipped.
+
 `keep_raw` decides what the fold step leaves on disk. When it is true, the default, the raw file
 with one frame per repetition survives beside its summed companion. Per-repetition rows are the
 only record of how one repetition differed from the next, and arrival times are known to shift
@@ -204,3 +209,33 @@ stray tab at the end of a command is invisible in an editor and real on the wire
 keeps the method loadable; the warning is what makes the change visible. Warnings take no part in
 equality or in the canonical text, so a document that loaded with warnings still round-trips
 through `dumps` and stamps to the same hash as the same method written cleanly.
+
+### The document against its own strings
+
+Loading checks the document alone. A second check runs before anything is sent, because the counts
+`[acquisition]` states are written a second time inside the strings and the two can part company.
+The CLOCK experiment is the example: its sequencer table loops 100 times, each of its two
+compression tables ends `]100`, and `accumulations` is 100, while the table's loop covers 5000
+ticks and `scans` is 5000. Shortening a run by editing one of those numbers and leaving the rest
+used to produce a file that looked ordinary and was not. Under `single_frame` a table that loops
+fewer times than the method says fills a frame that never completes, and one that loops more fills
+it early, after which the summed file adds the wrong pushes together with nothing reported
+anywhere.
+
+So `clockwork.acq.loop.refusals()` reads the counts back out of the strings and refuses a method
+whose numbers contradict each other, naming both numbers and the string the second one came from.
+It compares the sequencer table's loop count and loop period, and each compression table's pass
+count, against `scans`, `accumulations` and the repetition mode: `single_frame` expects the loops
+to run once per repetition for a whole method frame, `per_repetition` expects them to run once.
+
+Where the method names the gate line, it also checks what the table does with it: that the table
+raises the gate at all, that it raises it at the first tick, and that it lowers it a whole console
+batch past the last counted scan, or leaves it up in the one case where nothing is left to offset.
+A table that never raises the gate is worth its own sentence, because it reads as though it does.
+A loop header is written `[A:1,` and names the table `A`; an event raising DIOA is written `A:1`
+in a time point. A table reduced from a longer one by deleting events can lose the second and keep
+the first, and acquires nothing at all.
+
+A string clockwork could not read well enough to compare is a different matter, and is reported
+through `clockwork.acq.loop.cautions()` as a warning rather than refused. A compression table is
+not syntax checked by the box either, and a string that is unusual is not on that account wrong.

@@ -273,9 +273,16 @@ def test_the_loops_events_go_to_the_transcript_as_well_as_to_progress(collected)
         "schema_version": 2,
         "metadata": {"name": "transcript test", "created": dt.date(2026, 9, 11)},
         "acquisition": {"frames": 1, "scans": 16, "accumulations": 1,
-                        "file_stem": "transcript-test"},
+                        "file_stem": "transcript-test",
+                        "enable": {"box": "box1", "channel": "A"}},
         "boxes": [{"name": "box1", "port": "COM3", "setup": ["STBLCLK,EXT"],
-                   "load": ["STBLDAT;0:[A:1,0:B:1,17:A:0,18:];"], "arm": ["SMOD,TBL"]}],
+                   # The two numbers are `clockwork.method`'s rule and not this file's:
+                   # a table that drops the digitizer's enable anywhere else is a method
+                   # that contradicts itself, and `send_phases` refuses one.
+                   "load": [f"STBLDAT;0:[A:1,0:A:1:B:1,"
+                            f"{method_module.enable_fall_tick(16)}:A:0,"
+                            f"{method_module.table_period(16)}:];"],
+                   "arm": ["SMOD,TBL"]}],
         "start": [["box1", "TBLSTRT"]],
     })
     boxes = {"box1": Box(transport=FakeBox(), name="box1")}

@@ -9,6 +9,7 @@ in it may run on the UI thread.
 
     box.py         one controller: commands, table loads, arming, status
     table.py       the compiled table layout, predicted and read back
+    compressor.py  an ARB compression table, read as far as its loop counts
     transport.py   a COM port, or a box simulated in this process
     wire.py        framing, error codes, the asynchronous status lines
 
@@ -47,7 +48,13 @@ from .box import (
     MipsError,
     TableLoad,
 )
+from .compressor import (
+    COMPRESSION_COMMAND,
+    compression_passes,
+    compression_table,
+)
 from .table import (
+    UNNAMED,
     Compiled,
     Entry,
     Report,
@@ -81,6 +88,7 @@ from .wire import (
 
 __all__ = [
     "ACK",
+    "COMPRESSION_COMMAND",
     "DEFAULT_CHUNK_BYTES",
     "DEFAULT_CHUNK_GAP_S",
     "DEFAULT_TIMEOUT_S",
@@ -106,9 +114,12 @@ __all__ = [
     "TimePoint",
     "Token",
     "Transport",
+    "UNNAMED",
     "DIO_OUTPUTS",
     "ValueKind",
     "compile_table",
+    "compression_passes",
+    "compression_table",
     "decode",
     "dio_command",
     "differences",

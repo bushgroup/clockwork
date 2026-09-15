@@ -33,6 +33,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import os
+import re
 import time
 
 import pytest
@@ -54,11 +55,13 @@ from clockwork.acq import (
     PhaseSent,
     RunBegun,
     Warned,
+    cautions,
     refusals,
     run_acquisition,
     send_phases,
 )
 from clockwork.mips import Box, BoxRejected, FakeBox, compile_table, digital_events
+from clockwork.mips import compressor as mips_compressor
 
 SCANS = 32
 """Two of the fake's 16-scan spectrum periods, so a fold has something to add."""
@@ -116,6 +119,25 @@ def per_repetition_table(scans: int) -> str:
             f"{method_module.table_period(scans)}:];")
 
 
+def single_frame_table(scans: int, accumulations: int) -> str:
+    """The sequencer's table for a `single_frame` method, the trainee's own shape.
+
+    DIOA raised once before the loop and never lowered, the loop running once per
+    repetition for `accumulations` passes of `scans` ticks. This is what the golden
+    CLOCK method carries; the mode exists so that it can be sent verbatim.
+    """
+    return f"STBLDAT;0:A:1[A:{accumulations},0:B:1,500:B:0,{scans}:];"
+
+
+DECLARED_ENABLE = {"box": BOX, "channel": "A"}
+"""What `acquisition.enable` says on this suite's methods, and on the instrument's.
+
+Declared by default rather than left out, because the checks the lab record's task 31
+added read the enable's edges out of the sequencer's table and need to be told which
+line that is. A test that wants a method which does not say passes `enable=None`.
+"""
+
+
 # --- fixtures --------------------------------------------------------------------------
 
 
@@ -128,7 +150,7 @@ def make_method(
     keep_raw: bool = True,
     stem: str = "260911_TEST_001",
     reset: list[list[str]] | None = None,
-    enable: dict[str, str] | None = None,
+    enable: dict[str, str] | None = DECLARED_ENABLE,
 ) -> method_module.Method:
     return method_module.from_dict({
         "schema_version": 2,
@@ -146,7 +168,10 @@ def make_method(
             "name": BOX,
             "port": "COM3",
             "setup": ["STBLCLK,EXT", "STBLTRG,POS"],
-            "load": [per_repetition_table(scans)],
+            # The table has to be the shape the mode says, or the method contradicts
+            # itself and `refusals` says so before a box is opened (lab record, task 31).
+            "load": [single_frame_table(scans, accumulations)
+                     if repetition_mode == "single_frame" else per_repetition_table(scans)],
             "arm": ["SMOD,TBL"],
         }],
         "start": [[BOX, "TBLSTRT"]],
@@ -158,9 +183,13 @@ def make_method(
 def golden(name: str, *, scans: int = SCANS, accumulations: int = ACCUMULATIONS):
     """One of the two golden methods, shrunk to a size a test can acquire.
 
-    Every string, box name and sequence is the trainee's; only the frame arithmetic is
+    Every box name, sequence and op is the trainee's; only the frame arithmetic is
     reduced, because a real one is 20000 scans in one case and half a million in the
-    other. Skips where the lab record is not beside this clone, which is every public one.
+    other. Since the lab record's task 31 the counts inside the strings are reduced with
+    it, because the two are now compared: a document shrunk on its own would be a method
+    that contradicts itself, which is the check working rather than a fixture owed an
+    exemption. Skips where the lab record is not beside this clone, which is every public
+    one.
     """
     directory = clockwork.lab_dir("golden")
     if directory is None:
@@ -169,12 +198,39 @@ def golden(name: str, *, scans: int = SCANS, accumulations: int = ACCUMULATIONS)
     if not os.path.isfile(path):
         pytest.skip(f"no golden method at {name}")
     loaded = method_module.load(path)
+    passes = (accumulations
+              if loaded.acquisition.repetition_mode == "single_frame" else 1)
     return dataclasses.replace(
         loaded,
         acquisition=dataclasses.replace(
             loaded.acquisition, scans=scans, accumulations=accumulations,
         ),
+        boxes=tuple(
+            dataclasses.replace(
+                box,
+                load=tuple(shrunk(command, scans=scans, passes=passes)
+                           for command in box.load),
+            )
+            for box in loaded.boxes
+        ),
     )
+
+
+def shrunk(command: str, *, scans: int, passes: int) -> str:
+    """A golden string with its own two counts moved to where the document's are.
+
+    Three numbers and no others: an `STBLDAT` loop's repeat count and its period, and a
+    compression table's `]N`. Everything else in the string, including every DC bias
+    event and its tick, is left exactly as the trainee wrote it -- which does leave a
+    shrunk CLOCK table with events past its own period, since the point of the fixture
+    is the order the loop does things in and not an experiment anyone could run.
+    """
+    if command.startswith(mips_compressor.COMPRESSION_COMMAND):
+        return re.sub(r"\](\d*)(\s*)$", rf"]{passes}\2", command)
+    if command.startswith("STBLDAT"):
+        command = re.sub(r"\[([A-P]):(\d+),", rf"[\1:{passes},", command, count=1)
+        return re.sub(r"(\d+):\];$", f"{scans}:];", command)
+    return command
 
 
 def make_boxes(*names: str, arb_modules: int = 0, transport=None) -> dict[str, Box]:
@@ -277,7 +333,7 @@ def test_single_frame_with_more_than_one_frame_is_refused_before_anything_is_sen
     """The table that loops on the box raises the digitizer's enable once and never
     lowers it, so a second method frame would begin recording before its start list
     ran and be offset by the serial latency (lab record, task 05)."""
-    method = make_method(repetition_mode="single_frame", frames=2)
+    method = make_method(repetition_mode="single_frame", frames=2, enable=None)
     assert len(refusals(method)) == 1
     boxes = make_boxes(BOX)
     with pytest.raises(AcquisitionRefused, match="never lowers"):
@@ -289,6 +345,128 @@ def test_single_frame_with_more_than_one_frame_is_refused_before_anything_is_sen
 def test_one_single_frame_and_every_per_repetition_method_are_acquirable():
     assert refusals(make_method(repetition_mode="single_frame", frames=1)) == []
     assert refusals(make_method(repetition_mode="per_repetition", frames=5)) == []
+
+
+# --- a method against its own strings (lab record, task 31) ---------------------------
+
+
+def golden_text(name: str) -> str:
+    """One golden method as it is written on disk, for mutating a single number of."""
+    directory = clockwork.lab_dir("golden")
+    if directory is None:
+        pytest.skip("the golden experiments are lab material and this is a public clone")
+    path = os.path.join(directory, name, "method.toml")
+    if not os.path.isfile(path):
+        pytest.skip(f"no golden method at {name}")
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
+def mutated(text: str, old: str, new: str) -> method_module.Method:
+    assert old in text, f"{old!r} is no longer in the golden method"
+    return method_module.loads(text.replace(old, new, 1))
+
+
+@pytest.mark.parametrize("name", ["bradykinin-clock", "detection-response"])
+def test_both_golden_methods_agree_with_their_own_strings(name):
+    """Full size and unedited, which is the only way this says anything: the counts
+    compared are the trainee's 100 accumulations and 5000 scans, not a fixture's."""
+    loaded = method_module.loads(golden_text(name))
+    assert refusals(loaded) == []
+    assert cautions(loaded) == []
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "expected"),
+    [
+        ("[A:100,", "[A:50,", "loops 50 time(s)"),
+        ("r]100", "r]50", "runs 50 pass(es)"),
+        ("accumulations = 100", "accumulations = 50", "acquisition.accumulations is 50"),
+        ("scans = 5000", "scans = 4000", "acquisition.scans is 4000"),
+        ("STBLDAT;0:A:1[A:100,", "STBLDAT;0:[A:100,", "never raises A"),
+    ],
+)
+def test_one_changed_number_in_the_clock_method_is_refused_and_named(old, new, expected):
+    """The way this actually happens: a trainee shortens a run by editing one of the
+    five numbers and leaves the other four. Each mutation is one character's worth of
+    edit and each used to be acquired silently -- as a wrong fold, a frame that never
+    completes, or a frame that acquires nothing (lab record, tasks 31 and 33)."""
+    problems = refusals(mutated(golden_text("bradykinin-clock"), old, new))
+    assert problems, f"{old!r} -> {new!r} was not caught"
+    assert any(expected in problem for problem in problems), problems
+
+
+def test_a_per_repetition_table_that_drops_the_enable_at_the_wrong_tick_is_refused():
+    """A whole `NotifyOnScansCount` past the last counted scan is the rule, measured:
+    at `scans + 1` and at `scans + 100` every frame of every run stopped one batch short
+    and never finished (lab record, task 33)."""
+    early = per_repetition_table(SCANS).replace(
+        f"{method_module.enable_fall_tick(SCANS)}:A:0", f"{SCANS + 1}:A:0")
+    method = dataclasses.replace(
+        make_method(),
+        boxes=(dataclasses.replace(make_method().boxes[0], load=(early,)),),
+    )
+    problems = refusals(method)
+    assert len(problems) == 1
+    assert f"lowers A at tick {SCANS + 1}" in problems[0]
+    assert str(method_module.enable_fall_tick(SCANS)) in problems[0]
+
+
+def test_a_per_repetition_table_that_never_drops_the_enable_is_refused_past_one_frame():
+    """`_lower_enable` is `single_frame`'s alone, so under `per_repetition` a table that
+    leaves the gate high leaves it high into the next repetition's `acquire frame`."""
+    never = single_frame_table(SCANS, 1)
+    boxes = (dataclasses.replace(make_method().boxes[0], load=(never,)),)
+    one = dataclasses.replace(make_method(accumulations=1, frames=1), boxes=boxes)
+    assert refusals(one) == [], "one console frame has no later frame to offset"
+    many = dataclasses.replace(make_method(accumulations=1, frames=2), boxes=boxes)
+    assert any("never lowers A" in problem for problem in refusals(many))
+
+
+def test_a_string_that_could_not_be_read_is_a_caution_and_not_a_refusal():
+    """A trainee's verbatim string is not clockwork's to reject for being unusual, and a
+    string this package could not read is not evidence that anything is wrong with the
+    method (Matt, 2026-09-14)."""
+    boxes = (dataclasses.replace(make_method().boxes[0],
+                                 load=(per_repetition_table(SCANS),
+                                       "SARBCTBL,J10[HRsm1CD12r")),)
+    method = dataclasses.replace(make_method(), boxes=boxes)
+    assert refusals(method) == []
+    assert any("unclosed" in line for line in cautions(method))
+
+
+def test_a_method_that_does_not_name_its_gate_line_keeps_the_count_checks():
+    """The enable's edges need `acquisition.enable` and the counts do not, so a method
+    that leaves it out is told what was skipped and still has its loop count read."""
+    quiet = make_method(enable=None)
+    assert refusals(quiet) == []
+    assert any("acquisition.enable is not declared" in line for line in cautions(quiet))
+    wrong = dataclasses.replace(
+        make_method(enable=None, repetition_mode="single_frame"),
+        boxes=(dataclasses.replace(
+            make_method().boxes[0],
+            load=(single_frame_table(SCANS, ACCUMULATIONS + 1),)),),
+    )
+    assert [problem for problem in refusals(wrong)
+            if f"loops {ACCUMULATIONS + 1} time(s)" in problem]
+
+
+def test_send_phases_refuses_a_method_that_contradicts_itself_before_it_sends(rig):
+    """Before anything is sent is the whole point: a refused method costs nothing and
+    leaves no half-loaded box behind."""
+    method = mutated(golden_text("bradykinin-clock"), "[A:100,", "[A:50,")
+    boxes = boxes_for(method, arb_modules=ARB_MODULES)
+    with pytest.raises(AcquisitionRefused, match="loops 50"):
+        send_phases(method, boxes)
+    assert boxes["auklet"].transport.written == []
+
+
+def test_the_cautions_reach_a_caller_as_warned_events():
+    method = make_method(enable=None)
+    seen: list[acq.Event] = []
+    send_phases(method, make_boxes(BOX), progress=seen.append)
+    assert [event.message for event in seen if isinstance(event, Warned)] \
+        == cautions(method)
 
 
 # --- the phases ------------------------------------------------------------------------
@@ -323,7 +501,9 @@ def test_a_table_is_streamed_in_paced_chunks_rather_than_written_in_one_go():
     method = method_module.from_dict({
         "schema_version": 2,
         "metadata": {"name": "long table", "created": dt.date(2026, 9, 11)},
-        "acquisition": {"frames": 1, "scans": SCANS, "accumulations": 1,
+        # 8000 scans against a table of 8000 ticks: nothing here acquires, and a method
+        # whose two counts disagree is refused before the send this test is about.
+        "acquisition": {"frames": 1, "scans": 8000, "accumulations": 1,
                         "file_stem": "long"},
         "boxes": [{"name": BOX, "port": "COM3",
                    "load": [f"STBLDAT;0:[A:1,{events},8000:];"], "arm": ["SMOD,TBL"]}],

@@ -1210,6 +1210,22 @@ lowercase = falling). Numeric arguments may be floats where the
 quantity is a time/voltage. Unknown characters are skipped without
 error; the table is not syntax-checked on load.
 
+**How one op is scanned**, which a host has to mirror to read anything
+back out of a table string. An op is one character. Digits immediately
+after it are its value, decimal point and all; where no digit follows,
+the value defaults to 1. Five ops then take one further character raw,
+and a reader that does not skip that character reads it as the next op:
+`H` always takes the digital input it halts on, `m` takes the `N` or `C`
+after its module number, and `S`, `g` and `G` take a port character and
+then a value, but only where no digit followed the op itself. None of
+them takes `[` or `]`, so a table's loops can be counted without
+interpreting what lies between them.
+
+`]`*n* runs its loop body *n* times and a bare `]` runs it once, which
+is the default value above. `Compressor.cpp: CompressorProcessLoop()`
+takes the count on the loop's first arrival and decrements it, so `]0`
+decrements past zero and never terminates.
+
 **A trigger reaches the table's first operation only after the trigger
 delay.** `ARBcompressorTriggerISR()` calls
 `ARBgetNextOperationFromTable(true)`, whose `init` branch resets the
