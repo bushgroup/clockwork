@@ -554,14 +554,15 @@ it, so a host `SDIO` on one channel and a table event on another channel sharing
 arrangement a `per_repetition` table pulsing DIOB every repetition while the host lowers DIOA
 between frames creates, since DIOA and DIOB are both `DOlsb` bits.
 
-**The race is reachable only if the host writes while a table is running, and on this hardware a
-host write in table mode does not reach the pins anyway.** The latch that applies the image is the
-`LDAC` line, pin 11, which is also the table timer's TIOA output and which entering table mode
-hands to the timer peripheral, so a host `SDIO` between two frames changes the image and waits for
-a latch the table controls (§4). A host that changes a line from LOC, which is the sequence §4
-recommends, meets neither the race nor the dead latch. Whether the two calls can collide at all on
-a software-LDAC box, where the host's pulse does work in table mode, is a bench question the
-source does not settle (lab record, task 26).
+**The race is reachable whenever the host writes while a table is running.** The latch that applies
+the image is the `LDAC` line, pin 11, which is also the table timer's TIOA output and which
+entering table mode hands to the timer peripheral, so a host `SDIO` sent in table mode changes the
+image and waits for a latch the table controls (§4). A running table supplies that latch at the
+start of each pass, which is both what makes the host's write land and what brings it within reach
+of the interleaving above. A host that changes a line from LOC, which is the sequence §4
+recommends, meets neither the race nor the deferred latch. Note that the interleaving itself is
+read off the source and has not been provoked on a bench; what has been measured is the deferred
+latch that was previously thought to rule it out (lab record, task 26).
 
 ### Timing limits (compiler constraints)
 
@@ -618,7 +619,7 @@ Grouped from `MIPScommands.txt` + dispatch table in `Serial.cpp`
 | `SEXTFREQ`/`GEXTFREQ` | Hz | Declare external clock frequency |
 | `STBLTSKS`/`GTBLTSKS`, `TBLTSKENA` | `TRUE\|FALSE` | Run system tasks in table idle time (needs `SEXTFREQ` on ext clock; use with care) |
 | `STBLUSBTST`/`GTBLUSBTST` | `TRUE\|FALSE` | USB link test during table loop |
-| `SDIO` | `<chan A-P>,<0\|1>` | Set one digital output directly from the host, independent of any loaded table. Accepted in any mode; **effective only in LOC**, see below |
+| `SDIO` | `<chan A-P>,<0\|1>` | Set one digital output directly from the host, independent of any loaded table. Accepted in any mode; **immediate only in LOC**, see below |
 | `GDIO` | `<chan A-X>` | Read one line: an output `A`-`P` from the image register, an input `Q`-`X` from the hardware. **It cannot confirm an output actually moved**, see below |
 
 Four commands in this table behave in ways the row cannot carry, and
@@ -680,7 +681,7 @@ actually running.
 `STBLDAT` path is commented out, so a dump only ever happens because the
 host asked for one.
 
-**`SDIO` is accepted in every mode and takes effect only in LOC.**
+**`SDIO` is accepted in every mode and moves a line at once only in LOC.**
 `SDIO_Serial()` (`DIO.cpp`) validates its two arguments, ACKs, sets the
 requested bit in the shared digital-output image, clocks the image out
 to the hardware shift registers with `DOrefresh`, and then latches it
@@ -703,14 +704,32 @@ command after `SMOD,LOC` raises it at once (lab record, task 26).
 
 **An `SDIO` sent in table mode is pending, not discarded.** The bit is
 in the image and in the shift registers, so the next latch applies it,
-and in table mode the next latch is the table's own next event. A host
-that sends one and reads the ACK as "done" has scheduled an output
-change for a time it did not choose. **To move a line by command, put
-the box in LOC first**: `SMOD,LOC`, `SDIO`, `SMOD,TBL`, which is the
-round trip a re-arm already costs and which leaves the loaded table
-loaded. This is read off the firmware and is the one part of the
-paragraph not yet measured; the measurement is a scope on the line
-across a table event after an `SDIO` sent in TBL mode.
+and in table mode the next latch is the start of the table's next pass
+(measured below; the firmware read alone would allow any table
+event). A host that sends one and reads the ACK as "done" has
+scheduled an output change for a time it did not choose. **To move a
+line by command, put the box in LOC first**: `SMOD,LOC`, `SDIO`,
+`SMOD,TBL`, which is the round trip a re-arm already costs and which
+leaves the loaded table loaded.
+
+Measured with the digitizer as the detector, against a table looping on
+DIOB that never drives DIOA: an `SDIO,A,1` sent in table mode raises
+DIOA after a delay that follows the table's own period, 76 ms at a
+64.5 ms period, 224 ms at 258 ms and 351 ms at 645 ms (lab record,
+task 26). A table that is loaded and armed but not running supplies no
+latch, and the same command then leaves the line where it was for as
+long as the table sits there, which is the reading the row above
+records.
+
+**The latch is the loop boundary, not any table event.** On a scope
+triggered on DIOA's rise, with DIOB on a second channel and the send
+time scattered uniformly across the period over 60 cycles, DIOB's edge
+stands still and is always its **rising** edge, the `B:1` at tick 0.
+The same table's `B:0` at tick 100 never applied the pending write,
+though roughly a fifth of the sends fell in the window where it would
+have been the next event. A host that sends an `SDIO` in table mode has
+therefore scheduled its output change for the start of the table's next
+pass, and for a looping table that is one full period away at worst.
 
 Two exceptions restore the software latch, both by making `SetupTimer()`
 use `setTIOAeffectNOIO()`, which leaves pin 11 with the PIO: a
