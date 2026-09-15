@@ -201,11 +201,13 @@ with the frame (lab record, task 26).
 
 **The console has a budget of its own and this spends it.** Each batch is one
 `CstZs1Context::acquire` with `AcquisitionTimeoutMs` from the moment it begins, and the
-first one begins at `acquire frame`, so everything between that and the frame's 501st
-push has to fit inside the timeout or the console errors the frame. The dwell is added
-to a start list that already costs `START_STEP_GAP_S` per gap and a serial round trip
-per step, and the sum is what the lab's `AcquisitionTimeoutMs` has to clear (lab record,
-task 35).
+first one begins at `acquire frame`, so everything between that and the frame's first
+batch has to fit inside the timeout or the console errors the frame -- and that first
+batch is not `NotifyOnScansCount` pushes but rather more, because the console takes
+markers from the card in fixed granules of one batch's worth of marker hunks and the
+granule carrying its last trigger has to fill. The dwell is added to a start list that
+already costs `START_STEP_GAP_S` per gap and a serial round trip per step, and the sum
+is what the lab's `AcquisitionTimeoutMs` has to clear (lab record, task 35).
 """
 
 ARM_TIMEOUT_S = 5.0
