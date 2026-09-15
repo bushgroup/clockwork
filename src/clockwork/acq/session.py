@@ -63,7 +63,7 @@ def start_chain(
     timeout: float = ACQUIRE_TIMEOUT_S,
     settle: float = 5.0,
     quiet: float = 1.0,
-    ungate: bool = False,
+    ungate: bool = True,
     io_port: int = 2,
 ) -> TofWidth:
     """`acquire`, then stop the open-ended acquisition it starts, and clear up after it.
@@ -75,25 +75,28 @@ def start_chain(
     it managed in the meantime. Those are consumed here, so that what the
     stream holds afterwards belongs to the frames.
 
-    **`ungate` is the bootstrap, and it is off until the bench says otherwise.**
-    The measurement inside `acquire` needs twenty trigger timestamps, and the
-    card counts none while Control I/O 2 is an enable input held low, which is
-    where a sequencer's DIO sits before its table has ever run. So the chain
-    cannot be opened at all on a cold instrument, and every run of the bench
-    day worked only because the line had been raised by hand first (lab record,
-    task 26). `ungate=True` disables the enable input for the measurement and
-    enables it again afterwards, which is what the bench scripts do by hand.
+    **`ungate` is the bootstrap, and it is on.** The measurement inside
+    `acquire` needs twenty trigger timestamps, and the card counts none while
+    Control I/O 2 is an enable input held low, which is where a sequencer's DIO
+    sits before its table has ever run. So a cold instrument cannot open a chain
+    at all, and every run of the bench day worked only because the line had been
+    raised by hand first (lab record, task 26). `ungate=True` disables the
+    enable input for the measurement and enables it again afterwards, so the
+    gate is closed by the console and the sequencer's line never has to be high:
+    the chain opens from a DIOA that is low, which is the state the run's first
+    frame needs anyway.
 
-    It is off by default because a failure of the second half is silent. The
-    console re-configures the port without an `apply_setup` after it, the
-    chain's own `apply_setup` has already happened by then, and `acquire frame`
-    does not apply setup either; if the enable does not reach the card, every
-    frame acquires ungated and looks exactly like a frame that worked. Nothing
-    downstream notices, because the enable-gate guard only sees a batch
-    published *before* the start list finished and the first batch of an
-    ungated frame arrives about 135 ms after `acquire frame` against a start
-    list of a few milliseconds. Turn it on when a bench run has shown the gate
-    still in force on a chain built this way.
+    **What held it back, and what settled it.** A failure of the second half is
+    silent: the console re-configures the port without an `apply_setup` after
+    it, the chain's own `apply_setup` has already happened by then, and `acquire
+    frame` does not apply setup either, so an enable that did not reach the card
+    leaves every frame acquiring ungated and looking exactly like a frame that
+    worked. Two things answer that. Measured on DUNLIN on 2026-09-14, a chain
+    opened this way still gated its frames -- 1500 published scans of 5000
+    against 2000 for a control run with the line raised by hand, where a failed
+    re-enable is 5000 and that rig reaches it. And `run_acquisition` now holds
+    its first frame open where nothing should arrive, which is the one check
+    that sees this failure rather than inferring past it (Matt, 2026-09-14).
 
     `settle` is how long to wait for that `finished`. Missing it is not an
     error: it is one message on a socket that drops what it cannot deliver, and

@@ -103,6 +103,17 @@ The consequences, exactly:
 | `acquire` | any acquisition has run and not been stopped | the same, and dies |
 | `stop`, anything | nothing has ever acquired | replies `ack`, harmlessly |
 
+**A chain cannot be opened while the card is gated off.** `acquire` measures the pusher period
+from 20 trigger timestamps, and a card whose Control I/O 2 is set to `In-TriggerEnable` counts no
+triggers at all while that line is low. A sequencer's digital output sits low until its table has
+run, so an instrument that has not yet acquired anything cannot open its first chain: the
+measurement times out. Disabling the input with `disable io port` for the measurement and setting
+it back with `enable io port` afterwards opens the chain from a line that is low, and the enable is
+still in force for the frames that follow. That was measured on the bench rather than reasoned
+about, because the console re-configures the port without applying setup afterwards and a failure
+to re-enable would be silent: a chain opened this way published 1500 scans of a 5000-scan frame
+where an ungated card publishes all 5000.
+
 **`acquire` starts an acquisition, not just a chain.** It begins an open-ended one:
 `frame_length` is the largest 64-bit value and the file name is empty, so it streams and
 publishes until it is stopped. This is what binds the data socket and what measures the pusher

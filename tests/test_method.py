@@ -142,6 +142,30 @@ def test_the_enable_window_is_taken_from_the_frame_not_the_scan_count() -> None:
     assert method.enable_fall_tick(m.acquisition.frame_length) == 1000 + 500
 
 
+def test_the_gate_line_is_absent_unless_a_document_declares_it() -> None:
+    """Which digital output gates the digitizer is a fact about the cabling, so a
+    document that does not say leaves it unsaid rather than guessing."""
+    assert method.loads(SAMPLE).acquisition.enable is None
+
+
+def test_the_gate_line_loads_and_round_trips() -> None:
+    text = SAMPLE.replace(
+        'file_stem = "smoke-test"',
+        'file_stem = "smoke-test"\nenable = { box = "box1", channel = "A" }',
+    )
+    m = method.loads(text)
+    assert m.acquisition.enable == method.Enable(box="box1", channel="A")
+    assert method.loads(method.dumps(m)) == m
+
+
+def test_a_document_with_no_gate_line_round_trips_to_one_that_still_has_none() -> None:
+    """The key is written only where there is one, so an old document's stamp hashes
+    the same bytes it always did."""
+    m = method.loads(SAMPLE)
+    assert "enable" not in method.to_dict(m)["acquisition"]
+    assert method.loads(method.dumps(m)).acquisition.enable is None
+
+
 def test_repetition_mode_and_keep_raw_default() -> None:
     text = SAMPLE.replace('repetition_mode = "per_repetition"\n', "").replace(
         "keep_raw = true\n", ""
@@ -214,6 +238,8 @@ def test_stamp_hash_changes_with_content() -> None:
         ("start", 'start = [["box1", "TBLSTRT"], ["box2", "TARBTRG"]]'),
         ("reset", "reset = []"),
         ("arm", 'arm = ["SMOD,ONCE"]'),
+        ("file_stem", 'file_stem = "smoke-test"\n'
+                      'enable = { box = "box1", channel = "A" }'),
     ],
 )
 def test_stamp_hash_covers_every_new_field(field: str, replacement: str) -> None:
@@ -254,6 +280,17 @@ def test_stamp_console_version_defaults_to_none() -> None:
         (SAMPLE.replace('start = [["box2", "TARBTRG"], ["box1", "TBLSTRT"]]', "start = []"),
          "start"),
         (SAMPLE.replace('["box1", "TBLSTRT"]', '["box1", "TBLSTRT", "now"]'), "start[1]"),
+        (SAMPLE.replace('file_stem = "smoke-test"',
+                        'file_stem = "smoke-test"\n'
+                        'enable = { box = "box9", channel = "A" }'),
+         "acquisition.enable.box"),
+        (SAMPLE.replace('file_stem = "smoke-test"',
+                        'file_stem = "smoke-test"\n'
+                        'enable = { box = "box1", chanel = "A" }'),
+         "acquisition.enable.chanel"),
+        (SAMPLE.replace('file_stem = "smoke-test"',
+                        'file_stem = "smoke-test"\nenable = "box1:A"'),
+         "acquisition.enable"),
     ],
 )
 def test_validation_rejects(broken: str, expected_fragment: str) -> None:

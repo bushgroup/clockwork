@@ -26,6 +26,7 @@ accumulations = 100
 repetition_mode = "per_repetition"
 keep_raw = true
 file_stem = "replicate"
+enable = { box = "box1", channel = "A" }
 
 [[boxes]]
 name = "box1"
@@ -56,8 +57,9 @@ arm = []
 - `metadata` names the method for a trainee choosing between saved methods, plus when it was
   written.
 - `acquisition` carries the run: `frames`, `scans` and `accumulations`, the two settings below that
-  say how those are divided into acquisition console frames and what survives on disk, and
-  `file_stem`, the base name the UIMF file is written under.
+  say how those are divided into acquisition console frames and what survives on disk,
+  `file_stem`, the base name the UIMF file is written under, and `enable`, which names the digital
+  output that gates the digitizer.
 - `[[boxes]]` is an array of tables, one per box, each naming the box, its COM port, and its
   strings in three phases.
 - `start` and `reset` are the two ordered cross-box sequences, written as `[box, command]` pairs.
@@ -125,6 +127,37 @@ modulo `scans` and writes one summed frame.
 number sent to the console is derived in one place rather than at each call site. The default is
 `per_repetition`, which is the decision on record for this instrument; the measurement that would
 change it is the console's per-repetition restart cost.
+
+### Naming the gate line
+
+`enable` is optional and names one digital output on one box:
+
+```toml
+enable = { box = "box1", channel = "A" }
+```
+
+The digitizer takes its acquisition gate from a level on a control input, and on this instrument
+that level is DIOA on the sequencer box. Which line carries it is a fact about how the instrument
+is cabled rather than anything a method's strings say, so a method that wants clockwork to move the
+line declares it here. `box` names one of the method's own boxes and `channel` is a MIPS digital
+output, `A` through `P`. A method that names a digital input, `Q` through `X`, is refused before
+anything reaches a box: the firmware acknowledges `SDIO,Q,0` and drives output `I` with it, so
+nothing downstream would catch the mistake.
+
+Declaring it is what makes `single_frame` with more than one frame acquirable. That mode's table
+loops on the box and raises the gate at its first tick, and nothing in it lowers the gate again, so
+the second method frame would be released against a gate that is already high and would begin
+recording before its start sequence ran. With the line named, clockwork puts the box in local mode,
+clears the line and arms the box again between method frames, and the trainee's table runs as
+written. Without it, that combination is refused rather than acquired at an offset that is
+invisible in the finished file.
+
+The round trip through local mode is not a formality. A host `SDIO` sent while a box is in table
+mode is acknowledged and does not move the line: the latch that applies the digital output image
+belongs to the table engine's timer, so the write waits for the table's next event and lands as
+much as a whole table period later. Measured on the bench, that was 76 ms at a table period of 500
+ticks and 351 ms at 5000. Local mode is the only state in which the host decides when the line
+moves, and it leaves the loaded table in place.
 
 `keep_raw` decides what the fold step leaves on disk. When it is true, the default, the raw file
 with one frame per repetition survives beside its summed companion. Per-repetition rows are the

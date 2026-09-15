@@ -36,10 +36,14 @@ local" rejection as success; and an `SMOD` into any other mode is followed by a 
 `TBLRDY`. All three are facts `docs/mips-wire-format.md` states and `clockwork.mips`
 already implements. Every other string in a method reaches its box exactly as written.
 
-What the loop refuses to do at all is `repetition_mode = "single_frame"` with more than
-one method frame: that method's table raises the enable and never lowers it, so the
-second frame's `acquire frame` meets a gate that is already high. See
-`AcquisitionRefused`.
+**The enable is lowered between the method frames of a `single_frame` acquisition**,
+because that method's table loops on the box and raises the gate once, so the next
+frame would be released against a gate that is already high. The loop puts the
+sequencer in local mode, clears the line with `SDIO` and arms it again, which is the
+only mechanism that moves the line at a time the host chooses: a host write in table
+mode is latched by the table's next event instead, up to a whole table period later
+(lab record, task 26). It needs `acquisition.enable` to say which line, and refuses the
+combination without it. See `AcquisitionRefused`.
 """
 
 from __future__ import annotations
@@ -54,8 +58,8 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from ..instrument import UNCALIBRATED, Instrument
-from ..method import Method, Step
-from ..mips import Box, MipsError, TableEvent
+from ..method import NOTIFY_ON_SCANS_COUNT, Enable, Method, Step
+from ..mips import Box, MipsError, TableEvent, dio_command
 from .console import Console
 from .session import EMPTY_SETTLE_S, run_frame, start_chain
 from .stream import DataStream, StreamTimeout
@@ -76,6 +80,7 @@ __all__ = [
     "ARM_TIMEOUT_S",
     "FRAME_TIMEOUT_FLOOR_S",
     "FRAME_TIMEOUT_SLACK",
+    "GATE_PUBLISH_ALLOWANCE_S",
     "SILENCE_S",
     "START_STEP_GAP_S",
     "AcquisitionRefused",
@@ -89,6 +94,7 @@ __all__ = [
     "FrameBegun",
     "FrameEnded",
     "FrameRecord",
+    "GateChecked",
     "PhaseSent",
     "Run",
     "RunBegun",
@@ -134,6 +140,27 @@ consecutive serial writes do not reliably provide any cushion whatever.
 Twenty milliseconds against a repetition that costs seconds. It is insurance and not a
 derivation: the number to beat is the boxes' own `SARBCTD`, which is why a method sets
 that explicitly rather than inheriting whatever a box remembers.
+"""
+
+GATE_PUBLISH_ALLOWANCE_S = 0.100
+"""How long a batch takes to reach a client on top of the pushes it is made of.
+
+The run's first frame is asked for and then waited on before anything is released, so
+that a digitizer which was already recording has time to prove it (`_check_first_gate`).
+How long that wait has to be is one batch of pushes -- `NotifyOnScansCount` of them,
+64.5 ms at the instrument's period -- plus whatever the console's publisher and the
+socket add on top, which is this. The day's one ungated frame published its first batch
+**135 ms** after `acquire frame`, of which 64.5 ms was the recording, so the path costs
+about 70 ms; 100 rounds that up rather than deriving it, because nothing about it scales
+with the frame (lab record, task 26).
+
+**The console has a budget of its own and this spends it.** Each batch is one
+`CstZs1Context::acquire` with `AcquisitionTimeoutMs` from the moment it begins, and the
+first one begins at `acquire frame`, so everything between that and the frame's 501st
+push has to fit inside the timeout or the console errors the frame. The dwell is added
+to a start list that already costs `START_STEP_GAP_S` per gap and a serial round trip
+per step, and the sum is what the lab's `AcquisitionTimeoutMs` has to clear (lab record,
+task 35).
 """
 
 ARM_TIMEOUT_S = 5.0
@@ -309,6 +336,25 @@ class BatchSeen(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class GateChecked(Event):
+    """The run's first frame was held open and the digitizer stayed silent through it.
+
+    Reported once per run, and it is the evidence that the invariant held rather than an
+    assertion that it did: every other frame of the run is released against a gate this
+    one proved shut.
+    """
+
+    method_frame: int
+    repetition: int
+    seconds: float
+
+    @property
+    def text(self) -> str:
+        return (f"frame {self.method_frame}.{self.repetition}: the gate is shut, "
+                f"nothing published in {self.seconds:.3f} s before the start list")
+
+
+@dataclass(frozen=True, slots=True)
 class FrameEnded(Event):
     """A frame is over, its stream silent and its completion marker written."""
 
@@ -457,32 +503,73 @@ def refusals(method: Method) -> list[str]:
     The judgement `run_acquisition` makes before it touches a box, separated out so that
     a window can make it while a trainee is still editing.
 
-    Today there is one: **`single_frame` with more than one method frame**. The whole
-    point of that mode is that the trainee's table runs its own loop, and such a table
-    raises the digitizer's enable at tick 0 and never lowers it. That is harmless for
-    one frame, which is what the instrument does today, and wrong for two: Control I/O 2
-    is a level, so the second frame's `acquire frame` meets a gate that is already high
-    and begins recording on the next push, before its start list has run, offset by
-    however long the serial round trips took. The offset is invisible in the file and
-    looks exactly like an enable lead that has fallen off (lab record, task 05).
+    There are two, and both are about the digitizer's enable.
 
-    The fix is the table's, not the loop's: end it by lowering the enable one tick past
-    the last counted scan, as `per_repetition` does. Lowering it from the host instead
-    would take a command this protocol document does not yet describe, which is its own
-    piece of work rather than something to improvise here (Matt, 2026-09-11).
+    **`single_frame` with more than one method frame and no `acquisition.enable`.** The
+    whole point of that mode is that the trainee's table runs its own loop, and such a
+    table raises the enable at tick 0 and never lowers it. That is harmless for one
+    frame, which is what the instrument does today, and wrong for two: Control I/O 2 is
+    a level, so the second frame's `acquire frame` meets a gate that is already high and
+    begins recording on the next push, before its start list has run, offset by however
+    long the serial round trips took. The offset is invisible in the file and looks
+    exactly like an enable lead that has fallen off (lab record, task 05).
+
+    A method that says which line the enable is on lifts it, because the loop can then
+    lower the line itself between method frames (`_lower_enable`) and the trainee's
+    table is acquirable as written -- which is what the lab record's task 26 exists for,
+    and what Matt chose on 2026-09-11 when he took the refusal as a stopgap. A method
+    that does not say is still refused: nothing in this package knows which output
+    carries the gate, and the other fix is the table's -- end it by lowering the enable
+    one tick past the last counted scan, as `per_repetition` does.
+
+    **A declared enable line that is not a digital output.** MIPS answers `SDIO,Q,1`
+    with an ACK and drives output `I`, so a document naming an input silently corrupts a
+    line rather than failing; `dio_command` is where that is refused and this is where
+    it is refused early, before a box has been opened.
     """
     acquisition = method.acquisition
     problems: list[str] = []
-    if acquisition.repetition_mode == "single_frame" and acquisition.frames > 1:
+    if acquisition.enable is not None:
+        try:
+            _enable_steps(acquisition.enable)
+        except ValueError as exc:
+            problems.append(f"acquisition.enable.channel: {exc}")
+    if (acquisition.repetition_mode == "single_frame" and acquisition.frames > 1
+            and acquisition.enable is None):
         problems.append(
             f"repetition_mode 'single_frame' with frames = {acquisition.frames}: a table "
             "that loops on the box raises the digitizer's enable once and never lowers "
             "it, so every frame after the first would begin recording before its start "
-            "list ran and be offset by the serial latency. Either acquire one frame at a "
-            "time, or write a table that lowers the enable one tick past its last "
-            "counted scan"
+            "list ran and be offset by the serial latency. Either declare "
+            "acquisition.enable so that the loop can lower the line between frames, "
+            "acquire one frame at a time, or write a table that lowers the enable one "
+            "tick past its last counted scan"
         )
     return problems
+
+
+def _enable_steps(enable: Enable) -> tuple[Step, ...]:
+    """The three commands that put the digitizer's gate line down and re-arm the box.
+
+    `SDIO` is accepted in any mode and takes effect immediately in **local** mode only:
+    the latch that applies the digital-output image is the LDAC pin, which entering
+    table mode hands to the table engine's timer, so a host write made in table mode is
+    not lost but pending, and the table's next event applies it at a time the host did
+    not choose. Measured on the bench, that is up to a whole table period late -- 76 ms
+    at a period of 500 ticks and 351 ms at 5000 -- which is useless for an invariant
+    that has to hold at a particular instant. Hence the round trip through local mode,
+    which the day also showed leaves the table loaded and re-armable (lab record,
+    task 26; `docs/mips-wire-format.md` section 4).
+
+    Built through `dio_command` rather than written out, because the firmware aliases
+    the digital *inputs* `Q`-`X` onto outputs `I`-`P` and acknowledges them, so a
+    channel that is not an output has to be refused by the host or not at all.
+    """
+    return (
+        Step(enable.box, "SMOD,LOC"),
+        Step(enable.box, dio_command(enable.channel, False)),
+        Step(enable.box, "SMOD,TBL"),
+    )
 
 
 # --- phases ---------------------------------------------------------------------------
@@ -612,7 +699,8 @@ def run_acquisition(
     arm_timeout: float = ARM_TIMEOUT_S,
     start_step_gap: float = START_STEP_GAP_S,
     guard_gate: bool = True,
-    ungate_chain: bool = False,
+    gate_dwell: float | None = None,
+    ungate_chain: bool = True,
     rearm_with_reset: bool = False,
     abort_after: int | None = ABORT_AFTER_FAILURES,
     instrument: Instrument = UNCALIBRATED,
@@ -651,10 +739,19 @@ def run_acquisition(
     the start list's steps in time as well as in order, which the ARB boxes need and
     which two consecutive serial writes do not supply.
 
+    `guard_gate` is the enable-gate check, in its two halves, and turning it off turns
+    off both: the run's first frame is held open for `gate_dwell` seconds before anything
+    is released, which is long enough for a digitizer that was already recording to
+    publish, and every frame is checked for a batch once its start list has been walked.
+    `gate_dwell` defaults to one batch of pushes at the period the console measured plus
+    `GATE_PUBLISH_ALLOWANCE_S`; zero keeps the per-frame check and drops the dwell.
+
     `ungate_chain` is passed to `start_chain` and is how a cold instrument opens its
     chain at all: the period measurement needs triggers the card will not count while
-    the enable input is held low. It is off by default and `start_chain`'s docstring
-    says why, which is that the failure it can have is silent (lab record, task 26).
+    the enable input is held low. On by default since the bench session that showed the
+    enable still in force on a chain built that way, and since the dwell above became
+    the check that catches the one failure it can have silently (lab record, task 26);
+    `start_chain`'s docstring carries both halves.
 
     Returns a `Run` describing what happened, including the frames that did not work: an
     empty frame, a console error and a frame that never ended are outcomes recorded
@@ -710,6 +807,8 @@ def run_acquisition(
             recording=recording, report=report, silence=silence,
             empty_settle=empty_settle, arm_timeout=arm_timeout, guard_gate=guard_gate,
             start_step_gap=start_step_gap,
+            gate_dwell=(gate_dwell if gate_dwell is not None
+                        else _gate_dwell(recording.geometry)),
             rearm_with_reset=rearm_with_reset, abort_after=abort_after,
             clock=clock, started=started,
             frame_timeout=(frame_timeout if frame_timeout is not None
@@ -785,6 +884,24 @@ def _frame_timeout(method: Method, geometry: Geometry) -> float:
     return FRAME_TIMEOUT_FLOOR_S + FRAME_TIMEOUT_SLACK * expected
 
 
+def _gate_dwell(geometry: Geometry) -> float:
+    """How long the run's first frame is held open before anything is released.
+
+    One batch of pushes at the period the console measured, plus the allowance for the
+    path a batch takes to reach a client. Derived rather than fixed because the pushes
+    are the larger half and a bench rig's generator is not the pusher: at 129 us it is
+    64.5 ms, and a rig running ten times slower needs ten times the wait to prove the
+    same thing.
+
+    `NOTIFY_ON_SCANS_COUNT` is this package's assumption about the console's
+    `NotifyOnScansCount` and the same number the enable window is measured in
+    (`clockwork.method`). A console configured with a larger batch publishes later than
+    this expects, and the dwell then proves less than it means to rather than failing.
+    """
+    period_s = geometry.average_tof_length_ns * 1e-9
+    return NOTIFY_ON_SCANS_COUNT * period_s + GATE_PUBLISH_ALLOWANCE_S
+
+
 def _ignore(_: Event) -> None:
     """The progress callback a caller that wants none gets."""
 
@@ -827,12 +944,14 @@ class _Loop:
     abort_after: int | None
     clock: Callable[[], float]
     started: float
+    gate_dwell: float
     start_step_gap: float = START_STEP_GAP_S
 
     frames: list[FrameRecord] = field(default_factory=list)
     folds: list[FoldRecord] = field(default_factory=list)
     stopped_early: str | None = None
     _consecutive_failures: int = 0
+    _gate_checked: bool = False
     _folder: ThreadPoolExecutor | None = None
     _pending: list[Future[FoldRecord]] = field(default_factory=list)
     _fold_due: int | None = None
@@ -940,6 +1059,7 @@ class _Loop:
 
     def _one_frame(self, method_frame: int, repetition: int) -> None:
         acquisition = self.method.acquisition
+        self._lower_enable(method_frame, repetition)
         request = self.recording.begin_frame(method_frame, repetition)
         self.report(FrameBegun(method_frame, repetition, request.frame_number,
                                acquisition.console_frames))
@@ -952,6 +1072,7 @@ class _Loop:
             self.report(BatchSeen(method_frame, repetition, batch))
 
         def release() -> None:
+            self._check_first_gate(method_frame, repetition)
             if self.rearm_with_reset and (method_frame, repetition) > (1, 1):
                 # The fallback the sync design names for a box whose table does not
                 # re-arm itself after a software trigger. Unlocked by a bench answer,
@@ -1049,6 +1170,102 @@ class _Loop:
                 trailing += 1
                 on_batch(event)
         return trailing
+
+    def _lower_enable(self, method_frame: int, repetition: int) -> None:
+        """Put the digitizer's gate down by command, before the frame is asked for.
+
+        Only under `single_frame`, and only between method frames. That mode's table
+        loops on the box and raises the enable once, so every frame after the run's
+        first would meet a gate the previous frame left high; `per_repetition`'s table
+        lowers the line itself one batch past its last counted scan, and a round trip
+        through local mode per repetition would cost a hundred of them per method frame
+        against a dead time the lab record's task 34 is trying to cut.
+
+        **Before `acquire frame` and not inside the release.** The invariant is that the
+        gate is low when the console is asked for the frame, so lowering it a few
+        milliseconds afterwards would leave the card free to take records the frame
+        counts -- a batch short of publishing anything, and so invisible to both halves
+        of the gate check.
+
+        It also re-arms the box, which is the same `SMOD,LOC` / `SMOD,TBL` a replicate's
+        reset list makes, so a `single_frame` table spent by the previous method frame
+        is ready for the next `TBLSTRT` without `rearm_with_reset` as well.
+        """
+        acquisition = self.method.acquisition
+        if (acquisition.enable is None
+                or acquisition.repetition_mode != "single_frame"
+                or (method_frame, repetition) == (1, 1)):
+            return
+        self._walk(_enable_steps(acquisition.enable), "enable")
+
+    def _check_first_gate(self, method_frame: int, repetition: int) -> None:
+        """Hold the run's first frame open long enough to catch a gate that is not shut.
+
+        The per-frame guard below reads a silence of a few milliseconds -- the start
+        list -- and infers from it that the gate was shut when the frame was asked for.
+        That inference is sound and it is also thin, and it is thin in exactly the case
+        that matters most: a chain opened with `ungate` whose re-enable never reached the
+        card acquires every frame of the run and looks like a run that worked, because
+        the first batch of an ungated frame arrives about 135 ms after `acquire frame`
+        and the start list is long gone by then (lab record, task 26).
+
+        So once per run the loop waits where nothing should arrive. The frame has been
+        asked for, nothing has been released, and a digitizer that is recording anyway
+        has `gate_dwell` seconds to publish a batch and prove it. Silence through that
+        window is the invariant holding, reported as `GateChecked`, and it is the only
+        positive evidence the run has: every frame after this one is released against a
+        gate this frame proved shut.
+
+        **Once, and on the first frame, for two reasons.** A dwell per frame would be
+        spent on every repetition of a hundred and is the per-repetition dead time the
+        lab record's task 34 is trying to cut. And the three ways the gate can be open --
+        the enable lead off Control I/O 2, whose input is pulled up; a table from an
+        earlier run that left the enable high; the console's enable input still disabled
+        behind an ungated chain -- are all in place before the run's first frame and none
+        of them arrives part way through one. A check that passes here has ruled out all
+        three.
+
+        It marks itself done only when it passes, so a gate that is open fails frame
+        after frame until `abort_after` ends the run, which is the right end for a
+        failure that is not going to clear up.
+
+        What is not a batch goes back on the stream, the same way the per-frame guard
+        puts it back: a status message belongs to the wait for this frame's end.
+        """
+        if self._gate_checked or not self.guard_gate or self.gate_dwell <= 0:
+            return
+        began = time.perf_counter()
+        deadline = began + self.gate_dwell
+        held: list[Batch | Status] = []
+        stray = 0
+        while stray == 0:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                break
+            event = self.stream.poll(min(remaining, 0.05))
+            if event is None:
+                continue
+            if isinstance(event, Batch):
+                stray += 1
+            else:
+                held.append(event)
+        for event in reversed(held):
+            self.stream.unread(event)
+        seconds = time.perf_counter() - began
+        if stray:
+            raise EnableGateError(
+                f"frame {method_frame}.{repetition}: the console published a batch "
+                f"{seconds:.3f} s after the frame was asked for and before anything had "
+                "been released, so the digitizer was recording with nothing to record. "
+                "Either the enable lead is off Control I/O 2, whose input is pulled up "
+                "so that an unconnected one reads high and the card acquires every push; "
+                "or a table left the enable high behind an earlier run; or this chain "
+                "was opened with the enable input disabled and enabling it again did not "
+                "reach the card. Every frame of this run would be a frame of plausible "
+                "data at the wrong offset"
+            )
+        self._gate_checked = True
+        self.report(GateChecked(method_frame, repetition, seconds))
 
     def _check_gate(self, method_frame: int, repetition: int) -> None:
         """Refuse a frame that was already recording before its start list finished.

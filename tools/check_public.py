@@ -380,6 +380,19 @@ def main() -> int:
                 "and the open-ended acquisition it starts is stopped and cleared away",
                 console.acquiring and not console.running and stream.poll(0.1) is None,
             )
+            # The bootstrap, and the default since 2026-09-14. The period measurement
+            # inside `acquire` needs twenty triggers and the card counts none while the
+            # enable input is held low, which is where a sequencer's DIO sits before its
+            # table has ever run, so a cold instrument has no other way to open a chain.
+            # The enable goes back on whatever happened (lab record, task 26).
+            sent = [name for name, *_ in fake.commands]
+            check_true(
+                "a chain disables the enable input for the measurement and enables it "
+                "again after, which is how a cold instrument opens one at all",
+                sent.index("disable io port") < sent.index("acquire")
+                < len(sent) - 1 - sent[::-1].index("enable io port")
+                and fake.io_ports_enabled == [2],
+            )
 
             batches: list[acq.Batch] = []
             end = acq.run_frame(
@@ -581,6 +594,13 @@ def main() -> int:
             _time.sleep(0.25)
             super().write(data)
 
+    # The run's first frame is held open before anything is released, so that a
+    # digitizer already recording has time to publish and prove it. The instrument's
+    # dwell is derived from the pusher period the console measured, about 165 ms; the
+    # stand-in has no period, only the hold below, so the checks that are not about the
+    # dwell run at one comfortably shorter than it.
+    dwell = 0.01
+
     loop_document = dict(document)
     loop_document["metadata"] = {"name": "self-check loop",
                                  "created": _dt.date(2026, 9, 11)}
@@ -633,7 +653,7 @@ def main() -> int:
                     recipe, boxes=boxes, console=console, stream=stream,
                     directory=directory,
                     post_trigger_samples=fake.post_trigger_samples,
-                    silence=0.3, progress=seen.append,
+                    silence=0.3, gate_dwell=dwell, progress=seen.append,
                 )
                 check_true(
                     f"the loop ran a whole acquisition ({run.text})",
@@ -658,6 +678,7 @@ def main() -> int:
                     directory=directory,
                     post_trigger_samples=fake.post_trigger_samples,
                     stem="selfcheck-loop-2", replicate=True, silence=0.3,
+                    gate_dwell=dwell,
                 )
                 check_true(
                     "a replicate sends the reset list and acquires again into a new "
@@ -670,7 +691,9 @@ def main() -> int:
                 # wrong offset, from a table that left the enable high or an enable
                 # lead off a pulled-up input (lab record, task 05). The start list is
                 # three serial round trips on the instrument and instant against a
-                # stand-in, so the window the guard watches has to be put back.
+                # stand-in, so the window the guard watches has to be put back. With
+                # `gate_dwell=0` it is the only window there is, which is the half of
+                # the guard this check is about.
                 fake.frame_hold_s = 0.0
                 slow = {"box1": mips_module.Box(transport=SlowBox(), name="box1")}
                 acq.send_phases(recipe, slow)
@@ -679,12 +702,77 @@ def main() -> int:
                     directory=directory,
                     post_trigger_samples=fake.post_trigger_samples,
                     stem="selfcheck-loop-gate", silence=0.3, abort_after=1,
+                    gate_dwell=0.0,
                 )
                 check_true(
                     "a batch published before the start list has finished fails its "
                     "frame rather than being acquired",
                     stalled.frames[0].outcome == "EnableGateError"
                     and not UimfFile(stalled.raw_path).frame_params(1).marked_complete,
+                )
+
+                # The other half of the same guard, and the only positive evidence a
+                # run has that its gate was ever shut: the first frame is held open
+                # where nothing should arrive, and a chain whose enable input was left
+                # disabled publishes into that window (lab record, task 26). Here the
+                # stand-in publishes the moment a frame is asked for, which is the same
+                # shape.
+                ungated = acq.run_acquisition(
+                    recipe, boxes=boxes, console=console, stream=stream,
+                    directory=directory,
+                    post_trigger_samples=fake.post_trigger_samples,
+                    stem="selfcheck-loop-dwell", silence=0.3, abort_after=1,
+                    gate_dwell=0.3,
+                )
+                check_true(
+                    "a batch published during the dwell, before anything was released, "
+                    "fails the run's first frame",
+                    ungated.frames[0].outcome == "EnableGateError"
+                    and "before anything had been released" in ungated.frames[0].detail,
+                )
+
+                # `single_frame` with more than one method frame, which is refused
+                # unless the method says which output carries the enable. With it named
+                # the loop lowers the line itself between method frames, in local mode,
+                # because a host `SDIO` in table mode is latched by the table's next
+                # event and not by the host (lab record, task 26).
+                fake.frame_hold_s = 0.05
+                looping = method_module.from_dict(loop_document | {
+                    "acquisition": dict(loop_document["acquisition"]) | {
+                        "repetition_mode": "single_frame", "frames": 2,
+                        "file_stem": "selfcheck-loop-single",
+                        "enable": {"box": "box1", "channel": "A"},
+                    },
+                })
+                check_true(
+                    "a single_frame method that names its gate line is not refused",
+                    acq.refusals(looping) == [],
+                )
+                gated = {"box1": mips_module.Box(transport=mips_module.FakeBox(),
+                                                 name="box1")}
+                acq.send_phases(looping, gated)
+                # What the previous method frame leaves behind: a table that raised the
+                # enable at its tick 0 and has nothing in it to lower the line again.
+                gated["box1"].transport.dio_image["A"] = True
+                gated["box1"].transport.dio_pins["A"] = True
+                lowered: list[acq.Event] = []
+                single = acq.run_acquisition(
+                    looping, boxes=gated, console=console, stream=stream,
+                    directory=directory,
+                    post_trigger_samples=fake.post_trigger_samples,
+                    silence=0.3, gate_dwell=dwell, progress=lowered.append,
+                )
+                check_true(
+                    f"and acquires both frames ({single.text})",
+                    single.complete and len(single.frames) == 2,
+                )
+                check_true(
+                    "having put the box in local mode, cleared the line and armed it "
+                    "again between the two",
+                    [event.command for event in lowered
+                     if isinstance(event, acq.PhaseSent) and event.phase == "enable"]
+                    == ["SMOD,LOC", "SDIO,A,0", "SMOD,TBL"]
+                    and gated["box1"].transport.dio_pins["A"] is False,
                 )
                 console.stop_acquire()
 
@@ -713,7 +801,7 @@ def main() -> int:
                         recipe, boxes=boxes, console=console, stream=stream,
                         directory=directory,
                         post_trigger_samples=fake.post_trigger_samples,
-                        stem="selfcheck-transcript", silence=0.3,
+                        stem="selfcheck-transcript", silence=0.3, gate_dwell=0.01,
                     )
                 console.stop_acquire()
 

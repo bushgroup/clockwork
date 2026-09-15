@@ -72,6 +72,16 @@ HOLD = 0.05
 """What `FakeConsole.frame_hold_s` stands in for: the pushes a real frame spends waiting
 for its enable to go high while the loop walks the start list."""
 
+DWELL = 0.01
+"""How long the run's first frame is held open before anything is released.
+
+The instrument's number is derived from the period the console measured -- one batch of
+pushes plus `acq.GATE_PUBLISH_ALLOWANCE_S`, about 165 ms -- and the stand-in has no
+period to derive it from, only `HOLD`. What the suite needs is a dwell comfortably
+shorter than the hold, so that a frame the fake holds looks like a gate that is shut and
+a frame it does not looks like one that is open.
+"""
+
 BOX = "box1"
 """The one box most of these tests need. A box name is a free-form string a method
 supplies, so the suite invents its own rather than naming an instrument's."""
@@ -106,6 +116,7 @@ def make_method(
     keep_raw: bool = True,
     stem: str = "260911_TEST_001",
     reset: list[list[str]] | None = None,
+    enable: dict[str, str] | None = None,
 ) -> method_module.Method:
     return method_module.from_dict({
         "schema_version": 2,
@@ -117,6 +128,7 @@ def make_method(
             "file_stem": stem,
             "repetition_mode": repetition_mode,
             "keep_raw": keep_raw,
+            **({"enable": enable} if enable is not None else {}),
         },
         "boxes": [{
             "name": BOX,
@@ -199,6 +211,7 @@ class Rig:
     def acquire(self, method, boxes, **kwargs):
         kwargs.setdefault("silence", SILENCE)
         kwargs.setdefault("empty_settle", 0.3)
+        kwargs.setdefault("gate_dwell", DWELL)
         kwargs.setdefault("post_trigger_samples", self.fake.post_trigger_samples)
         kwargs.setdefault("directory", self.directory)
         return run_acquisition(method, boxes=boxes, console=self.console,
@@ -383,6 +396,7 @@ def test_the_console_is_asked_for_a_frame_before_the_start_list_is_walked(rig, t
     try:
         run = run_acquisition(method, boxes=boxes, console=console, stream=rig.stream,
                               directory=str(tmp_path), silence=SILENCE,
+                              gate_dwell=DWELL,
                               post_trigger_samples=rig.fake.post_trigger_samples)
     finally:
         console.close()
@@ -581,16 +595,145 @@ def test_a_run_gives_up_after_enough_frames_fail_in_a_row(rig):
 
 def test_a_batch_before_the_start_list_has_finished_fails_the_frame(rig):
     """The only automatic detector for the two faults that look identical afterwards: a
-    table that left the enable high, and the enable lead off a pulled-up input."""
+    table that left the enable high, and the enable lead off a pulled-up input.
+
+    `gate_dwell=0` leaves the start list as the only window, which is the half of the
+    guard this is about; the dwell has its own tests below.
+    """
     rig.fake.frame_hold_s = 0.0
     method = make_method(accumulations=1)
     boxes = make_boxes(BOX, transport=SlowBox)
     send_phases(method, boxes)
-    run = rig.acquire(method, boxes)
+    run = rig.acquire(method, boxes, gate_dwell=0.0)
     assert [record.outcome for record in run.frames] == ["EnableGateError"]
     assert "already recording" in run.frames[0].detail
     assert "enable lead" in run.frames[0].detail
     assert not UimfFile(run.raw_path).frame_params(1).marked_complete
+
+
+def test_the_run_proves_its_gate_is_shut_before_it_releases_anything(rig):
+    """The dwell's passing case, which is the only positive evidence a run has.
+
+    Reported once and on the first frame: every frame after it is released against a
+    gate this one proved shut, and a dwell per repetition would be spent a hundred times
+    over on the per-repetition dead time.
+    """
+    seen: list[acq.GateChecked] = []
+    method = make_method(accumulations=3)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = rig.acquire(method, boxes,
+                      progress=lambda event: seen.append(event)
+                      if isinstance(event, acq.GateChecked) else None)
+    assert run.complete and len(run.frames) == 3
+    assert len(seen) == 1
+    assert (seen[0].method_frame, seen[0].repetition) == (1, 1)
+    assert seen[0].seconds >= DWELL
+
+
+def test_a_batch_during_the_dwell_fails_every_frame_until_the_run_gives_up(rig):
+    """A digitizer recording before anything was released, which is what a chain opened
+    with the enable input disabled looks like when enabling it again did not take.
+
+    The start list is instantaneous against the stand-in, so nothing but the dwell could
+    catch this: the fake publishes the moment the frame is asked for, which is the shape
+    of an ungated frame rather than of a slow acknowledgement. The dwell is the whole of
+    a real one here rather than the suite's `DWELL`, because what is being waited on is
+    the fake writing rows and encoding a batch and not a number of pushes. It is not
+    marked checked on a failure, so it fails again on the next frame and `abort_after`
+    ends the run.
+    """
+    rig.fake.frame_hold_s = 0.0
+    method = make_method(accumulations=4)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = rig.acquire(method, boxes, abort_after=2, gate_dwell=0.3)
+    assert [record.outcome for record in run.frames] == ["EnableGateError"] * 2
+    assert "before anything had been released" in run.frames[0].detail
+    assert "enable input disabled" in run.frames[0].detail
+    assert run.stopped_early is not None
+
+
+def test_the_dwell_is_one_batch_of_pushes_plus_the_path_a_batch_takes(rig):
+    """Derived from the period the console measured, because the pushes are the larger
+    half of it and a bench generator is not the pusher."""
+    geometry = acq.Geometry(bins=100, bin_width_ns=0.5, time_offset_ns=0.0,
+                            average_tof_length_ns=129_003.6, offset_bins=20)
+    dwell = acq.loop._gate_dwell(geometry)
+    assert dwell == pytest.approx(
+        method_module.NOTIFY_ON_SCANS_COUNT * 129_003.6e-9 + acq.GATE_PUBLISH_ALLOWANCE_S
+    )
+    assert 0.16 < dwell < 0.17
+
+
+def test_single_frame_with_more_than_one_frame_acquires_once_the_gate_line_is_named(rig):
+    """The refusal above is lifted by the one thing the loop was missing: which output
+    carries the enable. With that declared it lowers the line itself between method
+    frames and the trainee's looping table is acquirable as written (lab record,
+    task 26)."""
+    method = make_method(frames=2, repetition_mode="single_frame",
+                         enable={"box": BOX, "channel": "A"})
+    assert refusals(method) == []
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = rig.acquire(method, boxes)
+    assert run.complete and len(run.frames) == 2 and len(run.folds) == 2
+
+
+def test_the_gate_line_is_lowered_between_method_frames_and_not_before_the_first(rig):
+    """Three commands, in local mode, before the frame is asked for -- and none of it
+    ahead of the run's own first frame, whose gate is the dwell's business.
+
+    The order is the whole invariant and the only part of it that cannot be recovered
+    from the file afterwards: the gate has to be down when the console is told to
+    acquire, not a moment after.
+    """
+    log: list[str] = []
+
+    def watch(event):
+        if isinstance(event, PhaseSent) and event.phase == "enable":
+            log.append(event.command)
+        if isinstance(event, FrameBegun):
+            log.append(f"frame {event.method_frame}")
+
+    method = make_method(frames=2, repetition_mode="single_frame",
+                         enable={"box": BOX, "channel": "A"})
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    # The state the previous method frame leaves behind: a table that looped on the box
+    # and raised the enable at its tick 0, with nothing in it to lower the line again.
+    boxes[BOX].transport.dio_image["A"] = True
+    boxes[BOX].transport.dio_pins["A"] = True
+    run = rig.acquire(method, boxes, progress=watch)
+
+    assert run.complete
+    assert log == ["frame 1", "SMOD,LOC", "SDIO,A,0", "SMOD,TBL", "frame 2"]
+    assert boxes[BOX].transport.dio_pins["A"] is False
+
+
+def test_per_repetition_lowers_nothing_by_command(rig):
+    """Its table drops the enable a batch past its last counted scan, and a round trip
+    through local mode per repetition would be a hundred of them per method frame."""
+    sent: list[str] = []
+    method = make_method(frames=2, accumulations=2,
+                         enable={"box": BOX, "channel": "A"})
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = rig.acquire(method, boxes,
+                      progress=lambda event: sent.append(event.command)
+                      if isinstance(event, PhaseSent) and event.phase == "enable"
+                      else None)
+    assert run.complete and sent == []
+
+
+def test_a_gate_line_on_a_digital_input_is_refused_before_anything_is_sent():
+    """MIPS acknowledges `SDIO,Q,0` and drives output `I` with it, so a method naming an
+    input has to be caught by the host or not at all."""
+    method = make_method(enable={"box": BOX, "channel": "Q"})
+    problems = refusals(method)
+    assert len(problems) == 1
+    assert "digital input" in problems[0]
+    assert "acquisition.enable.channel" in problems[0]
 
 
 def test_the_table_a_per_repetition_method_carries_actually_raises_the_enable(rig):
@@ -666,6 +809,7 @@ def test_the_fold_starts_after_the_next_frame_has_been_released(rig, monkeypatch
 
 
 def test_the_guard_can_be_turned_off(rig):
+    """`guard_gate=False` turns off both halves, the dwell included."""
     rig.fake.frame_hold_s = 0.0
     method = make_method(accumulations=1)
     boxes = make_boxes(BOX, transport=SlowBox)

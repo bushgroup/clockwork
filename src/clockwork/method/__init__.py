@@ -19,6 +19,10 @@ them:
             per console frame; cross-box order is part of the experiment
     reset   the steps a technical replicate needs before starting again
 
+`acquisition.enable` is optional and names the digital output that gates the
+digitizer, which is the one instrument fact the acquisition loop cannot infer
+from the strings (see `Enable`).
+
 Schema 1, which stored one flat `strings` list per box and had no start list, is
 rejected rather than mapped onto this shape (lab record, task 14): it predates
 the first real experiment on record and no method written against it can express
@@ -90,6 +94,33 @@ class Metadata:
 
 
 @dataclass(frozen=True, slots=True)
+class Enable:
+    """The digital output that gates the digitizer, as a method declares it.
+
+    `box` is the sequencer among this method's boxes and `channel` one of the
+    MIPS digital outputs it drives: on this instrument DIOA, into the card's
+    Control I/O 2. Declared rather than assumed, because which line carries the
+    enable is a fact about how an instrument is cabled and not a property of a
+    document -- nothing else in this package knows it, and the strings a method
+    carries do not say.
+
+    What it buys is the one thing a table cannot do for itself. A `single_frame`
+    method's table loops on the box and raises the enable once, so a second
+    method frame would be released against a gate that is already high; with
+    this declared, `clockwork.acq.loop` lowers the line by command between
+    method frames instead and acquires the trainee's table as written. Without
+    it that combination is still refused (`clockwork.acq.loop.refusals`).
+
+    The lab record's task 31 wants the same pair for a different question: which
+    table to read the enable's edges out of when a method is checked against
+    itself.
+    """
+
+    box: str
+    channel: str
+
+
+@dataclass(frozen=True, slots=True)
 class Acquisition:
     frames: int
     scans: int
@@ -97,6 +128,8 @@ class Acquisition:
     file_stem: str
     repetition_mode: str = DEFAULT_REPETITION_MODE
     keep_raw: bool = DEFAULT_KEEP_RAW
+    enable: Enable | None = None
+    """The digitizer's gate line, or None where the document does not say."""
 
     @property
     def frame_length(self) -> int:
@@ -285,6 +318,32 @@ def _phase(
     return tuple(s for s in strings if s is not None)
 
 
+def _enable(acquisition_raw: dict, problems: list[str]) -> Enable | None:
+    """`acquisition.enable`, which a document may leave out entirely.
+
+    The channel is not checked against the digital outputs here. Which letters
+    MIPS accepts is the wire protocol's business and this module does not hold a
+    second copy of it, so a channel that is not an output is caught by
+    `clockwork.acq.loop.refusals`, which builds the command through
+    `clockwork.mips.dio_command` and reports what it says.
+    """
+    raw = acquisition_raw.get("enable")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        problems.append(
+            "acquisition.enable: expected a table with box and channel, as in "
+            '{ box = "auklet", channel = "A" }'
+        )
+        return None
+    _no_unknown_keys(raw, "acquisition.enable", ("box", "channel"), problems)
+    box = _identifier(raw.get("box"), "acquisition.enable.box", problems)
+    channel = _identifier(raw.get("channel"), "acquisition.enable.channel", problems)
+    if box is None or channel is None:
+        return None
+    return Enable(box=box, channel=channel)
+
+
 def _sequence(
     data: dict,
     key: str,
@@ -376,6 +435,7 @@ def from_dict(data: dict) -> Method:
                 "file_stem",
                 "repetition_mode",
                 "keep_raw",
+                "enable",
             ),
             problems,
         )
@@ -402,6 +462,7 @@ def from_dict(data: dict) -> Method:
         if not isinstance(keep_raw, bool):
             problems.append("acquisition.keep_raw: expected true or false")
             keep_raw = None
+        enable = _enable(acquisition_raw, problems)
         if None not in (frames, scans, accumulations, file_stem, mode, keep_raw):
             acquisition = Acquisition(
                 frames=frames,
@@ -410,6 +471,7 @@ def from_dict(data: dict) -> Method:
                 file_stem=file_stem,
                 repetition_mode=mode,
                 keep_raw=keep_raw,
+                enable=enable,
             )
 
     boxes_raw = data.get("boxes")
@@ -455,6 +517,13 @@ def from_dict(data: dict) -> Method:
                 "load string"
             )
 
+    if acquisition is not None and acquisition.enable is not None:
+        if acquisition.enable.box not in seen_names:
+            problems.append(
+                f"acquisition.enable.box: {acquisition.enable.box!r} is not a box this "
+                "method declares"
+            )
+
     start = _sequence(data, "start", seen_names, problems, warnings)
     if start is not None and not start:
         problems.append(
@@ -480,7 +549,14 @@ def from_dict(data: dict) -> Method:
 
 
 def to_dict(method: Method) -> dict:
-    """The plain dict `dumps`/`save` write, and what a stamp's hash covers."""
+    """The plain dict `dumps`/`save` write, and what a stamp's hash covers.
+
+    `acquisition.enable` is written only where the method declares one, so a
+    document that says nothing about the gate line round-trips to a document
+    that still says nothing, and its stamp hashes the same bytes as before the
+    key existed.
+    """
+    enable = method.acquisition.enable
     return {
         "schema_version": method.schema_version,
         "start": [[step.box, step.command] for step in method.start],
@@ -497,6 +573,8 @@ def to_dict(method: Method) -> dict:
             "repetition_mode": method.acquisition.repetition_mode,
             "keep_raw": method.acquisition.keep_raw,
             "file_stem": method.acquisition.file_stem,
+            **({"enable": {"box": enable.box, "channel": enable.channel}}
+               if enable is not None else {}),
         },
         "boxes": [
             {
@@ -574,6 +652,7 @@ __all__ = [
     "MethodError",
     "Metadata",
     "Acquisition",
+    "Enable",
     "BoxMethod",
     "Method",
     "Step",

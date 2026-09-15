@@ -459,27 +459,34 @@ def test_start_chain_leaves_the_stream_holding_nothing(
     assert stream.poll(0.2) is None
 
 
-def test_start_chain_leaves_the_enable_input_alone_by_default(
+def test_start_chain_ungates_the_period_measurement_and_gates_again(
     client: Console, stream: DataStream, fake: FakeConsole
 ) -> None:
+    """The bootstrap, and it is what a chain does by default (Matt, 2026-09-14).
+
+    The measurement inside `acquire` needs twenty triggers and the card counts none
+    while the enable input is held low, which is where a sequencer's DIO sits before
+    its table has ever run, so a cold instrument has no other way to open a chain
+    (lab record, task 26).
+    """
     client.configure(offset_v=0.251)
     assert fake.io_ports_enabled == [2]
     start_chain(client, stream, timeout=5.0, settle=2.0)
     assert fake.io_ports_enabled == [2]
-
-
-def test_start_chain_can_ungate_the_period_measurement_and_gate_again(
-    client: Console, stream: DataStream, fake: FakeConsole
-) -> None:
-    """The bootstrap: the measurement inside `acquire` needs twenty triggers and
-    the card counts none while the enable input is held low, which is where a
-    sequencer's DIO sits before its table has ever run (lab record, task 26)."""
-    client.configure(offset_v=0.251)
-    start_chain(client, stream, timeout=5.0, settle=2.0, ungate=True)
-    assert fake.io_ports_enabled == [2]
     sent = [command for command, *_ in fake.commands]
     assert sent.index("disable io port") < sent.index("acquire")
     assert sent.index("acquire") < len(sent) - 1 - sent[::-1].index("enable io port")
+
+
+def test_start_chain_can_be_told_to_leave_the_enable_input_alone(
+    client: Console, stream: DataStream, fake: FakeConsole
+) -> None:
+    """For a caller that has raised the line itself and wants nothing touched."""
+    client.configure(offset_v=0.251)
+    start_chain(client, stream, timeout=5.0, settle=2.0, ungate=False)
+    assert fake.io_ports_enabled == [2]
+    sent = [command for command, *_ in fake.commands]
+    assert "disable io port" not in sent
 
 
 def test_an_ungated_chain_that_fails_still_puts_the_enable_back(
@@ -489,7 +496,7 @@ def test_an_ungated_chain_that_fails_still_puts_the_enable_back(
     client.configure(offset_v=0.251)
     fake.refuse["acquire"] = "timeout in acquisition, trig_count: 0"
     with pytest.raises(AcqError):
-        start_chain(client, stream, timeout=5.0, settle=2.0, ungate=True)
+        start_chain(client, stream, timeout=5.0, settle=2.0)
     assert fake.io_ports_enabled == [2]
 
 
