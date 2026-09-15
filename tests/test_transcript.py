@@ -29,7 +29,7 @@ import pytest
 
 from clockwork import acq, transcript
 from clockwork.acq import Console, DataStream, FakeConsole, FrameRequest, run_frame
-from clockwork.mips import DEFAULT_CHUNK_BYTES, Box, FakeBox, MipsError
+from clockwork.mips import DEFAULT_CHUNK_BYTES, Box, BoxRejected, FakeBox, MipsError
 
 LONG_TABLE = "STBLDAT;0:[A:1," + ",".join(
     f"{tick}:A:1" for tick in range(100, 1200, 2)
@@ -164,8 +164,9 @@ def test_a_rejection_records_the_nak_and_the_error_query(collected):
     read back without the script having chosen in advance to keep it.
     """
     box = Box(transport=FakeBox(), name="dunlin")
-    with pytest.raises(Exception):
+    with pytest.raises(BoxRejected) as caught:
         box.command("NOSUCHCMD")
+    assert caught.value.code == 1
     text = collected.text("clockwork.mips.wire")
     assert r"dunlin > b'NOSUCHCMD\n'" in text
     assert r"dunlin < b'\x15?\n\r'" in text

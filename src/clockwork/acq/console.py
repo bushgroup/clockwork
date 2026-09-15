@@ -535,7 +535,7 @@ def _frame(part: str | bytes) -> bytes:
     return part if isinstance(part, bytes) else part.encode("utf-8")
 
 
-def _shown(frames: "tuple[str | bytes, ...] | list[bytes]") -> str:
+def _shown(frames: tuple[str | bytes, ...] | list[bytes]) -> str:
     """One multipart message as a transcript line.
 
     Almost everything on this socket is text and is shown as text. The three
