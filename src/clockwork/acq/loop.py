@@ -457,6 +457,17 @@ class FrameRecord:
     the outcome says. A run whose frames all say `"silence"` is a run to look at.
     """
 
+    start_list_seconds: float = 0.0
+    """How long the method's `start` list took to walk, release to release.
+
+    The one term in a repetition's cost that is neither the acquisition nor the wait,
+    and the one that varies: measured over the BUFFLEHEAD day's 158 frames it was a
+    median of **7.5 ms** and a maximum of **378 ms**, and the long ones were the frames
+    whose release coincided with a fold running on the folding thread (lab record,
+    task 34). `START_STEP_GAP_S` per gap is in it by design; anything beyond that is the
+    boxes' serial round trips and whatever else the interpreter was doing.
+    """
+
     settle_seconds: float | None = None
     """How long after the last scan arrived the file's row count last moved.
 
@@ -1142,6 +1153,8 @@ class _Loop:
         seen: list[Batch] = []
         began = self.clock()
         outcome, detail = "", ""
+        timings: dict[str, float] = {}
+        """What `release` measured, which only it can: it runs inside `run_frame`."""
 
         def on_batch(batch: Batch) -> None:
             seen.append(batch)
@@ -1162,7 +1175,9 @@ class _Loop:
                 # `send_phases` armed the box, and a replicate's because `run` has just
                 # walked the same reset list.
                 self._walk(self.method.reset, "reset")
+            began_list = time.perf_counter()
             self._walk(self.method.start, "start", gap=self.start_step_gap)
+            timings["start_list"] = time.perf_counter() - began_list
             if self.guard_gate:
                 self._check_gate(method_frame, repetition)
             self._submit_deferred_fold()
@@ -1216,6 +1231,7 @@ class _Loop:
             wait_seconds=wait_seconds,
             ended_by=ended_by,
             settle_seconds=settle_seconds,
+            start_list_seconds=timings.get("start_list", 0.0),
         )
         self.frames.append(record)
         self.report(FrameEnded(record))
