@@ -479,9 +479,37 @@ def test_send_phases_sends_setup_load_and_arm_in_the_order_written():
     send_phases(method, boxes, progress=seen.append)
     assert isinstance(seen[0], BoxReady)
     sent = [(event.phase, event.command) for event in seen if isinstance(event, PhaseSent)]
-    assert [phase for phase, _ in sent] == ["setup", "setup", "load", "arm"]
+    # The leading `SMOD,LOC` is the setup phase's own: this method's `STBLCLK` and
+    # `STBLTRG` are LOC-mode only, and the box may still be armed from the acquisition
+    # before this one.
+    assert [phase for phase, _ in sent] == ["setup", "setup", "setup", "load", "arm"]
+    assert sent[0] == ("setup", "SMOD,LOC")
     assert sent[-1] == ("arm", "SMOD,TBL")
     assert "TBLRDY" in [event.detail for event in seen if isinstance(event, PhaseSent)][-1]
+
+
+def test_a_setup_phase_with_loc_only_commands_drops_the_box_out_of_table_mode_first():
+    """`STBLCLK` and `STBLTRG` are LOC-mode only (wire format, section 4), so a box left
+    armed by the acquisition before refuses the first string of the next one. A bench
+    session met exactly that, twice over, and only the flag that had happened to leave
+    the box local hid it the first time (lab record, task 30)."""
+    boxes = make_boxes(BOX)
+    send_phases(make_method(), boxes, progress=None)
+    written = boxes[BOX].transport.written
+    assert written.index(b"SMOD,LOC\n") < written.index(b"STBLCLK,EXT\n")
+
+
+def test_a_setup_phase_with_no_loc_only_command_is_sent_exactly_as_written():
+    """Both golden methods' ARB boxes take only a frequency block, and their sequencer's
+    setup is empty; none of them may gain a mode change it never asked for."""
+    document = method_module.to_dict(make_method())
+    document["boxes"][0]["setup"] = ["SWFREQ,1,15000", "SWFVRNG,1,15"]
+    boxes = make_boxes(BOX, arb_modules=ARB_MODULES)
+    seen: list[acq.Event] = []
+    send_phases(method_module.from_dict(document), boxes, progress=seen.append)
+    setup_sent = [event.command for event in seen
+                  if isinstance(event, PhaseSent) and event.phase == "setup"]
+    assert setup_sent == ["SWFREQ,1,15000", "SWFVRNG,1,15"]
 
 
 def test_setup_can_be_left_out_for_a_box_that_has_had_it_since_power_up():

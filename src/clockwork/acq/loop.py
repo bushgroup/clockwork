@@ -243,6 +243,14 @@ already costs `START_STEP_GAP_S` per gap and a serial round trip per step, and t
 is what the lab's `AcquisitionTimeoutMs` has to clear (lab record, task 35).
 """
 
+LOC_ONLY_SETUP = frozenset({"STBLCLK", "STBLTRG"})
+"""Setup commands the box accepts only in local mode (wire format, section 4).
+
+`STBLDAT` is deliberately not here: the same table says it is accepted in LOC mode *or*
+in TBL mode with the table ready, so a `load` phase does not need the box dropped out of
+table mode and a method that only loads and arms is untouched by this.
+"""
+
 ARM_TIMEOUT_S = 5.0
 """How long to wait for `TBLRDY` after an `SMOD` into table mode.
 
@@ -1036,11 +1044,33 @@ def send_phases(
     for entry in method.boxes:
         box = boxes[entry.name]
         report(BoxReady(entry.name, entry.port, box.version()))
-        phases = (("setup", entry.setup),) if setup else ()
+        phases = (("setup", _setup_phase(entry.setup)),) if setup else ()
         for phase, commands in phases + (("load", entry.load), ("arm", entry.arm)):
             for command in commands:
                 _send(box, entry.name, phase, command, report,
                       arm_timeout=arm_timeout, verify_tables=verify_tables)
+
+
+def _setup_phase(commands: Sequence[str]) -> list[str]:
+    """A setup phase with `SMOD,LOC` ahead of it when one of its commands needs it.
+
+    `STBLCLK` and `STBLTRG` are LOC-mode only (`LOC_ONLY_SETUP`), so a box still armed
+    from the acquisition before refuses them — and `send_phases(setup=True)` is exactly
+    what the *second* acquisition from cold sends. A bench session met this by running
+    the loop twice against one box: the first send worked only because the line that
+    drove the enable low had left the box local, and the second was refused on its first
+    string (lab record, task 30).
+
+    The `load` and `arm` phases put the box back into table mode a moment later, so
+    dropping it out first costs nothing and is what "from cold" already meant. A setup
+    phase carrying no LOC-only command is returned untouched, so a method whose boxes
+    take only a frequency block sends exactly what it sent before.
+    """
+    heads = [command.split(",", 1)[0].strip().upper() for command in commands]
+    already = [part.strip().upper() for part in commands[:1]] == ["SMOD,LOC"]
+    if already or not LOC_ONLY_SETUP.intersection(heads):
+        return list(commands)
+    return ["SMOD,LOC", *commands]
 
 
 def _send(

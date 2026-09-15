@@ -710,12 +710,18 @@ def main() -> int:
         boxes = {"box1": mips_module.Box(transport=mips_module.FakeBox(), name="box1")}
         seen: list[acq.Event] = []
         acq.send_phases(recipe, boxes, progress=seen.append)
+        sent = [(event.phase, event.command) for event in seen
+                if isinstance(event, acq.PhaseSent)]
         check_true(
             "send_phases sends setup, load and arm in the method's order, and waits "
             "for the box to say it is ready",
-            [event.phase for event in seen if isinstance(event, acq.PhaseSent)]
-            == ["setup", "load", "arm"]
+            [phase for phase, _ in sent] == ["setup", "setup", "load", "arm"]
             and "TBLRDY" in seen[-1].detail,
+        )
+        check_true(
+            "and a setup phase carrying a LOC-only command drops the box out of table "
+            "mode first, so a second acquisition is not refused on its first string",
+            sent[0] == ("setup", "SMOD,LOC"),
         )
 
         with acq.FakeConsole(notify_on_scans_count=scans // 4) as fake:
