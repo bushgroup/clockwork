@@ -21,7 +21,16 @@ dependencies = [
     # task 06). It reaches PyPI never -- the wheel is a GitHub release asset --
     # so the source below is how a clone resolves it, and uv.lock pins the exact
     # commit. It becomes a tag at mainspring's next release.
-    "mainspring~=1.0",
+    #
+    # `[fast]` is numba, and it is not an optimisation to have later. Without it
+    # mainspring decodes a frame's five thousand blobs in a Python loop that holds
+    # the interpreter throughout, so the fold of one method frame costs about 1.5
+    # seconds per repetition against the 1 second a repetition itself now costs:
+    # the folding thread never catches up, and everything on the acquisition
+    # thread beside it -- a serial round trip, a row count -- takes ten times as
+    # long. With it the same fold is fifteen times quicker and the contention is
+    # gone (lab record, task 34).
+    "mainspring[fast]~=1.0",
     "pyserial~=3.5",
     "pyzmq~=27.2",
     "protobuf~=7.36",
