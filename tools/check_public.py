@@ -641,11 +641,16 @@ def main() -> int:
             and "TBLRDY" in seen[-1].detail,
         )
 
-        with acq.FakeConsole() as fake:
+        with acq.FakeConsole(notify_on_scans_count=scans // 4) as fake:
             # The stand-in publishes a frame from inside the handler for `acquire
             # frame`, so without a hold its batches race the start list the loop walks
             # to release that frame, and the enable-gate guard fires at random.
             fake.frame_hold_s = 0.05
+            # Four batches a frame with the last two after that frame's own `finished`,
+            # which is the console's ordering and the reason the loop waits for a frame
+            # to count out rather than taking `finished` for the end (lab record,
+            # task 34). A one-batch frame would exercise none of it.
+            fake.trailing_batches = 2
             with acq.DataStream(fake.data_endpoint) as stream, \
                     acq.Console(fake.command_endpoint) as console:
                 console.configure(offset_v=0.251)
@@ -661,9 +666,11 @@ def main() -> int:
                     and run.scans_published == scans * accumulations,
                 )
                 check_true(
-                    "and waited for the stream to fall silent before marking each "
-                    "frame complete",
-                    all(record.silence_seconds >= 0.3 for record in run.frames)
+                    "and waited for each frame to count out, batches trailing its own "
+                    "finished, before marking it complete",
+                    all(record.ended_by == "counted" for record in run.frames)
+                    and all(record.trailing_batches == 2 for record in run.frames)
+                    and all(record.wait_seconds < 0.3 for record in run.frames)
                     and all(UimfFile(run.raw_path).frame_params(n).marked_complete
                             for n in range(1, accumulations + 1)),
                 )

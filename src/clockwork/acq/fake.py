@@ -245,6 +245,31 @@ class FakeConsole:
         and the default of zero leaves every other caller's timing alone.
         """
 
+        self.trailing_batches = 0
+        """How many of a frame's batches to publish after that frame's own `finished`.
+
+        The console's ordering, which this stand-in otherwise cannot show: batches go out
+        from a subscriber thread on a 10 ms poll and `finished` from the acquisition
+        thread directly, so at full occupancy every batch of a frame arrives after the
+        frame has ended, the last of them as much as 9.5 s later (lab record, task 20).
+        Zero is the ordering every other test wants, where a frame is whole by the time
+        it says so.
+        """
+
+        self.final_batch_delay_s = 0.0
+        """Seconds to wait before publishing a frame's last batch.
+
+        The console's publisher falls behind its own acquisition at high occupancy, and
+        the gap between two consecutive batches of one frame reached 1.194 s on the bench
+        (lab record, task 34). A client that ends a frame on a silence has to be generous
+        against that gap rather than against the total, and this is how a test puts a gap
+        of a chosen size in front of the batch that completes the frame's scan count.
+
+        It is wall clock against a stand-in with no clock, like `frame_hold_s`, and it
+        moves only the last batch: a delay spread over every batch would be the console
+        being slow, which is not what the silence has to survive.
+        """
+
         self.frame_error: str | None = None
         """Published as `error <this>` before a frame's `finished`, if set.
 
@@ -264,6 +289,15 @@ class FakeConsole:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._gave_up: set[str] = set()
+        self._deferred: list[tuple[float, FrameRequest, int, int]] = []
+        """Batches owed to a frame that has already ended: when, whose, from where, how many.
+
+        Published by the serve thread between commands rather than from a thread of
+        their own, because one ZeroMQ socket belongs to one thread. That is also how the
+        console behaves from a client's side: its command thread answers `stop frame`
+        while its publisher is still working through the frame that just ended.
+        """
+
         self._timestamp = 0
         self.command_endpoint = ""
         self.data_endpoint = ""
@@ -316,6 +350,7 @@ class FakeConsole:
         poller.register(pub, zmq.POLLIN)
         try:
             while not self._stop.is_set():
+                self._flush_deferred()
                 ready = dict(poller.poll(20))
                 if ready.get(pub) == zmq.POLLIN:
                     self._note_subscription(pub.recv())
@@ -328,6 +363,14 @@ class FakeConsole:
         finally:
             router.close(linger=0)
             pub.close(linger=0)
+
+    def _flush_deferred(self) -> None:
+        """Publish whatever a frame that has already ended still owes and is due."""
+        while self._deferred and self._deferred[0][0] <= time.monotonic():
+            _, request, first_scan, scans = self._deferred.pop(0)
+            if request.file_name:
+                self._write_scans(request, first_scan, scans)
+            self._publish(TOPIC_DATA, encode_batch(self._batch(scans)))
 
     def _note_subscription(self, message: bytes) -> None:
         if not message:
@@ -541,22 +584,35 @@ class FakeConsole:
             # boxes and not to the console.
             time.sleep(self.frame_hold_s)
         remaining = int(request.frame_length)
-        published = 0
-        write_error: str | None = None
-        while remaining > 0 and (self.frame_batches is None or published < self.frame_batches):
+        sizes: list[int] = []
+        while remaining > 0 and (self.frame_batches is None or len(sizes) < self.frame_batches):
             scans = min(remaining, self.notify_on_scans_count)
-            if request.file_name and write_error is None:
-                # Written before the batch is published, which is the one
-                # ordering a real console never manages: there the rows trail
-                # their own `finished` by seconds. A client that must not read a
-                # frame before it is finalised is held to that by the completion
-                # marker, not by this.
-                write_error = self._write_scans(
-                    request, int(request.frame_length) - remaining, scans
-                )
-            self._publish(TOPIC_DATA, encode_batch(self._batch(scans)))
+            sizes.append(scans)
             remaining -= scans
-            published += 1
+        write_error: str | None = None
+        first_scan = 0
+        upfront = max(0, len(sizes) - self.trailing_batches)
+        for index, scans in enumerate(sizes):
+            if index >= upfront:
+                # Owed to the frame and published after its end, by the serve thread
+                # between commands. The last of them carries the whole delay, so that a
+                # test can put a gap of a chosen size in front of the batch that
+                # completes the frame's count.
+                due = time.monotonic() + (self.final_batch_delay_s
+                                          if index == len(sizes) - 1 else 0.0)
+                self._deferred.append((due, request, first_scan, scans))
+            else:
+                if self.final_batch_delay_s > 0 and index == len(sizes) - 1:
+                    time.sleep(self.final_batch_delay_s)
+                if request.file_name and write_error is None:
+                    # Written before the batch is published, which is the one
+                    # ordering a real console never manages: there the rows trail
+                    # their own `finished` by seconds. A client that must not read a
+                    # frame before it is finalised is held to that by the completion
+                    # marker, not by this.
+                    write_error = self._write_scans(request, first_scan, scans)
+                self._publish(TOPIC_DATA, encode_batch(self._batch(scans)))
+            first_scan += scans
         # The frame's scans are all in, so its thread ends and says so; the
         # handle stays unjoined until a `stop` arrives. An acquisition that
         # failed says the same thing, after saying what went wrong, which is

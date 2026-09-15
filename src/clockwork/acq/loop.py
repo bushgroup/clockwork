@@ -22,12 +22,14 @@ for begins on whatever push follows the request, and the tens of milliseconds th
 list costs in serial round trips become an offset instead of being invisible (lab
 record, task 05).
 
-**A frame is over when the stream falls silent, not when it says `finished`.** The
-console publishes batches from a subscriber thread and `finished` from the acquisition
-thread, and its writer is still inserting rows for a frame whose end has already gone
-out -- measured as much as 9.5 seconds later. So the completion marker is written after
-a silence, not at `finished`, and a fold that ran any earlier would fold a fraction of
-its frame (lab record, tasks 20 and 18).
+**A frame is over when it has counted out, not when it says `finished`.** The console
+publishes batches from a subscriber thread and `finished` from the acquisition thread,
+and its writer is a third thread still inserting rows for a frame whose end has already
+gone out. So the completion marker is written once every scan the frame asked for has
+arrived on the data socket and the file has stopped growing, and a fold that ran any
+earlier would fold a fraction of its frame (lab record, tasks 20, 18 and 34). A frame
+that never counts out ends on `SILENCE_S` instead, which is the fallback and is all
+there was until task 34 measured what it cost.
 
 **Three commands are read rather than relayed**, and only three. `STBLDAT` is streamed
 in paced chunks instead of written in one go, because the box has no flow control and
@@ -71,6 +73,7 @@ from .wire import (
     ConsoleAcquisitionError,
     ConsoleInfo,
     EmptyFrameError,
+    FrameRequest,
     Status,
     TofWidth,
 )
@@ -78,9 +81,11 @@ from .wire import (
 __all__ = [
     "ABORT_AFTER_FAILURES",
     "ARM_TIMEOUT_S",
+    "FRAME_POLL_S",
     "FRAME_TIMEOUT_FLOOR_S",
     "FRAME_TIMEOUT_SLACK",
     "GATE_PUBLISH_ALLOWANCE_S",
+    "ROW_SETTLE_S",
     "SILENCE_S",
     "START_STEP_GAP_S",
     "AcquisitionRefused",
@@ -113,15 +118,55 @@ carried. It is the one of the four names that is not the wire, which matters whe
 the two disagree: an `EnableGateError` is this module's judgement about batches
 `clockwork.acq.stream` recorded arriving, and both lines are in the file."""
 
-SILENCE_S = 6.0
-"""How long the data stream has to be quiet before a frame is taken to be over.
+SILENCE_S = 3.0
+"""How long the data stream has to be quiet before a frame that never counted out is over.
 
-Most of a frame's batches arrive after that frame's own `finished` and at full occupancy
-all of them do, the first measured 0.4 to 0.9 s after the end and the last as much as
-9.5 s after it (lab record, task 20). Six seconds is generous against the longest gap
-*between* messages rather than against that total, because the wait restarts on every
-one. Stopping earlier reports a frame as short when it was only slow, and writes the
-completion marker onto a frame the console is still filling.
+**The fallback, not the criterion.** A frame whose scans all arrive ends on the count
+(`_wait_for_frame`) and never waits this out; this is what ends a frame that stops short
+-- a gate trip, a refused start, an error on `status`, a batch the socket dropped -- and
+so never reaches its own `frame_length`.
+
+Three seconds is measured rather than chosen. Over 608 complete frames across three
+sessions, at occupancies from 0.1 % to past what the console can stream, the longest gap
+between two consecutive messages of a frame still delivering was **1.194 s** (lab record,
+task 34); three seconds is two and a half times that. It also clears the console's
+`AcquisitionTimeoutMs` of 2000 ms, so a short frame's own `error` line, which arrives
+about 1.97 s after its last batch, is read inside this wait rather than left for whoever
+waits next (lab record, task 35).
+
+It was six seconds until task 34, when it was the only criterion there was, and it was
+then the whole of the per-repetition dead time: the day's frames delivered their last
+batch 0.69 to 0.75 s after `acquire frame` and the loop waited a further six.
+"""
+
+FRAME_POLL_S = 0.050
+"""How often the wait for a frame's end looks at anything.
+
+One number for three cadences that have no reason to differ: how often the file's row
+count is re-read, how often the boxes' serial ports are drained so that a status line is
+timestamped near when it arrived, and how finely the silence above is measured. Fifty
+milliseconds is comfortably shorter than a batch at the instrument's period (64.5 ms) and
+long enough that reading the row count is not itself part of what is being measured.
+"""
+
+ROW_SETTLE_S = 0.200
+"""How long the file's row count has to hold still before the frame is called written.
+
+The console's writer is a second subscriber on a queue of its own, so the data socket
+having delivered every scan says nothing about how far the writer has got
+(`docs/console-protocol.md`, "Division of UIMF writing"). Nor can the rows be counted
+out: a push that crossed the threshold nowhere stores no row, so a real frame holds fewer
+rows than scans and there is no total to compare against. What is left is the pause, and
+this is how long a pause is taken for an answer.
+
+**Provisional, and the loop now measures the number that replaces it.** Every frame
+records `settle_seconds`, how long after the last scan arrived the row count last moved,
+which is the measurement the BUFFLEHEAD day could not make: it read the row count twice,
+six seconds apart, and saw the writer no more than one batch behind (0 or 500 rows) without
+ever learning how long that batch took. Two hundred milliseconds is three times a batch at
+the instrument's period and inside the 350 ms per repetition this may spend (Matt,
+2026-09-14); the rig replaces it with the measured settle plus a margin (lab record,
+task 34 step 6).
 """
 
 START_STEP_GAP_S = 0.020
@@ -395,12 +440,30 @@ class FrameRecord:
     scans_after_finished: int = 0
     trailing_batches: int = 0
     rows_at_finished: int | None = None
-    rows_after_silence: int | None = None
+    rows_at_end: int | None = None
     started_s: float = 0.0
     """When the frame began, on the run's clock."""
 
     seconds: float = 0.0
-    silence_seconds: float = 0.0
+    wait_seconds: float = 0.0
+    """How long the loop waited after `finished` for the frame to be over."""
+
+    ended_by: str = ""
+    """`"counted"` or `"silence"`, which of the two rules ended the wait.
+
+    `"counted"` is the ordinary end: every scan the frame asked for arrived and the file
+    stopped growing. `"silence"` says the frame never reached its own `frame_length` and
+    the fallback ended it, so the file may hold less than the frame asked for whatever
+    the outcome says. A run whose frames all say `"silence"` is a run to look at.
+    """
+
+    settle_seconds: float | None = None
+    """How long after the last scan arrived the file's row count last moved.
+
+    None on a frame that ended on the silence, which never reached the count, or whose
+    rows could not be read. This is what `ROW_SETTLE_S` should be derived from and is not
+    yet: nothing measured the console's writer in time before task 34.
+    """
 
     @property
     def acquired(self) -> bool:
@@ -413,9 +476,9 @@ class FrameRecord:
         The fold's whole timing constraint, and nothing else in the system measures it.
         None where either count could not be read.
         """
-        if self.rows_at_finished is None or self.rows_after_silence is None:
+        if self.rows_at_finished is None or self.rows_at_end is None:
             return None
-        return self.rows_after_silence - self.rows_at_finished
+        return self.rows_at_end - self.rows_at_finished
 
     @property
     def text(self) -> str:
@@ -424,11 +487,13 @@ class FrameRecord:
             late = f", {self.scans_after_finished} of them after its own finished"
         lag = self.writer_lag_rows
         rows = f", {lag} rows written after it" if lag else ""
+        fell_back = ", ended on the silence" if self.ended_by == "silence" else ""
         if not self.acquired:
             return (f"frame {self.method_frame}.{self.repetition}: {self.outcome}: "
                     f"{self.detail}")
         return (f"frame {self.method_frame}.{self.repetition}: "
-                f"{self.scans_published} scans in {self.seconds:.3f} s{late}{rows}")
+                f"{self.scans_published} scans in {self.seconds:.3f} s"
+                f"{late}{rows}{fell_back}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -695,6 +760,8 @@ def run_acquisition(
     progress: Callable[[Event], None] | None = None,
     frame_timeout: float | None = None,
     silence: float = SILENCE_S,
+    row_settle: float = ROW_SETTLE_S,
+    frame_poll: float = FRAME_POLL_S,
     empty_settle: float = EMPTY_SETTLE_S,
     arm_timeout: float = ARM_TIMEOUT_S,
     start_step_gap: float = START_STEP_GAP_S,
@@ -733,11 +800,17 @@ def run_acquisition(
 
     `frame_timeout` defaults to twice how long the frame should take plus a floor, which
     is derived from the pusher period the console measured; the constants say why one
-    fixed number will not do. `silence` is how long the data stream has to be quiet
-    before a frame is over, and `empty_settle` how long a frame that published nothing
+    fixed number will not do. `empty_settle` is how long a frame that published nothing
     is given to prove otherwise before it is called empty. `start_step_gap` separates
     the start list's steps in time as well as in order, which the ARB boxes need and
     which two consecutive serial writes do not supply.
+
+    **A frame ends when it has counted out**, which is `row_settle` after the last of
+    its `frame_length` scans arrived and the file stopped growing, and a frame that never
+    counts out ends `silence` after the last thing the console said. `frame_poll` is the
+    cadence all three are measured on and is also how often the boxes' ports are drained,
+    which is what dates a box's status line to when it arrived rather than to the end of
+    the frame. The three constants carry the measurements behind them.
 
     `guard_gate` is the enable-gate check, in its two halves, and turning it off turns
     off both: the run's first frame is held open for `gate_dwell` seconds before anything
@@ -806,7 +879,8 @@ def run_acquisition(
             method=method, boxes=boxes, console=console, stream=stream,
             recording=recording, report=report, silence=silence,
             empty_settle=empty_settle, arm_timeout=arm_timeout, guard_gate=guard_gate,
-            start_step_gap=start_step_gap,
+            start_step_gap=start_step_gap, row_settle=row_settle,
+            frame_poll=frame_poll,
             gate_dwell=(gate_dwell if gate_dwell is not None
                         else _gate_dwell(recording.geometry)),
             rearm_with_reset=rearm_with_reset, abort_after=abort_after,
@@ -946,6 +1020,8 @@ class _Loop:
     started: float
     gate_dwell: float
     start_step_gap: float = START_STEP_GAP_S
+    row_settle: float = ROW_SETTLE_S
+    frame_poll: float = FRAME_POLL_S
 
     frames: list[FrameRecord] = field(default_factory=list)
     folds: list[FoldRecord] = field(default_factory=list)
@@ -1095,7 +1171,8 @@ class _Loop:
             try:
                 run_frame(self.console, self.stream, request,
                           timeout=self.frame_timeout, on_batch=on_batch,
-                          release=release, settle=self.empty_settle)
+                          release=release, tick=self._note_box_events,
+                          settle=self.empty_settle)
             except (StreamTimeout, EmptyFrameError, ConsoleAcquisitionError,
                     EnableGateError, MipsError) as exc:
                 # An outcome, not an escape. `run_frame` has already sent its
@@ -1110,9 +1187,11 @@ class _Loop:
 
             scans_before = sum(batch.scans for batch in seen)
             rows_at_finished = self.recording.rows_in(request.frame_number)
-            silence_began = self.clock()
-            trailing = self._drain_to_silence(on_batch)
-            silence_seconds = self.clock() - silence_began
+            wait_began = self.clock()
+            trailing, ended_by, settle_seconds = self._wait_for_frame(
+                request, seen, on_batch
+            )
+            wait_seconds = self.clock() - wait_began
             rows_after = self.recording.rows_in(request.frame_number)
         finally:
             # The completion marker last, after the console has stopped writing to this
@@ -1131,10 +1210,12 @@ class _Loop:
             scans_after_finished=sum(batch.scans for batch in seen) - scans_before,
             trailing_batches=trailing,
             rows_at_finished=rows_at_finished,
-            rows_after_silence=rows_after,
+            rows_at_end=rows_after,
             started_s=began - self.started,
             seconds=self.clock() - began,
-            silence_seconds=silence_seconds,
+            wait_seconds=wait_seconds,
+            ended_by=ended_by,
+            settle_seconds=settle_seconds,
         )
         self.frames.append(record)
         self.report(FrameEnded(record))
@@ -1150,26 +1231,89 @@ class _Loop:
                 f"{record.outcome}: {record.detail}"
             )
 
-    def _drain_to_silence(self, on_batch: Callable[[Batch], None]) -> int:
-        """Keep reading until the stream has said nothing for `silence` seconds.
+    def _wait_for_frame(
+        self,
+        request: FrameRequest,
+        seen: Sequence[Batch],
+        on_batch: Callable[[Batch], None],
+    ) -> tuple[int, str, float | None]:
+        """Wait until the frame is over, and say which of the two rules ended it.
 
-        A frame's batches mostly arrive after its own `finished` and the console's
-        writer trails even those, so this is what makes a frame's scan count the frame's
-        and lets the completion marker mean something. It doubles as the precondition
-        for the next frame's gate guard: what the guard sees has to be this frame's
-        doing, not the last one's backlog.
+        A frame's batches mostly arrive after its own `finished` and the console's writer
+        trails even those, so waiting is what makes a frame's scan count the frame's and
+        lets the completion marker mean something. It doubles as the precondition for the
+        next frame's gate guard: what the guard sees has to be this frame's doing, not
+        the last one's backlog. What changed in task 34 is not that the loop waits but
+        what it waits *for*.
+
+        **The frame has counted out**, which is the ordinary end: the data socket has
+        delivered `frame_length` scans for this frame, so nothing more is coming on that
+        link, and the file's row count has then held still for `ROW_SETTLE_S`, which is
+        the console's other subscriber saying it has caught up. Both halves are needed.
+        The count alone says nothing about the writer, which is a separate thread behind
+        a queue of its own; the pause alone cannot tell a writer that has finished from
+        one that is between batches.
+
+        The row count is a pause and not a total on purpose. The console writes a row for
+        a scan whose encoded spectrum holds more than one element, and for scan 0
+        whatever it holds, so a push that crossed the zero suppress threshold nowhere
+        stores no row and a real frame holds fewer rows than it has scans
+        (`docs/console-protocol.md`, "Division of UIMF writing"). There is no number to
+        count up to. That same rule is why an unreadable count is not settled on: any
+        frame that acquired its first scan has at least one row, so `rows_in` answering
+        None means the file cannot be read rather than that the frame is empty, and the
+        silence below is the right end for a frame nothing can be learned about.
+
+        **The stream has fallen silent** for `SILENCE_S`, which ends a frame that never
+        reaches its count: a gate trip, a refused start, an error on `status`, a batch
+        the socket dropped. It is also the backstop for a frame that counted out and
+        whose rows could not be read, which is a file that cannot be opened rather than
+        a frame with nothing in it; that frame is reported as counted with no settle.
+
+        Returns the trailing batches, which of the two ended it, and how long after the
+        count completed the file's row count last moved (`FrameRecord.settle_seconds`).
         """
+        asked = int(request.frame_length)
+        frame = request.frame_number
+        began = time.perf_counter()
+        quiet_since = began
         trailing = 0
-        quiet_since = time.perf_counter()
-        while time.perf_counter() - quiet_since < self.silence:
-            event = self.stream.poll(0.2)
+        counted_at: float | None = None
+        rows = self.recording.rows_in(frame)
+        rows_moved_at = began
+        while True:
+            # First, so that a box event raised during the frame is timestamped within
+            # a poll of arriving rather than at the end of this wait (lab record,
+            # task 34). The ports are read without blocking.
+            self._note_box_events()
+            if counted_at is None and sum(batch.scans for batch in seen) >= asked:
+                counted_at = time.perf_counter()
+            poll_for = self.frame_poll
+            if counted_at is not None:
+                now = time.perf_counter()
+                reading = self.recording.rows_in(frame)
+                if reading is not None and reading != rows:
+                    rows, rows_moved_at = reading, now
+                elif reading is not None and now - rows_moved_at >= self.row_settle:
+                    return trailing, "counted", max(0.0, rows_moved_at - counted_at)
+                if reading is not None:
+                    # Wake when the settle is due rather than on the next whole poll.
+                    # The settle is the largest part of what a repetition now costs, so
+                    # a poll's worth of overshoot on top of it is a quarter of the
+                    # budget (lab record, task 34).
+                    poll_for = min(poll_for, self.row_settle - (now - rows_moved_at))
+            if time.perf_counter() - quiet_since >= self.silence:
+                # The backstop, and the only end a frame short of its count has. A frame
+                # that counted out and got here instead could not have its rows read at
+                # all, which `settle_seconds` of None is the sign of.
+                return trailing, ("counted" if counted_at is not None else "silence"), None
+            event = self.stream.poll(max(0.0, poll_for))
             if event is None:
                 continue
             quiet_since = time.perf_counter()
             if isinstance(event, Batch):
                 trailing += 1
                 on_batch(event)
-        return trailing
 
     def _lower_enable(self, method_frame: int, repetition: int) -> None:
         """Put the digitizer's gate down by command, before the frame is asked for.

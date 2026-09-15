@@ -218,6 +218,17 @@ file with the full schema and parameters before the first `acquire frame`, and o
 parameter value. SQLite's journal mode is a property of the file, so a client that creates it in
 WAL mode gets WAL on the console's connection too.
 
+**A frame's row count is not its scan count.** The writer inserts a row for a scan whose encoded
+spectrum holds more than one element, and for scan 0 whatever it holds, so a push that crossed
+the zero suppress threshold nowhere stores no row at all. A finished frame therefore holds at
+most `frame_length` rows and on a real separation holds fewer, and no client can decide that a
+frame has been written by comparing the two numbers. What is left to a client that has to make
+that decision is the shape of the writing rather than its total: rows arrive one transaction per
+batch, in scan order, on a thread of the console's own, so a row count that has stopped changing
+is the evidence that the writer has caught up, and the client chooses how long a pause it will
+take for an answer. Note that the two subscribers are independent, so the data socket having
+delivered every scan of a frame says nothing on its own about how far the writer has got.
+
 `BPI_MZ` holds the m/z of the base peak's bin, which the fork computes from the calibration the
 frame's own `Frame_Params` state and the `BinWidth` in `Global_Params`. Both are in the file
 before `acquire frame`, because the client writes a frame's parameters and then asks for the
@@ -228,8 +239,9 @@ column defined as m/z.
 
 ## Accumulations
 
-The console writes **one scan row per trigger**. A frame acquired with `frame_length` = 5000 and
-`nbr_accumulations` = 100 yields 5000 rows, each one pusher pulse, and stores 100 as a number.
+The console writes **one scan row per trigger that stored anything**, and never more than one. A
+frame acquired with `frame_length` = 5000 and `nbr_accumulations` = 100 yields up to 5000 rows,
+each one pusher pulse, and stores 100 as a number.
 Files written today by FALKOR through the older U1084A hold, per scan, the sum over 100 pushes.
 Summing passes per scan is therefore the client's or a modified console's job; the console has
 commented-out code that once cloned a frame per accumulation, so the authors met the same

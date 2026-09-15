@@ -138,6 +138,7 @@ def run_frame(
     timeout: float,
     on_batch: Callable[[Batch], None] | None = None,
     release: Callable[[], None] | None = None,
+    tick: Callable[[], None] | None = None,
     allow_empty: bool = False,
     settle: float = EMPTY_SETTLE_S,
 ) -> Status:
@@ -156,6 +157,12 @@ def run_frame(
     `try`, so a release that raises still leaves the console stopped and
     ready for the next frame. What to put in it is `clockwork.acq.loop`'s
     business, not this module's: nothing here knows what a box is.
+
+    `tick` is called repeatedly while the wait runs, for a caller with
+    another link to service, and the same goes for what nothing here knows:
+    on this instrument it drains the boxes' serial ports so that a status
+    line a box raised during the frame is timestamped when it arrived
+    (`DataStream.wait_for_status`).
 
     Returns the `finished` that ended the frame, and raises rather than
     returning it in three cases:
@@ -185,7 +192,8 @@ def run_frame(
     try:
         if release is not None:
             release()
-        status = stream.wait_for_status(FINISHED, timeout=timeout, on_batch=on_batch)
+        status = stream.wait_for_status(FINISHED, timeout=timeout, on_batch=on_batch,
+                                        on_idle=tick)
     finally:
         console.stop_frame()
     if stream.scans == scans_before and not allow_empty:

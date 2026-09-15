@@ -10,9 +10,12 @@ assertion about them:
   to release that frame. Every test that is not about the gate guard sets a hold, and the
   one that is about it sets none and makes the start list slow instead.
 * **Its writer never lags its publisher.** Rows go into the file before each batch goes
-  on the wire, so `rows_at_finished` and `rows_after_silence` are always equal here. What
-  can still be asserted is that the loop waited for the silence before it wrote the
-  completion marker, which is the ordering the lag makes necessary.
+  on the wire, so `rows_at_finished` and `rows_at_end` are always equal here and the row
+  count has stopped moving before the last scan arrives. What can still be asserted is
+  which rule ended each frame and that the completion marker came after it, which is the
+  ordering the lag makes necessary. It also writes no row for one scan in every sixteen,
+  which is the console's own rule and the reason a frame cannot be called written by
+  counting its rows up to `frame_length`.
 * **A box with no ARB modules NAKs the whole ARB command set**, with the firmware's own
   code for it, which is what the bench box did. The golden methods are written for boxes
   that have modules, so their fixtures are given some; what the stand-in then does with a
@@ -64,8 +67,17 @@ ACCUMULATIONS = 3
 SILENCE = 0.3
 """Long enough to be a silence against the fake, short enough to run a test suite in.
 
-The instrument's number is `acq.SILENCE_S`, six seconds, and it is a measurement of the
-console's publisher rather than a preference.
+The instrument's number is `acq.SILENCE_S`, three seconds, and it is the longest gap
+ever measured between two messages of a frame that was still delivering, with margin,
+rather than a preference. It is the fallback: a frame that counts out never reaches it.
+"""
+
+ROW_SETTLE = 0.05
+"""How long the file's row count has to hold still, against the stand-in.
+
+The instrument's number is `acq.ROW_SETTLE_S`, 200 ms. The fake writes each batch's rows
+before publishing it, so its file is never behind and any value settles at once; what
+this buys the suite is that the ordinary end of a frame costs one poll rather than four.
 """
 
 HOLD = 0.05
@@ -210,6 +222,7 @@ class Rig:
 
     def acquire(self, method, boxes, **kwargs):
         kwargs.setdefault("silence", SILENCE)
+        kwargs.setdefault("row_settle", ROW_SETTLE)
         kwargs.setdefault("empty_settle", 0.3)
         kwargs.setdefault("gate_dwell", DWELL)
         kwargs.setdefault("post_trigger_samples", self.fake.post_trigger_samples)
@@ -232,6 +245,28 @@ class Rig:
 @pytest.fixture
 def rig(tmp_path):
     with Rig(tmp_path) as running:
+        yield running
+
+
+BATCH_SCANS = 8
+"""Scans per batch in the `batched` rig below, so that `SCANS` is four of them.
+
+The stand-in's default batch is 100 scans and a test frame is 32, so every other test
+here runs a frame that is one whole batch and can say nothing about the order batches
+and `finished` arrive in. That order is the whole subject of the wait for a frame's end.
+"""
+
+
+@pytest.fixture
+def batched(tmp_path):
+    """A rig whose frames are four batches, with the last two trailing `finished`.
+
+    Which is the console's ordering and not this stand-in's default: batches go out from
+    a subscriber thread and `finished` from the acquisition thread, so a frame's last
+    batches arrive after the frame has ended (lab record, task 20).
+    """
+    with Rig(tmp_path, notify_on_scans_count=BATCH_SCANS) as running:
+        running.fake.trailing_batches = 2
         yield running
 
 
@@ -406,21 +441,175 @@ def test_the_console_is_asked_for_a_frame_before_the_start_list_is_walked(rig, t
     assert pairs == [("console", "acquire frame"), ("box", "TBLSTRT")] * ACCUMULATIONS
 
 
-def test_a_frame_is_over_when_the_stream_falls_silent_not_when_it_says_finished(rig):
+def test_a_frame_is_over_when_it_has_counted_out_not_when_it_says_finished(rig):
     """The completion marker is the only thing in the file that tells a frame that
     finished from one that was cut off, and the console is still inserting rows for a
-    frame whose `finished` has gone out (lab record, task 20)."""
+    frame whose `finished` has gone out (lab record, tasks 20 and 34)."""
     method = make_method(accumulations=1)
     boxes = make_boxes(BOX)
     send_phases(method, boxes)
     run = rig.acquire(method, boxes)
     record = run.frames[0]
-    assert record.silence_seconds >= SILENCE
+    assert record.ended_by == "counted"
+    assert record.scans_published == SCANS
+    # The whole point of the change: a frame that counted out never waits the fallback
+    # out. Against the stand-in the wait is one poll and a settle.
+    assert record.wait_seconds < SILENCE
+    assert record.settle_seconds == 0.0
     assert record.rows_at_finished is not None
-    assert record.rows_after_silence is not None
+    assert record.rows_at_end is not None
     # The stand-in writes each batch's rows before publishing it, so it has no lag to
     # find; what is asserted is that both counts were taken and the second came later.
     assert record.writer_lag_rows == 0
+    assert UimfFile(run.raw_path).frame_params(1).marked_complete
+
+
+def test_a_frame_is_not_over_while_its_batches_are_still_arriving(batched):
+    """The ordering that makes the wait necessary at all: two of the frame's four
+    batches arrive after its own `finished`, and the frame is whole only because the
+    loop kept listening."""
+    method = make_method(accumulations=1)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = batched.acquire(method, boxes)
+    record = run.frames[0]
+    assert record.trailing_batches == 2
+    assert record.scans_after_finished == 2 * BATCH_SCANS
+    assert record.ended_by == "counted"
+    assert record.scans_published == SCANS
+    assert record.wait_seconds < SILENCE
+
+
+def test_a_frame_that_stops_short_falls_back_to_the_silence(batched):
+    """A frame that never reaches its own `frame_length` cannot count out, and the
+    silence is what ends it. The scans it did publish are still its own."""
+    batched.fake.frame_batches = 3
+    method = make_method(accumulations=1)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = batched.acquire(method, boxes)
+    record = run.frames[0]
+    assert record.ended_by == "silence"
+    assert record.settle_seconds is None
+    assert 0 < record.scans_published < SCANS
+    assert record.wait_seconds >= SILENCE
+    # Short is not the same as failed: the console ended the frame the way it ends a
+    # whole one, and nothing the loop can see says otherwise (`session.run_frame`).
+    assert record.acquired
+    assert "ended on the silence" in record.text
+
+
+def test_a_last_batch_later_than_a_batch_is_waited_for_and_still_counts_out(batched):
+    """The count survives a console that is slow, which is the case the six-second
+    silence covered by waiting six seconds on every frame. The gap here is four times a
+    poll and well inside the fallback."""
+    batched.fake.final_batch_delay_s = 0.2
+    method = make_method(accumulations=1)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = batched.acquire(method, boxes)
+    record = run.frames[0]
+    assert record.ended_by == "counted"
+    assert record.scans_published == SCANS
+    assert record.wait_seconds >= 0.2
+
+
+def test_a_last_batch_later_than_the_silence_is_the_gap_the_fallback_is_set_against(
+    batched,
+):
+    """The one thing shortening the fallback costs, stated as a test rather than left to
+    be met on an instrument. A frame quiet for longer than `silence` before its last
+    batch ends on the fallback, and the batch that would have completed its count
+    arrives too late to be counted, so the fallback has to clear the largest gap a
+    delivering frame has ever shown: 1.194 s against 3 s (lab record, task 34)."""
+    batched.fake.final_batch_delay_s = SILENCE * 2
+    method = make_method(accumulations=1)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = batched.acquire(method, boxes)
+    record = run.frames[0]
+    assert record.ended_by == "silence"
+    assert record.scans_published < SCANS
+
+
+def assert_companion_sums_the_raw_file(run, method_frame=1):
+    """The fold's contract: the companion holds the sum of the raw frames it folded.
+
+    Stated against the raw file rather than against `ACCUMULATIONS` times one
+    repetition, because a run whose repetitions were cut short at different places has
+    no single repetition to multiply, and it is exactly that run the fold has to keep
+    honest. This is what `uimf-info --verify` checks on the bench.
+    """
+    raw, summed = UimfFile(run.raw_path), UimfFile(run.summed_path)
+    numbers = [record.frame_number for record in run.frames
+               if record.method_frame == method_frame and record.acquired]
+    folded = [raw.read_frame(number) for number in numbers]
+    total = summed.read_frame(method_frame)
+    assert len(total) > 0
+    for scan in range(summed.frame_params(method_frame).scans):
+        values: dict[int, int] = {}
+        for frame in folded:
+            for at, value in zip(*frame.scan(scan), strict=True):
+                values[at] = values.get(at, 0) + value
+        assert dict(zip(*total.scan(scan), strict=True)) == {
+            at: v for at, v in values.items() if v
+        }, (
+            f"scan {scan} of method frame {method_frame}"
+        )
+
+
+def test_the_fold_is_exact_however_the_frames_ended(batched):
+    """The equality the fold owes, on a run whose frames counted out and on one whose
+    frames were cut short by the fallback. A fold that ran before a frame was written
+    would be short here rather than wrong, which is why it is asserted per scan."""
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    counted = batched.acquire(method, boxes, stem="260911_TEST_COUNTED")
+    assert {record.ended_by for record in counted.frames} == {"counted"}
+    assert_companion_sums_the_raw_file(counted)
+
+    # A run in which the console's last batch is later than the fallback. The frames
+    # that end on it are short, and the backlog bleeds into the repetition after, which
+    # is the console's own behaviour and what the next frame's gate guard exists for.
+    batched.fake.final_batch_delay_s = SILENCE * 2
+    fell_back = batched.acquire(method, boxes, stem="260911_TEST_SILENCE")
+    assert "silence" in {record.ended_by for record in fell_back.frames}
+    assert_companion_sums_the_raw_file(fell_back)
+
+
+def test_the_boxes_are_read_while_the_frame_runs_and_not_after_it(batched):
+    """A box raises `TBLTRIG` at its table's first tick and `TBLCMPLT` at its last, and
+    an event's only timestamp is when the host read the port. Until task 34 the loop
+    drained the ports after each frame's wait, so every box event on the BUFFLEHEAD day
+    was dated seconds late and the day's first reading of the transcripts was wrong.
+    """
+    marks: list[str] = []
+
+    class WatchedBox(FakeBox):
+        def write(self, data: bytes) -> None:
+            marks.append("wrote " + data.decode("ascii", "replace").strip())
+            super().write(data)
+
+        def read_some(self, timeout: float) -> bytes:
+            marks.append("read")
+            return super().read_some(timeout)
+
+    boxes = make_boxes(BOX, transport=WatchedBox)
+    method = make_method(accumulations=1)
+    send_phases(method, boxes)
+    marks.clear()
+    batched.acquire(method, boxes, progress=lambda e: marks.append(type(e).__name__))
+
+    released = marks.index("wrote TBLSTRT")
+    ended = marks.index("FrameEnded")
+    said = [at for at, mark in enumerate(marks) if mark == "BoxSaid"]
+    assert said and max(said) < ended, "a box event was reported after its frame ended"
+    assert released < min(said)
+    # And the ports were polled through the wait rather than read once at the end of
+    # it. The frame is four batches, two of them after its own `finished`, so a wait
+    # that reads the ports on its own cadence reads them several times over.
+    assert marks[released:ended].count("read") >= 3
 
 
 def test_the_progress_stream_reports_every_stage_in_order(rig):

@@ -227,6 +227,7 @@ class DataStream:
         *,
         timeout: float,
         on_batch: Callable[[Batch], None] | None = None,
+        on_idle: Callable[[], None] | None = None,
         raise_on_error: bool = True,
     ) -> Status:
         """Wait for one status message, handing batches to `on_batch` meanwhile.
@@ -258,10 +259,23 @@ class DataStream:
         wait times out instead, since an error already seen says more about
         why than a timeout does. Pass `raise_on_error=False` to collect
         without raising, which is for a caller doing its own recovery.
+
+        `on_idle` is called once per poll, which is at least ten times a second,
+        and it is for a caller with a second link to service while this one is
+        the only one being read. On this instrument that link is the boxes'
+        serial ports: a box raises `TBLTRIG` at its table's first tick and
+        `TBLCMPLT` at its last, nothing reads the port while a frame runs, and
+        an event's only timestamp is when it was read, so a frame waited out
+        with no one servicing the ports dates every box event to the end of the
+        wait (lab record, task 34). It runs on the calling thread between
+        polls, so what goes in it has to be non-blocking; anything it raises
+        propagates and leaves the wait unfinished.
         """
         deadline = time.monotonic() + timeout
         errors: list[Status] = []
         while True:
+            if on_idle is not None:
+                on_idle()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 if errors and raise_on_error:

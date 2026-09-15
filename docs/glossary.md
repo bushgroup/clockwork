@@ -172,7 +172,8 @@ Three terms carry more than one sense and are given both in one entry: *table*, 
   file, and every row it writes carries that frame number.
 - **Accumulation.** Two senses, and the difference matters. Files written today by FALKOR hold, per
   scan, the sum over many pushes. Through the console `nbr_accumulations` is stored on the frame
-  parameters and never applied, one row per trigger, so summing belongs to the client. What a
+  parameters and never applied, one row per trigger that stored anything, so summing belongs to
+  the client. What a
   method's `accumulations` count means on the wire is a question for the lab record on accumulation
   semantics rather than for these documents.
 - **Batch.** The `NotifyOnScansCount` scans, 500 by default, that the console publishes and writes
