@@ -301,6 +301,17 @@ ramping, `65` initial). Details:
   (64+chan) sets the start value, `RAMP` (128+chan) adds a delta per
   execution, used inside loops, including conditional `P` loops.
 
+A numeric token takes the DC bias path, which stores the channel byte
+zero-based and converts the value to DAC counts, only when the channel
+number left after the flag bits are stripped is itself a DC bias
+channel. `Table.cpp: ParseEntry()` tests
+`((i >= 1 && i <= 32) || (i & (RAMP | INITIAL))) && (((i - 1) & 0x20) == 0)`,
+and the second half of that test is what keeps the ARB channels out of
+the DC bias path. `101` through `108` carry the `INITIAL` bit as a side
+effect of being the ASCII codes of `e` through `l`, and the base
+channels they would otherwise imply, 37 through 44, are past the
+32-channel DC bias range.
+
 Conditional (`P`-named) loops: a `=:n:`, `>:n:` or `<:n:` prefix gates
 only the immediately following `Channel:Value` pair on the loop counter;
 two comparisons in a row AND together (`>:25:<:30:7:43.2`). In `P`
@@ -377,6 +388,21 @@ typedef struct {          // one per Channel:Value pair
   as `Chan = n - 1`, so DCB channel 1 appears in the dump as `Chan = 0`.
   Every other channel class stores its token as written: RF `33`-`36`,
   ARB `101`-`108`, and the character channels as their ASCII codes.
+- **The ARB channels store as written only from firmware 1.262.**
+  Firmware 1.242 (11 February 2024) added the `INITIAL` flag to the DC
+  bias test without the `(i - 1) & 0x20` guard above, and every token
+  from `101` to `108` carries that flag, so those releases send these
+  channels down the DC bias path: the channel byte is stored as the
+  token less one, `101` landing on 100 and `108` on 107, and the value
+  is converted to DAC counts rather than kept as float bits. The guard
+  is dated 17 February 2026 in `Table.cpp`, and the 1.262 release note
+  of 7 February 2026 records a fix to the ARB aux output in the timing
+  generator, so the repair lands in the 1.262 to 1.263 window and the
+  affected releases are 1.242 through 1.261 at least. A box in that
+  window round-trips these channels one lower than this document and
+  one lower than any host predicting from it, which is what a `TBLRPT`
+  comparison on a 1.243t box reports (§7). Read `GVER` before trusting
+  such a comparison on channels `101` to `108`.
 - Loop-closing `]` is stored as a TableEntry (`Chan = ']'`) and
   interpreted at run time against a 5-deep nesting stack.
 - **A leading offset costs a whole table.** `offset:[...` with a non-zero
@@ -1156,6 +1182,13 @@ values into hardware. Consequences for the compiler:
   don't use them where µs alignment matters.
 - Values are volts (±50 aux; A/B offsets are board-bias values), sent
   as floats; no parse-time range check, so the compiler must validate.
+- The channel byte these events are stored under, and the encoding of
+  their value, are firmware dependent below 1.262; see §2. Run-time
+  dispatch reads the stored byte, so on an affected box a `101` event
+  executes as a `d` event and adds a DAC count to `TimeDelta`, and
+  `102` through `108` each drive the channel below the one written
+  with a value whose float bits are a DAC frame. Do not send these
+  channels to a box below 1.262.
 
 **Direct pin writes at LDAC (`r`, `s`) and compressor start (`c:A`):**
 tick-accurate as described in §6.3. `c:A` calls
@@ -1315,7 +1348,12 @@ exists, rather than a one-off manual check:
   so it must be inspected/set at the box and persisted with Save.
 - Whether `101`–`108` (ARB aux/offset) events land on-tick under load.
   The TWI commit can slip (§6.5); a test should stress event spacing
-  against these channels.
+  against these channels. **Attempted and not measured, 2026-09-14**
+  (lab record, task 10): the stress table round-tripped one channel
+  lower than predicted at every spacing tried, on the 1.243t box above,
+  and the comparison failed on the channel byte before it reached the
+  timing question. §2 now carries the firmware rule that accounts for
+  it. Repeat the measurement on a box at 1.262 or later.
 - Exact usable event-rate ceiling for our typical event shapes (few DCB
   channels + DIO per time point). Derive from the per-channel budgets
   above, then have a test sweep spacing and check `TBLCHK`/response

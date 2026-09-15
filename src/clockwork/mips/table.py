@@ -453,7 +453,15 @@ class _Compiler:
         return Entry(number & 0xFF, _float_bits(value), ValueKind.FLOAT)
 
 def _is_dc_bias(number: int) -> bool:
-    """The firmware's own test for "convert this to DAC counts"."""
+    """The firmware's own test for "convert this to DAC counts".
+
+    The second clause is what keeps the ARB channels 101-108 out: they carry
+    the `INITIAL` bit, so the flag test alone would claim them. Firmware 1.242
+    through 1.261 lacks that clause and does claim them, storing each one byte
+    lower with a DAC frame for a value (§2). This models 1.262 and later, so a
+    round trip against a box below that disagrees on exactly those channels,
+    which is a firmware difference and not a prediction error.
+    """
     if not (1 <= number <= 32 or number & (_RAMP | _INITIAL)):
         return False
     return ((number - 1) & 0x20) == 0

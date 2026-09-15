@@ -284,6 +284,25 @@ def test_arb_channels_store_float_bits() -> None:
     assert entry.render_value() == "12.5"
 
 
+def test_arb_channels_store_the_token_as_written_not_zero_based() -> None:
+    # The encoding a 1.262-or-later box uses, pinned because 101-108 carry the
+    # INITIAL flag bit and older firmware routes them into the DC bias path,
+    # one byte lower and with a DAC frame for a value (docs §2).
+    string = "STBLDAT;0:[A:1,10:" + ":".join(f"{c}:1.5" for c in range(101, 109)) + ",100:];"
+    entries = compile_table(string).tables[0].points[0].entries
+    assert [entry.chan for entry in entries] == list(range(101, 109))
+    assert all(entry.kind is ValueKind.FLOAT for entry in entries)
+    assert all(entry.render_value() == "1.5" for entry in entries)
+
+
+def test_flagged_dc_bias_channels_still_take_the_dac_path() -> None:
+    # The other side of the same test: INITIAL and RAMP on a real DC bias
+    # channel are stored zero-based with an unpredictable DAC value.
+    entries = compile_table("STBLDAT;0:[A:1,10:65:1.0:129:0.5,100:];").tables[0].points[0].entries
+    assert [(entry.chan, entry.value) for entry in entries] == [(64, None), (128, None)]
+    assert all(entry.kind is ValueKind.DAC for entry in entries)
+
+
 def test_the_trigger_channel_stores_a_signed_int() -> None:
     entry = compile_table("STBLDAT;0:[A:1,10:t:-1,100:];").tables[0].points[0].entries[0]
     assert (entry.chan, entry.kind, entry.value) == (ord("t"), ValueKind.INT, -1)
