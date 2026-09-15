@@ -384,8 +384,11 @@ class Console:
         if self.running:
             raise ConsoleStateError(
                 "an acquisition is already running: stop_frame() or stop_acquire() first. "
-                "A second acquire replaces the console's acquisition thread without joining "
-                "it, which kills the console process rather than earning an error"
+                "On our fork, a second acquire over an unjoined acquisition thread replies "
+                "with an error and the console stays up (measured on the rig, lab record, "
+                "task 24); the refusal here is a client-side courtesy, not a guard against a "
+                "crash. Upstream AqMD3-Acquisition-Console is untested for this and may still "
+                "behave as originally documented"
             )
         width = self._tof_reply("acquire", timeout=timeout)
         self.acquiring = True
