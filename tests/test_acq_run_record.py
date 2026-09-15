@@ -14,7 +14,9 @@ starts later than the first" an equality rather than a race.
 from __future__ import annotations
 
 import datetime as dt
+import sqlite3
 
+import numpy as np
 import pytest
 from mainspring.uimf import UimfFile
 
@@ -146,6 +148,80 @@ def test_the_companion_inherits_the_calibration(tmp_path, geometry):
     params = UimfFile(summed).frame_params(1)
     assert params.calibration_slope == pytest.approx(CALIBRATION.slope)
     assert params.calibration_done
+
+
+def stored_bpi_mz(path: str, frame: int) -> "np.ndarray":
+    """The writer's own `BPI_MZ` column, in scan order, straight off the table."""
+    with sqlite3.connect(path) as conn:
+        return np.asarray(
+            [row[0] for row in conn.execute(
+                "SELECT BPI_MZ FROM Frame_Scans WHERE FrameNum = ? ORDER BY ScanNum",
+                (frame,),
+            )],
+            dtype=np.float64,
+        )
+
+
+def test_the_console_has_the_calibration_before_it_writes_a_row(tmp_path, geometry):
+    """`BPI_MZ` comes back an m/z, which is only possible if `begin_frame` put the
+    calibration in the file before the console was asked to fill the frame.
+
+    The ordering is the whole of it: the console opens the file, reads the frame's own
+    `CalibrationSlope` and `CalibrationIntercept`, and keeps the base peak's bin index
+    instead if it finds no usable pair (lab record, task 24). Nothing asserted the two
+    halves meet, and a bench day read its own files as saying they had not (task 28).
+
+    The check that tells the conventions apart is not whether the value is plausible but
+    whether it inverts to a *whole* bin: a bin index read back as an m/z lands several
+    times past the end of the axis, at no bin in particular.
+    """
+    method = make_method(accumulations=1)
+    with FakeConsole() as fake, \
+            DataStream(fake.data_endpoint) as stream, \
+            Console(fake.command_endpoint) as console:
+        from clockwork.acq import start_chain
+        start_chain(console, stream, timeout=10.0, settle=2.0, quiet=0.1)
+        with Recording.create(tmp_path, method, geometry,
+                              instrument=SLIMPHONY) as recording:
+            path = recording.raw_path
+            with recording.frame(1, 1) as request:
+                run_frame(console, stream, request, timeout=10.0)
+        console.stop_acquire()
+    uimf = UimfFile(path)
+    calibration = uimf.frame_params(1).calibration(uimf.global_params().bin_width_ns)
+    scan, _non_zero, _bpi, _tic = uimf.scan_summary(1)
+    ours = uimf.read_frame(1).bpi_bin()[scan]
+    stored = stored_bpi_mz(path, 1)
+    assert stored.size == scan.size and stored.size > 0
+    implied = np.asarray(calibration.bin_of(stored), dtype=np.float64)
+    # Whole bins, and our own: the second assertion is the convention, the first is that
+    # the formula, its units and its constants are the ones the reader inverts with.
+    assert np.abs(implied - np.round(implied)).max() < 1e-6
+    assert implied == pytest.approx(ours.astype(float), abs=1e-6)
+
+
+def test_an_uncalibrated_file_keeps_the_bin_index_in_bpi_mz(tmp_path, geometry):
+    """The other half, and what makes the one above mean anything: with no calibration
+    to read, the console stores the bin index, which is what every file this code wrote
+    before task 25 carried. A stand-in that wrote an m/z either way would pass the test
+    above on a file whose calibration never arrived."""
+    method = make_method(accumulations=1)
+    with FakeConsole() as fake, \
+            DataStream(fake.data_endpoint) as stream, \
+            Console(fake.command_endpoint) as console:
+        from clockwork.acq import start_chain
+        start_chain(console, stream, timeout=10.0, settle=2.0, quiet=0.1)
+        with Recording.create(tmp_path, method, geometry) as recording:
+            path = recording.raw_path
+            with recording.frame(1, 1) as request:
+                run_frame(console, stream, request, timeout=10.0)
+        console.stop_acquire()
+    uimf = UimfFile(path)
+    scan, _non_zero, _bpi, _tic = uimf.scan_summary(1)
+    ours = uimf.read_frame(1).bpi_bin()[scan]
+    stored = stored_bpi_mz(path, 1)
+    assert stored.size == scan.size and stored.size > 0
+    assert stored == pytest.approx(ours.astype(float))
 
 
 # --- StartTime -----------------------------------------------------------------------
