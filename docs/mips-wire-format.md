@@ -456,12 +456,22 @@ by host software and not even primarily by firmware software:
 2. `SMOD,TBL` (or `ONCE`, or `SMOD,<n>` to run n times) enters table
    mode: the timer is configured (`SetupTimer()`), the first time
    point's tick is written to compare register **RA**, the (sub)table
-   period to **RC**, the trigger source is armed, and `TBLRDY` is
-   emitted.
+   period to **RC**, the first time point's values are **staged**
+   (`SetupNextEntry()`: DAC frames streamed over SPI, the DIO image and
+   shift registers written, the latch left pending), the trigger source
+   is armed, and `TBLRDY` is emitted. From this moment `GDIO` on a
+   channel the first event drives reads the staged value while the pin
+   still holds the old one (§4).
 3. On trigger, the counter runs. When the counter hits RA, the timer's
    TIOA output pin **toggles in hardware**, generating the LDAC latch
    that applies pre-loaded DAC values and DIO states. Output edge
-   timing is set by silicon, not an ISR.
+   timing is set by silicon, not an ISR. A first event **at tick 0** is
+   the exception: RA=0 produces no compare, so under `STBLTRG,SW` the
+   `TBLSTRT` handler pulses LDAC itself (`PerformSoftwareStart()`,
+   "loads the DACs at software trigger time if there is a time point 0
+   event", 2018-07-28) and under a hardware trigger `Trigger_ISR()`
+   does the same; the staged tick-0 values reach the pins at the
+   release, before any clock edge.
 4. The RA-match interrupt then fires and *pre-loads* the next event:
    streams the next DAC frames over SPI, stages DIO image registers,
    writes the next RA/RC, all before the next compare. The RC match
@@ -485,20 +495,23 @@ the loop's own tick 0 drove that output on every pass, on a scope, over
 An event at that position is neither skipped nor merged into the loop
 header.
 
-**"At release" is not the same instant as the trigger when the trigger
-is `SW` and the clock is external.** The TIOA toggle that latches a
-tick-0 event is armed as an RA compare (`ACPA_TOGGLE`), plus
-`AEEVT_TOGGLE` in the tick-0 case only, and `SetupTimer()` carries two
-dated comments saying the counter-0 event does not arrive on an
-external trigger and that `TC_CMR_ASWTRG_TOGGLE` was added (2018-05-05)
-and then removed (2018-07-28) because the resulting toggle "happen[s]
-after the software trigger and after the first clock edge"
-(`Table.cpp: SetupTimer()`). Read together with the RA=0 compare
-needing a clock edge to be evaluated, a tick-0 event on a
-`STBLCLK,EXT` + `STBLTRG,SW` table lands on the **first clock edge
-after `TBLSTRT`**, not on `TBLSTRT` itself, and tick *n* lands on the
-(*n*+1)th. A host that has to know which external clock edge an output
-changed on cannot get that from this document; scope it (§7).
+**A tick-0 event lands at the release itself, before the first clock
+edge.** An earlier reading of this document put it on the first edge
+after `TBLSTRT`, from the two dated `SetupTimer()` comments about
+`TC_CMR_ASWTRG_TOGGLE` (added 2018-05-05, removed 2018-07-28 because
+the toggle "happen[s] after the software trigger and after the first
+clock edge"). Read with `PerformSoftwareStart()`, the removal is the
+*bug* those comments describe, and the same-day fix is the explicit
+LDAC pulse in the `TBLSTRT` path when RA is 0: the tick-0 values are
+latched at the software trigger, then `SetupNextEntry()` stages tick
+1's. So on a `STBLCLK,EXT` + `STBLTRG,SW` table tick 0 is at `TBLSTRT`
+and tick *n* is the *n*th clock edge after it (the counter starts at 0
+and the RA compare is met on the edge that makes it *n*). The same code
+is in the May 2019 `Table.cpp` of the older `MIPS-Arduino` repository,
+the last change to that file before the 1.211t build, so it holds for
+that firmware generation too. Whether a consumer sampling the same edge
+sees the change on that edge or the next is a propagation question the
+document cannot answer; scope it (§7).
 
 **Tables within one `STBLDAT` string are advanced by the ISR with no
 gap between them.** On the loop-end (`]`) entry with the repeat count
@@ -527,16 +540,23 @@ Clock sources (`STBLCLK`):
 | `656250` (or `MCK128`) | Internal, MCK/128 | 656.25 kHz |
 | `EXT` | **Q input BNC**, rising edge, hardware XC2 | External |
 | `EXTN` | Q input, falling edge | External |
-| `EXTS` | **S input BNC**, rising edge, counted in software ISR | External, low rate |
+| `EXTS` | **S input BNC**, rising edge, counted in software ISR, **and Q (XC2) on the hardware counter at the same time** (below) | External, low rate |
 
 - With an external clock, tell the box the frequency via
   `SEXTFREQ,<hz>` if you want `TBLCHK` timing checks or `STBLTSKS`
   idle-task mode to work; it does not affect execution itself.
 - `EXTS` emulates the counter in software (used when the hardware XC2
   route isn't available). It forces software LDAC and has far lower
-  usable rates. Historical note: the firmware credits "Bush lab" with
-  finding a nested-loop bug in this path (fixed July 2019,
-  `Table.cpp: ISRclk()`); prefer `EXT`/`EXTN` over `EXTS`.
+  usable rates. **It does not disconnect Q**: `SetupTimer()`'s `EXTS`
+  branch also selects `TC_CMR_TCCLKS_XC2` for the hardware counter and
+  leaves the RA/RC compare interrupts attached, so under `EXTS` the
+  table advances on **either** a Q edge (hardware) or an S edge
+  (software), whichever arrives; a box with a clock on Q and nothing on
+  S runs under `EXTS` as it would under `EXT`, with software LDAC. The
+  May 2019 `MIPS-Arduino` source has the same branch. Historical note:
+  the firmware credits "Bush lab" with finding a nested-loop bug in this
+  path (fixed July 2019, `Table.cpp: ISRclk()`); prefer `EXT`/`EXTN`
+  over `EXTS`.
 
 Trigger sources (`STBLTRG`): `SW` (command `TBLSTRT`), `POS`/`NEG`/
 `EDGE`: rising/falling/any edge on the **R input BNC**, wired to the
@@ -638,7 +658,7 @@ Grouped from `MIPScommands.txt` + dispatch table in `Serial.cpp`
 | `TBLSTOP` | none | Graceful stop, stays in table mode |
 | `TBLABRT` | none | Abort table mode |
 | `GTBLSTA` | none | `IDLE\|READY\|TRIGGERED\|ABORTED` |
-| `GTBLFRQ` | none | Current internal clock frequency (Hz) |
+| `GTBLFRQ` | none | Current internal clock frequency (Hz). **Undefined under `EXT`/`EXTN`/`EXTS`**: `TableFreq()` fills its answer only in the four internal-clock branches and prints an uninitialised local otherwise (42000000 has been seen; it measures nothing) |
 | `STBLNUM`/`GTBLNUM` | `1..5` | Active table buffer |
 | `STBLADV`/`GTBLADV` | `ON\|OFF` | Auto-advance buffer after each trigger |
 | `STBLVLT`/`GTBLVLT` | `count,chan[,volts]` | Patch/read a loaded DC-bias entry in place (no re-upload) |
@@ -1339,17 +1359,19 @@ inspection, not scriptable):
   whether `I`-`P` behave differently from `A`-`H`, since `DigitalOut()`
   strobes the MSB half with its own latch pin at address 7 and only the
   LSB half waits for `LDAC`.
-- **Which external clock edge a tick-0 event lands on**, for a
-  `STBLCLK,EXT` + `STBLTRG,SW` table. §3 reads the firmware as the
-  first edge after `TBLSTRT`, one edge later than "at trigger time",
-  but the two dated `SetupTimer()` comments show this is a corner the
-  vendor has revised twice, and the SAM3X compare behaviour at RA=0 is
-  not something the source states outright. Scope one DIO output
-  against the clock input with a tick-0 event and a tick-1 event in the
-  same table: the answer is a one-edge offset in every downstream
-  consumer that maps ticks onto clock edges. Also confirm the §3
-  reading that no gap separates the tables of one string, by putting a
-  DIO edge at the tick-0 event of a second table.
+- **Which external clock edge a table event lands on**, for a
+  `STBLCLK,EXT` + `STBLTRG,SW` table. §3 now reads the firmware as
+  tick 0 at `TBLSTRT` itself (`PerformSoftwareStart()` pulses LDAC when
+  RA is 0) and tick *n* on the *n*th edge after it; the earlier "first
+  edge after `TBLSTRT`" reading is withdrawn. What a scope still owes
+  is the propagation: a DIO change latched on edge *n* against a second
+  device sampling that same edge (the digitizer's trigger-enable is the
+  case that matters) lands on record *n* or *n*+1 by a delay of tens of
+  ns (hardware TIOA) or µs (software LDAC under `EXTS`). Scope one DIO
+  output against the clock input with a tick-0 and a tick-1 event in
+  the same table. Also confirm the §3 reading that no gap separates the
+  tables of one string, by putting a DIO edge at the tick-0 event of a
+  second table.
 
 Items that are plain protocol-level pass/fail probes, deferred to the
 `clockwork` hardware-in-the-loop test suite once it
