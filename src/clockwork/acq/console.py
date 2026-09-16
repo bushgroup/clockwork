@@ -50,7 +50,12 @@ import time
 
 import zmq
 
+from ..transcript import CONSOLE as _CONSOLE
+from ..transcript import DECIDED as _DECIDED
+from ..transcript import FROM_BOX as _FROM
 from ..transcript import MAX_BYTES as _MAX_BYTES
+from ..transcript import TO_BOX as _TO
+from ..transcript import sent as _sent
 from .wire import (
     ACK,
     COMMAND_PORT,
@@ -226,7 +231,9 @@ class Console:
         if self._socket is None:
             raise AcqError("this Console is closed")
         if _LOG.isEnabledFor(logging.DEBUG):
-            _LOG.debug("> %s (sent without waiting)", _shown(frames))
+            shown = _shown(frames)
+            _LOG.debug("> %s (sent without waiting)", shown,
+                       extra=_sent(_TO, _CONSOLE, f"{shown} (no reply expected)"))
         self._socket.send_multipart([b""] + [_frame(part) for part in frames])
 
     def request(
@@ -234,12 +241,19 @@ class Console:
         *frames: str | bytes,
         replies: int = 1,
         timeout: float | None = None,
+        shown: str | None = None,
     ) -> list[bytes]:
         """Send a command, wait for its reply frames, and hand them back raw.
 
         `replies` is 1 for everything except `acquire` and `tof width`, which
         answer with a message and its hash in one multipart reply. A command
         the console never answers is refused here rather than waited on.
+
+        `shown` is what a send log prints instead of the frames, for the one
+        command whose argument is not text: `acquire frame`'s request is
+        Snappy-compressed protobuf, so the frames say only how many bytes went
+        and the caller passes the numbers in words. The wire transcript is
+        unaffected and still writes both.
         """
         if self._socket is None:
             raise AcqError("this Console is closed")
@@ -251,7 +265,8 @@ class Console:
             )
         deadline = self.timeout if timeout is None else timeout
         if _LOG.isEnabledFor(logging.DEBUG):
-            _LOG.debug("> %s", _shown(frames))
+            rendered = _shown(frames)
+            _LOG.debug("> %s", rendered, extra=_sent(_TO, _CONSOLE, shown or rendered))
         self._socket.send_multipart([b""] + [_frame(part) for part in frames])
         # perf_counter, not monotonic: on Windows `time.monotonic()` ticks at about
         # 15.6 ms, which reports every command that is not the card open as having
@@ -260,8 +275,9 @@ class Console:
         started = time.perf_counter()
         if not self._socket.poll(int(deadline * 1000), zmq.POLLIN):
             self._reset_socket()
-            _LOG.debug("! %s unanswered after %g s; socket thrown away and reconnected",
-                       command, deadline)
+            lost = (f"{command} unanswered after {deadline:g} s; socket thrown away "
+                    "and reconnected")
+            _LOG.debug("! %s", lost, extra=_sent(_DECIDED, _CONSOLE, lost))
             raise ConsoleTimeout(
                 f"the console at {self.endpoint} did not answer {command!r} "
                 f"within {deadline:g} s"
@@ -271,7 +287,8 @@ class Console:
         if reply and reply[0] == b"":
             reply = reply[1:]
         if _LOG.isEnabledFor(logging.DEBUG):
-            _LOG.debug("< %s (%.3f s)", _shown(reply), waited)
+            shown = _shown(reply)
+            _LOG.debug("< %s (%.3f s)", shown, waited, extra=_sent(_FROM, _CONSOLE, shown))
         if len(reply) == 1 and _is_error_reply(reply[0]):
             raise ConsoleCommandError(
                 f"the console refused {command!r}: "
@@ -285,9 +302,11 @@ class Console:
         self.last_reply_seconds = waited
         return reply
 
-    def _ack(self, *frames: str, timeout: float | None = None) -> None:
+    def _ack(self, *frames: str, timeout: float | None = None,
+             shown: str | None = None) -> None:
         """A setting command, whose whole reply is the string `ack`."""
-        reply = self.request(*frames, timeout=timeout)[0].decode("ascii", "replace")
+        reply = self.request(*frames, timeout=timeout,
+                             shown=shown)[0].decode("ascii", "replace")
         if reply != ACK:
             raise ConsoleProtocolError(f"{frames[0]!r} answered {reply!r}, not {ACK!r}")
 
@@ -430,17 +449,19 @@ class Console:
                 "after one has ended it would destroy a thread the console has not joined, "
                 "which kills the console process"
             )
+        asked = None
         if _LOG.isEnabledFor(logging.DEBUG):
             # The request in words as well as in bytes. Its frame is Snappy-compressed
             # protobuf, so the line the generic transcript writes for it says only how
             # big it was, and the numbers in it are what a reader of the file wants.
-            _LOG.debug("  acquire frame %d: %d scans, %d accumulations, offset_bins %d, "
-                       "start_trigger %d, type %s, into %r",
-                       request.frame_number, request.frame_length,
-                       request.nbr_accumulations, request.offset_bins,
-                       request.start_trigger, request.frame_type,
-                       request.file_name or "(nothing, published only)")
-        self._ack("acquire frame", request.encode())
+            # A send log gets the words in place of the frames rather than beside them.
+            asked = (f"acquire frame {request.frame_number}: {request.frame_length} scans, "
+                     f"{request.nbr_accumulations} accumulations, offset_bins "
+                     f"{request.offset_bins}, start_trigger {request.start_trigger}, type "
+                     f"{request.frame_type}, into "
+                     f"{request.file_name or '(nothing, published only)'!r}")
+            _LOG.debug("  %s", asked)
+        self._ack("acquire frame", request.encode(), shown=asked)
         self.running = True
 
     def stop_frame(self, *, timeout: float | None = None) -> None:

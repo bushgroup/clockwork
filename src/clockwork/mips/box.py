@@ -34,6 +34,15 @@ fails and no record is built. The one place this is not done inline is the table
 send; `send_table` says why. A caller that writes on `box.transport` itself is
 transcribed on the read side and not on the write side, and should say what it sent
 with `clockwork.transcript.note`.
+
+*And a reader's version of the same traffic is offered beside it.* Each command
+carries the string as text and each reply is classified once -- `ACK`, `ACK` and a
+value, or the NAK with the number and text `GERR` gave for it -- so that a send log
+beside the UIMF holds what was sent and what came back without a wire format open
+(`clockwork.transcript.send_log`, lab record, task 39). The `GERR` round trip behind
+a rejection is left out of that file on purpose: its answer is on the NAK's own line,
+and the firmware's text for it points the wrong way often enough that the string it
+refused belongs beside it.
 """
 
 from __future__ import annotations
@@ -43,7 +52,9 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 
+from ..transcript import DECIDED, FROM_BOX, TO_BOX, UNPROMPTED
 from ..transcript import render as _render
+from ..transcript import sent as _sent
 from . import table as _table
 from .transport import Transport, open_serial
 from .wire import (
@@ -103,8 +114,14 @@ class BoxRejected(MipsError):
     def __init__(self, command: str, code: int | None) -> None:
         self.command = command
         self.code = code
-        detail = f"error {code}, {error_text(code)}" if code is not None else "reason unread"
-        super().__init__(f"box rejected {command!r} ({detail})")
+        self.detail = (
+            f"error {code}, {error_text(code)}" if code is not None else "reason unread"
+        )
+        """The firmware's own account of the refusal, as a phrase.
+
+        Kept as a field because two places state it: this exception's message, and
+        the reply line a send log carries beside the string that was refused."""
+        super().__init__(f"box rejected {command!r} ({self.detail})")
 
 
 @dataclass(slots=True)
@@ -192,7 +209,8 @@ class Box:
         """
         self.events.append(event)
         if _LOG.isEnabledFor(logging.DEBUG):
-            _LOG.debug("%s ! %s", self.name, event.value)
+            _LOG.debug("%s ! %s", self.name, event.value,
+                       extra=_sent(UNPROMPTED, self.name, event.value))
 
     def _sift(self) -> None:
         """Move the status lines out of the token queue and into `events`."""
@@ -278,9 +296,10 @@ class Box:
                 last_heard = time.monotonic()
         self._sift()
         if _LOG.isEnabledFor(logging.DEBUG):
-            _LOG.debug("%s   resync after %.2f s discarded %d token(s), kept %d status line(s)",
-                       self.name, time.monotonic() - started, len(self._tokens),
-                       len(self.events))
+            summary = (f"resync after {time.monotonic() - started:.2f} s discarded "
+                       f"{len(self._tokens)} token(s), kept {len(self.events)} status line(s)")
+            _LOG.debug("%s   %s", self.name, summary,
+                       extra=_sent(DECIDED, self.name, summary))
         self._tokens.clear()
         self._reader = ResponseReader()
         collected = list(self.events)
@@ -318,9 +337,31 @@ class Box:
         """
         payload = text.encode("ascii") + b"\n"
         if _LOG.isEnabledFor(logging.DEBUG):
-            _LOG.debug("%s > %s", self.name, _render(payload))
+            _LOG.debug("%s > %s", self.name, _render(payload),
+                       extra=self._reading_error_code(TO_BOX, text))
         self.transport.write(payload)
         return self._await_reply(text, value=value, timeout=timeout)
+
+    def _reading_error_code(self, mark: str, text: str) -> dict[str, object] | None:
+        """The send log's `extra` for this command, or nothing while asking `GERR`.
+
+        A rejection's `GERR` exchange is two more lines in the wire transcript and
+        no information at all in a send log: its answer is already on the NAK's own
+        line, in words, beside the string that provoked it.
+        """
+        return None if self._querying_error else _sent(mark, self.name, text)
+
+    def _answered(self, text: str) -> None:
+        """One classified reply, for the send log and for nothing else.
+
+        The bytes are in the wire transcript already, and they are four characters
+        that say nothing on their own: `\\x06` is every command in a method going
+        through, and `\\x15?` is a refusal whose reason took another round trip to
+        learn. This is that round trip's outcome, written where a reader is.
+        """
+        if self._querying_error or not _LOG.isEnabledFor(logging.DEBUG):
+            return
+        _LOG.debug(text, extra=_sent(FROM_BOX, self.name, text, only=True))
 
     def _await_reply(
         self, what: str, *, value: bool = False, timeout: float | None = None
@@ -333,10 +374,15 @@ class Box:
             # the reply; a real box emits DIO and ADC change reports this way.
             token = self._next_token(deadline, "reply")
         if token.kind is Kind.NAK:
-            raise BoxRejected(what, self._read_error_code())
+            rejected = BoxRejected(what, self._read_error_code())
+            self._answered(f"NAK {what}: {rejected.detail}")
+            raise rejected
         if not value:
+            self._answered("ACK")
             return None
-        return self._next_token(deadline, "value", verbatim=True).text
+        answer = self._next_token(deadline, "value", verbatim=True).text
+        self._answered(f"ACK {answer}")
+        return answer
 
     def _read_error_code(self) -> int | None:
         """Ask `GERR` what the NAK meant, without recursing on its own NAK."""
@@ -418,6 +464,13 @@ class Box:
         except BoxRejected as exc:
             if exc.code != ERR_ALREADY_LOCAL:
                 raise
+            # Said rather than swallowed. The NAK is already in both files, and a
+            # rejection with nothing after it is exactly what sends a reader of a
+            # send log looking for a fault that is not there.
+            if _LOG.isEnabledFor(logging.DEBUG):
+                taken = "the box was already in local mode, which is the mode asked for"
+                _LOG.debug("%s   %s", self.name, taken,
+                           extra=_sent(DECIDED, self.name, taken))
 
     # -- loading a table ---------------------------------------------------
 
@@ -481,8 +534,10 @@ class Box:
                 self.name, len(payload), chunks, chunk_bytes, chunk_gap * 1e3,
             )
             # On its own line, and never elided: this string is the evidence any
-            # correction to the wire format's section 2 would be argued from.
-            _LOG.debug("%s >   string: %s", self.name, table_string)
+            # correction to the wire format's section 2 would be argued from, and
+            # it is the line a send log carries as the command itself.
+            _LOG.debug("%s >   string: %s", self.name, table_string,
+                       extra=_sent(TO_BOX, self.name, table_string))
 
         # perf_counter, not monotonic: on Windows `time.monotonic()` ticks at
         # about 15.6 ms, which is coarser than a whole table write, so it
@@ -542,7 +597,8 @@ class Box:
         deadline = time.monotonic() + timeout
         payload = f"TBLRPT,{count}\n".encode("ascii")
         if _LOG.isEnabledFor(logging.DEBUG):
-            _LOG.debug("%s > %s, expecting %d lines", self.name, _render(payload), wanted)
+            _LOG.debug("%s > %s, expecting %d lines", self.name, _render(payload), wanted,
+                       extra=_sent(TO_BOX, self.name, f"TBLRPT,{count}"))
         self.transport.write(payload)
         lines: list[str] = []
         while len(lines) < wanted:
@@ -550,6 +606,10 @@ class Box:
             if token.kind is not Kind.LINE:
                 raise MipsError(f"{self.name}: unexpected {token} in a TBLRPT reply")
             lines.append(token.text)
+        # There is no ACK on this command (section 4), so the reply a send log shows
+        # is the dump's size; the dump itself is one line per byte and belongs to
+        # the wire transcript, elided, where it already is.
+        self._answered(f"{len(lines)} lines of table buffer")
         return _table.parse_report(lines)
 
     def verify_table(self, load: TableLoad, *, timeout: float | None = None) -> list[str]:
@@ -585,6 +645,7 @@ class Box:
             # A conclusion rather than traffic, and in the transcript because it is
             # the one that would be cited: a disagreement here is evidence about a
             # firmware's parser, and §2 is corrected from it.
-            _LOG.debug("%s   TBLRPT round trip: %s", self.name,
-                       "; ".join(problems) if problems else "clean")
+            verdict = f"TBLRPT round trip: {'; '.join(problems) if problems else 'clean'}"
+            _LOG.debug("%s   %s", self.name, verdict,
+                       extra=_sent(DECIDED, self.name, verdict))
         return problems

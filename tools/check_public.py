@@ -971,6 +971,94 @@ def main() -> int:
         check_true("and a transcript that is not open costs no records at all",
                    counted == [])
 
+    section("send log")
+    # Task 39. Addison's request from the instrument day: a plain-text file beside the
+    # UIMF holding each complete string sent to each box, because the lab troubleshoots
+    # by comparing a run's strings against the ones it knows work on SLIMPHONY. It is a
+    # filtered view of the records the wire transcript already carries, so the check is
+    # that a whole stand-in acquisition leaves a file with every string of its method in
+    # it exactly once and in order, each answered, and with none of the chunk
+    # bookkeeping, batch summaries or byte `repr`s that make the transcript unreadable
+    # at a bench.
+
+    with tempfile.TemporaryDirectory() as directory:
+        stem = "selfcheck-send-log"
+        path = os.path.join(directory, transcript_module.send_log_name(stem))
+        boxes = {"box1": mips_module.Box(transport=mips_module.FakeBox(), name="box1")}
+        with acq.FakeConsole() as fake:
+            fake.frame_hold_s = 0.05
+            with acq.DataStream(fake.data_endpoint) as stream, \
+                    acq.Console(fake.command_endpoint) as console:
+                console.configure(offset_v=0.251)
+                header = transcript_module.run_header(
+                    method=recipe, method_path="selfcheck.toml",
+                    instrument=instrument_module.Instrument(
+                        name="SLIM3",
+                        vertical=instrument_module.Vertical(0.5, 0.251, False)),
+                    console=console.info(),
+                    boxes=[("box1", "COM1", boxes["box1"].box_name(),
+                            boxes["box1"].version())],
+                )
+                with transcript_module.send_log(path, header=header):
+                    acq.send_phases(recipe, boxes)
+                    logged = acq.run_acquisition(
+                        recipe, boxes=boxes, console=console, stream=stream,
+                        directory=directory,
+                        post_trigger_samples=fake.post_trigger_samples,
+                        stem=stem, silence=0.3, gate_dwell=dwell,
+                    )
+                console.stop_acquire()
+
+        sent = open(path, encoding="utf-8").read()
+        lines = sent.splitlines()
+        entry = recipe.box("box1")
+        strings = list(entry.setup) + list(entry.load) + list(entry.arm)
+
+        def where(string: str) -> list[int]:
+            """Every line that is this string being sent, by position in the file."""
+            mark = f"{transcript_module.TO_BOX} {string}"
+            return [at for at, line in enumerate(lines) if line.endswith(mark)]
+
+        check_true(
+            f"a send log is written beside the UIMF the run acquired "
+            f"({os.path.basename(path)}, {len(lines)} lines)",
+            logged.complete and os.path.isfile(os.path.join(directory, stem + ".uimf")),
+        )
+        check_true(
+            "and holds every string the method sent, whole, once, and in the order "
+            "they went",
+            [len(where(string)) for string in strings] == [1] * len(strings)
+            and [where(string)[0] for string in strings]
+            == sorted(where(string)[0] for string in strings),
+        )
+        check_true(
+            "with the start list once per repetition, which is how often it was walked",
+            all(len(where(step.command)) == accumulations for step in recipe.start),
+        )
+        check_true(
+            "with what each box answered, the lines it raised on its own, and what "
+            "the run decided",
+            f"{transcript_module.FROM_BOX} ACK" in sent
+            and f"{transcript_module.UNPROMPTED} TBLRDY" in sent
+            and "the gate is shut" in sent,
+        )
+        check_true(
+            "naming the method and its hash, the window, the console and the box it drove",
+            "selfcheck.toml" in sent and "sha256 " in sent
+            and "full scale 0.5 V" in sent and "not inverted" in sent
+            and "SA220P" in sent and "box1        COM1" in sent,
+        )
+        check_true(
+            "and none of the chunk bookkeeping, batch summaries or byte reprs the "
+            "transcript keeps",
+            "chunk 1/" not in sent and "batch 1:" not in sent
+            and "BatchSeen" not in sent and "b'" not in sent,
+        )
+        check_true(
+            "written with LF line endings, which is what the repo pins",
+            b"\r\n" not in open(path, "rb").read(),
+        )
+
     section("hardware")
     skip("a MIPS box answers GVER", "no serial hardware in a self-check; lab record, task 04")
     skip("the acquisition console answers info", "no console in a self-check; lab record, task 03")

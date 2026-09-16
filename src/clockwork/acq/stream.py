@@ -61,6 +61,9 @@ from collections.abc import Callable, Iterator
 
 import zmq
 
+from ..transcript import CONSOLE as _CONSOLE
+from ..transcript import DECIDED as _DECIDED
+from ..transcript import sent as _sent
 from .wire import (
     DATA_PORT,
     TOPIC_DATA,
@@ -200,7 +203,9 @@ class DataStream:
         self.statuses.append(status)
         if status.is_error:
             self.errors.append(status)
-        _LOG.debug("%s %r", topic, status.text)
+        if _LOG.isEnabledFor(logging.DEBUG):
+            _LOG.debug("%s %r", topic, status.text,
+                       extra=_sent(_DECIDED, _CONSOLE, f"{topic} {status.text!r}"))
         return status
 
     def drain(self, timeout: float = 0.0) -> list[Batch | Status]:

@@ -94,6 +94,9 @@ from ..mips import (
     digital_events,
     dio_command,
 )
+from ..transcript import DECIDED as _DECIDED
+from ..transcript import RUN as _RUN
+from ..transcript import sent as _sent
 from .console import Console
 from .session import EMPTY_SETTLE_S, run_frame, start_chain
 from .stream import DataStream, StreamTimeout
@@ -338,15 +341,24 @@ class Warned(Event):
 
 @dataclass(frozen=True, slots=True)
 class BoxReady(Event):
-    """A box answered `GVER`, so the port has the right thing on the end of it."""
+    """A box answered `GVER` and `GNAME`, so the port has the right box on the end of it.
+
+    Both readbacks, because a port is not an identity: which COM number Windows gave
+    a box changes when it is unplugged, and a run whose log names three ports names
+    nothing a reader can check. `GNAME` is the box's own idea of itself -- `MIPS-A`,
+    `MIPS-B` -- and the pair is the first thing a send log carries about each box
+    (lab record, task 39).
+    """
 
     box: str
     port: str
     version: str
+    identity: str = ""
 
     @property
     def text(self) -> str:
-        return f"{self.box} on {self.port}: firmware {self.version}"
+        named = f"{self.identity}, " if self.identity else ""
+        return f"{self.box} on {self.port}: {named}firmware {self.version}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1051,7 +1063,7 @@ def send_phases(
         )
     for entry in method.boxes:
         box = boxes[entry.name]
-        report(BoxReady(entry.name, entry.port, box.version()))
+        report(BoxReady(entry.name, entry.port, box.version(), box.box_name()))
         phases: tuple[tuple[str, Sequence[str]], ...] = \
             (("setup", entry.setup),) if setup else ()
         for phase, commands in _guarded(phases + (("load", entry.load),
@@ -1395,6 +1407,34 @@ def _gate_dwell(geometry: Geometry) -> float:
     return NOTIFY_ON_SCANS_COUNT * period_s + GATE_PUBLISH_ALLOWANCE_S
 
 
+def _sent_line(event: Event) -> tuple[str, str] | None:
+    """One `Event` as a send log's line, or `None` for one that does not belong there.
+
+    Two are dropped. `BatchSeen` is one line per five hundred pushes and a frame
+    publishes a hundred and twenty of them, which would bury the strings the file
+    exists for; the count that matters survives in `FrameEnded`. `BoxSaid` is the
+    loop noticing a status line `clockwork.mips.wire` has already written with an
+    `!` where it arrived, and the earlier line is the truer one -- the loop's is
+    dated when the port was next drained.
+
+    `PhaseSent` is the one that is rewritten rather than passed through. Its string
+    is on the `>` line above it, so the ordinary line here says only which phase the
+    string belonged to and what the send cost; a refusal repeats the string in full,
+    because the firmware's text for a rejection points the wrong way often enough
+    that reading it apart from the string it refused is how a bench hour is lost
+    (`GERR` 6 says "not in table mode" for a command that needs local mode).
+    """
+    if isinstance(event, (BatchSeen, BoxSaid)):
+        return None
+    if isinstance(event, PhaseSent):
+        if event.error is not None:
+            return event.box, f"{event.phase} refused: {event.command} -- {event.error}"
+        return event.box, f"{event.phase} {event.detail}".rstrip()
+    if isinstance(event, BoxReady):
+        return event.box, event.text
+    return _RUN, event.text
+
+
 def _ignore(_: Event) -> None:
     """The progress callback a caller that wants none gets."""
 
@@ -1412,7 +1452,9 @@ def _reporter(progress: Callable[[Event], None] | None) -> Callable[[Event], Non
 
     def reported(event: Event) -> None:
         if _LOG.isEnabledFor(logging.DEBUG):
-            _LOG.debug("%s: %s", type(event).__name__, event.text)
+            line = _sent_line(event)
+            _LOG.debug("%s: %s", type(event).__name__, event.text,
+                       extra=None if line is None else _sent(_DECIDED, *line))
         report(event)
 
     return reported

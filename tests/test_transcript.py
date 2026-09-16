@@ -29,7 +29,7 @@ import pytest
 
 from clockwork import acq, transcript
 from clockwork.acq import Console, DataStream, FakeConsole, FrameRequest, run_frame
-from clockwork.mips import DEFAULT_CHUNK_BYTES, Box, FakeBox, TableEvent
+from clockwork.mips import DEFAULT_CHUNK_BYTES, Box, FakeBox, MipsError
 
 LONG_TABLE = "STBLDAT;0:[A:1," + ",".join(
     f"{tick}:A:1" for tick in range(100, 1200, 2)
@@ -373,3 +373,220 @@ def test_the_four_logger_names_are_the_ones_the_package_emits_to(collected):
     for name in transcript.LOGGERS:
         assert name.startswith(transcript.ROOT_LOGGER + "."), \
             "one handler on `clockwork` has to catch every link"
+
+
+# --- the send log ------------------------------------------------------------------------
+
+
+SEND_LOG_METHOD = {
+    "schema_version": 2,
+    "metadata": {"name": "send log test", "created": dt.date(2026, 9, 15)},
+    "acquisition": {"frames": 1, "scans": 16, "accumulations": 1,
+                    "file_stem": "send-log-test",
+                    "enable": {"box": "box1", "channel": "A"}},
+    "boxes": [{"name": "box1", "port": "COM3",
+               "setup": ["STBLCLK,EXT", "STBLTRG,POS"],
+               "load": ["STBLDAT;0:[A:1,0:A:1:B:1,516:A:0,517:];"],
+               "arm": ["SMOD,TBL"]}],
+    "start": [["box1", "TBLSTRT"]],
+}
+"""One box, one string per phase, and a table whose enable ticks agree with the 16 scans
+`[acquisition]` asks for -- the loop refuses a method where they do not, and a send log
+test that could not send its own strings would be testing the refusal."""
+
+
+def a_method(**changes):
+    from clockwork import method as method_module
+
+    document = dict(SEND_LOG_METHOD)
+    document.update(changes)
+    return method_module.from_dict(document)
+
+
+def send_log_of(path, method=None, header="", acquire=False, tmp_path=None):
+    """One `send_phases`, optionally a whole acquisition, and the two files it left.
+
+    Both are opened, not just the send log: the pair is what a bench run writes, and
+    several of the assertions below are about what the two do differently.
+    """
+    method = method or a_method()
+    boxes = {"box1": Box(transport=FakeBox(), name="box1")}
+    wire = str(path) + ".wire"
+    with transcript.send_log(path, header=header), transcript.to_file(wire):
+        if not acquire:
+            acq.send_phases(method, boxes)
+        else:
+            with FakeConsole() as fake:
+                fake.frame_hold_s = 0.05
+                with (DataStream(fake.data_endpoint) as stream,
+                      Console(fake.command_endpoint) as console):
+                    console.configure(offset_v=0.251)
+                    acq.send_phases(method, boxes)
+                    acq.run_acquisition(
+                        method, boxes=boxes, console=console, stream=stream,
+                        directory=str(tmp_path), stem="send-log-test-20260915-120000",
+                        post_trigger_samples=fake.post_trigger_samples,
+                        silence=0.3, gate_dwell=0.01,
+                    )
+                    console.stop_acquire()
+    return path.read_text(encoding="utf-8"), open(wire, encoding="utf-8").read()
+
+
+def test_a_send_log_holds_every_string_of_a_method_once_and_in_order(tmp_path):
+    """What Addison asked for: the strings that drove this file, as he would type them.
+
+    Once each, because a reader who finds the same table twice has to work out whether
+    the box was loaded twice; in the order they went, because the order is half of what
+    a method is; and whole, because a table elided at 48 characters is not a string
+    anyone can compare against the one they know works.
+    """
+    written, _ = send_log_of(tmp_path / "run.sent.txt")
+    strings = (["STBLCLK,EXT", "STBLTRG,POS"]
+               + list(a_method().box("box1").load) + ["SMOD,TBL"])
+    lines = written.splitlines()
+    at = -1
+    for string in strings:
+        sent = [line for line in lines if line.endswith(f"{transcript.TO_BOX} {string}")]
+        assert len(sent) == 1, f"{string!r} appears {len(sent)} times"
+        position = lines.index(sent[0])
+        assert position > at, f"{string!r} is out of order"
+        at = position
+    # And each of them was answered, on its own line, in words.
+    assert written.count(f"{transcript.FROM_BOX} ACK") >= len(strings)
+
+
+def test_a_send_log_names_the_box_the_port_and_the_firmware_it_drove(tmp_path):
+    """A log that named three COM numbers would name nothing a reader can check.
+
+    Windows renumbers a port when a box is unplugged, so the identity that survives is
+    the box's own `GNAME` and the firmware `GVER` reports (lab record, task 39).
+    """
+    written, _ = send_log_of(tmp_path / "run.sent.txt")
+    assert "> GVER" in written and "> GNAME" in written
+    assert "box1 on COM3: SLIMbox, firmware" in written
+
+
+def test_a_refusal_carries_the_string_and_the_firmwares_text_on_one_line(tmp_path):
+    """The one line the day's ledger asked for by name.
+
+    `GERR`'s text points the wrong way often enough that reading it apart from the
+    string it refused is how a bench hour goes: 6 says "not in table mode" for a command
+    that needs *local* mode. So the string and the firmware's account of the rejection
+    are on one line, and the `GERR` round trip that produced the account is not in this
+    file at all.
+    """
+    boxes = {"box1": Box(transport=FakeBox(), name="box1")}
+    refused = a_method(boxes=[dict(SEND_LOG_METHOD["boxes"][0], setup=["NOSUCHCMD"])])
+    path = tmp_path / "refused.sent.txt"
+    with transcript.send_log(path):
+        with pytest.raises(MipsError):
+            acq.send_phases(refused, boxes)
+    written = path.read_text(encoding="utf-8")
+    assert "NAK NOSUCHCMD: error 1, invalid command" in written
+    refusal = [line for line in written.splitlines() if " refused: " in line]
+    assert refusal and "NOSUCHCMD" in refusal[0] and "error 1, invalid command" in refusal[0]
+    assert "GERR" not in written, "the query behind the answer is not the answer"
+
+
+def test_a_send_log_drops_the_chunks_the_batches_and_the_bytes(tmp_path):
+    """It is a view of the wire transcript, and the view is what makes it readable.
+
+    A `STBLDAT` send is four lines of chunk bookkeeping and a frame publishes a batch
+    summary every sixty-odd milliseconds; both belong in the forensic record and neither
+    belongs in a file a trainee reads to find a string.
+    """
+    written, wire = send_log_of(tmp_path / "run.sent.txt", acquire=True, tmp_path=tmp_path)
+    assert "chunk 1/" in wire and "chunk 1/" not in written
+    assert "of stall margin" in wire
+    assert "batch 1:" in wire and "batch 1:" not in written
+    assert "BatchSeen" not in written
+    assert r"b'SMOD,TBL\n'" in wire, "the bytes stay in the transcript"
+    assert "b'" not in written, "and never reach the send log"
+
+
+def test_the_two_files_of_one_run_do_not_disagree(tmp_path):
+    """Everything in the send log is a record the wire transcript holds too, bar one kind.
+
+    The classified replies -- `ACK`, a value, the NAK with its number -- are written for
+    the send log alone, because the bytes behind each are in the transcript already and a
+    derived line there would be length without evidence.
+    """
+    written, wire = send_log_of(tmp_path / "run.sent.txt", acquire=True, tmp_path=tmp_path)
+    for string in ("STBLCLK,EXT", "SMOD,TBL", "TBLSTRT", "TBLRDY", "acquire frame 1"):
+        assert string in written and string in wire
+    assert "< ACK" in written and "< ACK" not in wire
+
+
+def test_a_header_says_what_the_run_was(tmp_path):
+    """A file of strings says nothing on its own about the window they were acquired in.
+
+    The same method through a different full scale, offset or inversion is a different
+    experiment, and the method's hash is the link back to the document the strings came
+    from.
+    """
+    from clockwork.instrument import Instrument, Vertical
+
+    header = transcript.run_header(
+        method=a_method(), method_path="/somewhere/clock.toml",
+        instrument=Instrument(name="SLIM3", vertical=Vertical(0.5, 0.2512, False)),
+        instrument_path="instrument.toml",
+        console="Digitizer Model: SA220P / App Version: 0.1.0",
+        boxes=[("auklet", "COM6", "MIPS-A", "Version 1.211t")],
+    )
+    written, _ = send_log_of(tmp_path / "run.sent.txt", header=header)
+    assert "clock.toml" in written and "'send log test'" in written
+    assert "sha256 " in written
+    assert "SLIM3" in written and "full scale 0.5 V" in written
+    assert "offset 0.2512 V" in written and "not inverted" in written
+    assert "Digitizer Model: SA220P" in written
+    assert "auklet      COM6  MIPS-A  Version 1.211t" in written
+
+
+def test_a_header_leaves_out_what_it_was_not_given():
+    """"offset: unknown" reads as a measurement that failed, and this is a caller that
+    passed none."""
+    from clockwork.instrument import Instrument, Vertical
+
+    assert transcript.run_header() == ""
+    assert transcript.run_header(instrument=Instrument(vertical=Vertical(offset_v=0.2))) \
+        == "instrument   offset 0.2 V"
+
+
+def test_both_files_end_their_lines_with_lf_on_every_platform(tmp_path):
+    """`logging.FileHandler` writes CRLF on Windows into a repo that pins `eol=lf`.
+
+    Every transcript then reads as modified the moment it is touched, and a log committed
+    beside its run shows up as a diff of itself (lab record, tasks 39 and 41).
+    """
+    send = tmp_path / "run.sent.txt"
+    send_log_of(send)
+    for path in (send, tmp_path / "run.sent.txt.wire"):
+        raw = path.read_bytes()
+        assert b"\r\n" not in raw, f"{path.name} was written with CRLF"
+        assert raw.endswith(b"\n")
+
+
+def test_send_log_name_is_the_shape_every_caller_should_use():
+    """No date in it, unlike a transcript's: the stem already carries the run's, and the
+    point of the name is that a file and its log sort together."""
+    assert (transcript.send_log_name("bradykinin_clock-20260915-145701")
+            == "bradykinin_clock-20260915-145701.sent.txt")
+
+
+def test_a_send_log_that_is_not_open_costs_no_records():
+    """The same level gate the wire transcript relies on, through the new call sites.
+
+    A `Sent` is built at the call site, so a call site that never runs builds none.
+    """
+    logger = logging.getLogger(transcript.ROOT_LOGGER)
+    handler = Collected()
+    logger.addHandler(handler)
+    try:
+        box = Box(transport=FakeBox(), name="dunlin")
+        box.version()
+        box.box_name()
+        box.local()
+        box.send_table("STBLDAT;0:[A:1,100:];")
+    finally:
+        logger.removeHandler(handler)
+    assert handler.records == []
