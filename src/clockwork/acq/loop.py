@@ -1067,10 +1067,12 @@ def _guarded(
     """One box's phases with `SMOD,LOC` in front of the commands that need local mode.
 
     `STBLCLK`, `STBLTRG` and `STBLDAT` are LOC-mode only (`LOC_ONLY`), and a box still
-    armed from the acquisition before refuses all three with error 27. Both golden
-    methods have an empty sequencer `setup`, so the first string either of them sends is
-    the `load` phase's table, and a second acquisition from cold is refused on it: the
-    instrument met that and got past it by hand (lab record, task 41). A bench session
+    armed from the acquisition before refuses all three with error 27. A method whose
+    sequencer `setup` is empty, as both golden methods' were when this was written, sends
+    the `load` phase's table as its first string, and a second acquisition from cold is
+    refused on it: the instrument met that and got past it by hand (lab record, task 41).
+    A method whose `setup` does carry a LOC-only command is guarded there instead, and
+    its later table costs no second mode change. A bench session
     had met the same defect one phase over, in `setup` (lab record, task 30), and the
     fix made there covered only that phase.
 
