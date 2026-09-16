@@ -55,17 +55,29 @@ with `t` in microseconds. Clockwork implements that formula nowhere. The calibra
 file as two numbers and is applied by the reader, which for this lab is
 [mainspring](https://github.com/bushgroup/mainspring).
 
-Two properties follow from `t` being counted in bins from the start of the digitizer record, and
-both matter when a pair measured on one acquisition chain is carried to another.
+**Bin 0 is the trigger, not the first digitized sample.** A digitizer given a post-trigger delay
+waits that long after each trigger before it records anything, and the writers put the wait into
+the axis rather than leaving it out. The file declares it as `TimeOffset`, `Bins` counts the record
+plus the delay, and every scan's leading zero run is `TimeOffset / BinWidth` bins longer than the
+gap the card actually found. A stored bin index therefore counts from the trigger already, and
+`t = bin * BinWidth_ns / 1000` is time since the trigger. This is why UIMF-Library declares
+`TimeOffset` and then does not apply it: applying it would count the delay a second time.
+
+Two properties follow, and both matter when a pair measured on one acquisition chain is carried to
+another.
 
 **The sample rate does not enter the calibration.** A bin index multiplied by the bin width is a
 time, so doubling the sample rate doubles the index, halves the width, and leaves the same ion at
 the same `t`. A pair measured at 1 GS/s is the same pair at 2 GS/s.
 
-**The post-trigger delay does.** A UIMF file declares its post-trigger delay as `TimeOffset` and
-UIMF-Library then does not apply it, so a delay lengthened by `d` microseconds moves every ion
-later by `d` and `intercept` has to fall by `d` to put the mass axis back. A pair carried across a
-change of delay is a starting value rather than a calibration.
+**Neither does the post-trigger delay.** Lengthening it by `d` microseconds trades `d` of record
+for `d` more leading bins and leaves every ion on the bin it was already on. What the pair does
+carry is the rest of the chain: where the trigger edge sits relative to the pusher pulse, and how
+long the digitizer takes to start on it. The intercept absorbs both, so two chains that differ in
+either need their own pair, and a pair carried across a change of digitizer is a starting value
+rather than a calibration. One ion measured on two of them, one at a 10 microsecond delay and
+2 GS/s and the other at 20 microseconds and 1 GS/s, came out 20 nanoseconds apart rather than the
+10 microseconds the delays differ by (lab record, task 45).
 
 Digitizer control software often states the same calibration in tenths of a nanosecond instead of
 microseconds, as `K / 1e4` and `T0 * 1e4`. The two forms are identical and the lab's calibration

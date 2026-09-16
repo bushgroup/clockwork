@@ -35,17 +35,23 @@ calibratable afterwards from its own parameters, which is why nothing ever block
 
 **The calibration is stated against the file's own bin axis**, `mz = (slope * (t - intercept))^2`
 with `t = bin * BinWidth_ns / 1000` in microseconds -- UIMF-Library's formula, implemented
-once in `mainspring.uimf.Calibration` and not again here. Two consequences follow from `t`
-being counted in bins from the start of the record rather than from the pusher pulse, and
-both matter when a pair is carried from one chain to another:
+once in `mainspring.uimf.Calibration` and not again here. **`t` counts from the trigger**,
+because the post-trigger delay is inside the bin index rather than outside it: `Bins` is the
+record plus the delay and `FrameRequest.offset_bins` puts exactly those samples into every
+scan's leading zero run (`clockwork.acq.uimf.Geometry`), so bin 0 is the trigger edge and not
+the first digitized sample. That is why `TimeOffset` is declared in the file and then not
+applied (`docs/instrument-file-format.md`, `../mainspring-lab/notes/uimf-format.md`): applying
+it would count the delay twice. Two consequences, both of which matter when a pair is carried
+from one chain to another:
 
 - **The sample rate does not enter it.** `bin * BinWidth_ns` is a time, so doubling the rate
   doubles the bin index and halves the bin width, and the same ion lands at the same `t`. A
   pair measured at 1 GS/s is the same pair at 2 GS/s.
-- **The post-trigger delay does.** `TimeOffset` is declared in the file and then not applied
-  (`../mainspring-lab/notes/uimf-format.md`), so a delay changed by `d` microseconds moves
-  every ion by `d` and `intercept` has to move by `-d` to put it back. A pair carried across a
-  chain change is a starting value, not a calibration.
+- **Neither does the post-trigger delay.** Lengthening it by `d` trades `d` of record for `d`
+  more leading bins and leaves every ion on its own bin. What `intercept` carries is the rest
+  of the chain -- the trigger edge's position against the pusher pulse, and the card's own
+  latency in starting on it -- so a pair carried across a change of digitizer is a starting
+  value, not a calibration (lab record, task 45).
 
 No Qt here, and nothing in this module talks to hardware or reads a UIMF file. It parses one
 document and hands back what is in it.
