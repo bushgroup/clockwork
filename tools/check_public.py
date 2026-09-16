@@ -723,7 +723,26 @@ def main() -> int:
         check_true(
             "and a setup phase carrying a LOC-only command drops the box out of table "
             "mode first, so a second acquisition is not refused on its first string",
-            sent[0] == ("setup", "SMOD,LOC"),
+            sent[0] == ("setup", "SMOD,LOC")
+            and [command for _, command in sent].count("SMOD,LOC") == 1,
+        )
+        # Both golden methods have an empty sequencer setup, so their first string is
+        # the load phase's table -- and `STBLDAT` needs local mode as much as `STBLCLK`
+        # does. A box left armed by its own previous run refused one on the instrument
+        # (lab record, task 41); nothing above the guard can tell that from a bad table.
+        empty_setup = method_module.from_dict(
+            loop_document | {"boxes": [dict(loop_document["boxes"][0]) | {"setup": []}]})
+        bare: list[acq.Event] = []
+        acq.send_phases(
+            empty_setup,
+            {"box1": mips_module.Box(transport=mips_module.FakeBox(), name="box1")},
+            progress=bare.append)
+        check_true(
+            "and a load phase does the same for its table, so a method with no setup "
+            "of its own can still be sent twice in a row",
+            [(event.phase, event.command) for event in bare
+             if isinstance(event, acq.PhaseSent)][:2]
+            == [("load", "SMOD,LOC"), ("load", empty_setup.boxes[0].load[0])],
         )
 
         with acq.FakeConsole(notify_on_scans_count=scans // 4) as fake:

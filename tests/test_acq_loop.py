@@ -497,6 +497,26 @@ def test_a_setup_phase_with_loc_only_commands_drops_the_box_out_of_table_mode_fi
     send_phases(make_method(), boxes, progress=None)
     written = boxes[BOX].transport.written
     assert written.index(b"SMOD,LOC\n") < written.index(b"STBLCLK,EXT\n")
+    # And once, not before each of the three: the setup phase left the box local and
+    # the guard knows it.
+    assert written.count(b"SMOD,LOC\n") == 1
+
+
+def test_a_load_phase_drops_the_box_out_of_table_mode_before_the_table():
+    """`STBLDAT` is LOC-only too, and both golden methods have an empty sequencer
+    `setup`, so the table is the first string they send. The instrument refused one from
+    a box its own previous run had left armed, and `loop_rig.py` died on the unhandled
+    rejection (lab record, task 41)."""
+    document = method_module.to_dict(make_method())
+    document["boxes"][0]["setup"] = []
+    boxes = make_boxes(BOX)
+    seen: list[acq.Event] = []
+    send_phases(method_module.from_dict(document), boxes, progress=seen.append)
+    sent = [(event.phase, event.command) for event in seen if isinstance(event, PhaseSent)]
+    assert sent[0] == ("load", "SMOD,LOC")
+    assert [phase for phase, _ in sent] == ["load", "load", "arm"]
+    written = boxes[BOX].transport.written
+    assert written.index(b"SMOD,LOC\n") < written.index(b"SMOD,TBL\n")
 
 
 def test_a_setup_phase_with_no_loc_only_command_is_sent_exactly_as_written():
@@ -517,7 +537,11 @@ def test_setup_can_be_left_out_for_a_box_that_has_had_it_since_power_up():
     seen: list[acq.Event] = []
     send_phases(make_method(), boxes, setup=False, progress=seen.append)
     phases = [event.phase for event in seen if isinstance(event, PhaseSent)]
-    assert phases == ["load", "arm"]
+    # `load` twice because the setup phase that would have dropped the box out of table
+    # mode was skipped, so the table's own guard is the one that does it.
+    assert phases == ["load", "load", "arm"]
+    assert [event.command for event in seen
+            if isinstance(event, PhaseSent)][0] == "SMOD,LOC"
 
 
 def test_a_table_is_streamed_in_paced_chunks_rather_than_written_in_one_go():

@@ -619,7 +619,7 @@ Grouped from `MIPScommands.txt` + dispatch table in `Serial.cpp`
 
 | Command | Args | Notes |
 |---|---|---|
-| `STBLDAT` | `;<sequence>;` | Load table(s); LOC mode (or TBL+READY) only; NAK + buffer flush on parse error, and the current buffer's table count is zeroed |
+| `STBLDAT` | `;<sequence>;` | Load table(s); LOC mode, and TBL mode only while the status is `READY`, which is a window a host cannot count on (see below); NAK + buffer flush on parse error, and the current buffer's table count is zeroed |
 | `STBLCLK` | `EXT\|EXTN\|EXTS\|42000000\|10500000\|2625000\|656250` | Clock source (LOC mode only) |
 | `STBLTRG` | `SW\|POS\|NEG\|EDGE` | Trigger source (LOC mode only) |
 | `SMOD` | `LOC\|TBL\|ONCE\|<n>` | Mode: enter/leave table mode; `ONCE`/`<n>` auto-exit |
@@ -648,8 +648,8 @@ Grouped from `MIPScommands.txt` + dispatch table in `Serial.cpp`
 | `SDIO` | `<chan A-P>,<0\|1>` | Set one digital output directly from the host, independent of any loaded table. Accepted in any mode; **immediate only in LOC**, see below |
 | `GDIO` | `<chan A-X>` | Read one line: an output `A`-`P` from the image register, an input `Q`-`X` from the hardware. **It cannot confirm an output actually moved**, see below |
 
-Four commands in this table behave in ways the row cannot carry, and
-all four matter to a sequencer:
+Five commands in this table behave in ways the row cannot carry, and
+all five matter to a sequencer:
 
 **`SMOD` refuses the mode it is already in.** `SetTableMode()`
 (`Table.cpp`) tests the current mode before doing anything: `SMOD,LOC`
@@ -657,14 +657,39 @@ NAKs with `ERR_LOCALREADY` (3) when the box is already local, and
 `SMOD,TBL`/`SMOD,ONCE` NAK with `ERR_TBLALREADY` (4) when it is already
 in table mode or `ERR_NOTBLLOADED` (5) when the active buffer holds no
 tables. **None of them is idempotent.** This matters because `STBLDAT`
-requires LOC mode, so a host naturally sends `SMOD,LOC` to *ensure* the
-box is local before a load, and on an idle box that NAKs every time. A
-sequencer must treat error 3 from `SMOD,LOC` as success, not as a
-failure. Confirmed on the bench (lab record, task 04).
+is LOC-only in practice (the note below), so a host naturally sends
+`SMOD,LOC` to *ensure* the box is local before a load, and on an idle
+box that NAKs every time. A sequencer must treat error 3 from
+`SMOD,LOC` as success, not as a failure. Confirmed on the bench (lab
+record, task 04).
 
 Note also that the mode change is not complete when the ACK arrives: the
 `LOC` arm sends the ACK and then sets `LOCrequest`, which the table
 service loop acts on afterwards.
+
+**`STBLDAT`'s table-mode exception is narrower than the row used to
+read, and its error code names the wrong mode.** `ParseTableCommand()`
+(`Table.cpp`) opens with a single gate: when
+`TableMode` is `TBL` **and** `TableStatus` is not the string `READY` it
+flushes the rest of the command, sets `ERR_NOTLOCMODE` (27) and NAKs.
+The service loop writes `READY` when it arms and again after each
+completed pass under an external trigger, and writes `TRIGGERED` the
+moment the trigger arrives, so the table-mode half of that gate admits
+a load only into a box that is armed and has not yet run. **A box that
+has run is not in that window**, and a box whose table was triggered
+and whose timer never stopped reads `TRIGGERED` until it is aborted or
+made local, which is where a sequencer meets it: the box it armed for
+the last acquisition is the box it wants to load for the next one. A
+host should treat `STBLDAT` as LOC-only and send `SMOD,LOC` first.
+
+The error code compounds it. `ERR_NOTLOCMODE` is "System is not in
+local mode", and it is the code for the table-mode refusal as well, so
+a refusal cannot be told from a genuine mode error by its number. Read
+`GTBLSTA` rather than `GERR` to learn which one happened.
+
+Measured on the instrument: a box left in table mode by the previous
+acquisition refused the next one's first table with error 27, and the
+identical string was accepted after `SMOD,LOC` (lab record, task 30).
 
 **`STBLDAT` can take three seconds to say no.** On a parse error the
 firmware flushes the rest of the command by calling `NextToken()` until

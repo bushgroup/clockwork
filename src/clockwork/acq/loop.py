@@ -243,12 +243,15 @@ already costs `START_STEP_GAP_S` per gap and a serial round trip per step, and t
 is what the lab's `AcquisitionTimeoutMs` has to clear (lab record, task 35).
 """
 
-LOC_ONLY_SETUP = frozenset({"STBLCLK", "STBLTRG"})
-"""Setup commands the box accepts only in local mode (wire format, section 4).
+LOC_ONLY = frozenset({"STBLCLK", "STBLTRG", "STBLDAT"})
+"""Commands the box accepts only in local mode (wire format, section 4).
 
-`STBLDAT` is deliberately not here: the same table says it is accepted in LOC mode *or*
-in TBL mode with the table ready, so a `load` phase does not need the box dropped out of
-table mode and a method that only loads and arms is untouched by this.
+`STBLDAT` is one of them. The firmware's gate admits a load in table mode as well, but
+only while the status is `READY`, which is the window between arming a box and its first
+trigger and is exactly the window a sequencer is never in: the box it wants to load is
+the one the last acquisition armed and ran. The instrument refused a `load` phase on
+that account (lab record, task 41), so the document was corrected and this set follows
+it.
 """
 
 ARM_TIMEOUT_S = 5.0
@@ -1026,6 +1029,11 @@ def send_phases(
     what this host predicted, which is thousands of lines per table and is worth the
     minute when a table is new. Off by default.
 
+    A box still armed from the acquisition before refuses the LOC-only commands, the
+    `load` phase's table among them, so `_guarded` puts `SMOD,LOC` in front of the first
+    one. Sending twice in a row is the ordinary case and it must not be the case that
+    fails.
+
     Raises whatever the box raised, after reporting it, so a refused string stops the
     send rather than leaving a half-loaded instrument that looks armed.
     """
@@ -1044,33 +1052,49 @@ def send_phases(
     for entry in method.boxes:
         box = boxes[entry.name]
         report(BoxReady(entry.name, entry.port, box.version()))
-        phases = (("setup", _setup_phase(entry.setup)),) if setup else ()
-        for phase, commands in phases + (("load", entry.load), ("arm", entry.arm)):
+        phases: tuple[tuple[str, Sequence[str]], ...] = \
+            (("setup", entry.setup),) if setup else ()
+        for phase, commands in _guarded(phases + (("load", entry.load),
+                                                  ("arm", entry.arm))):
             for command in commands:
                 _send(box, entry.name, phase, command, report,
                       arm_timeout=arm_timeout, verify_tables=verify_tables)
 
 
-def _setup_phase(commands: Sequence[str]) -> list[str]:
-    """A setup phase with `SMOD,LOC` ahead of it when one of its commands needs it.
+def _guarded(
+    phases: Sequence[tuple[str, Sequence[str]]],
+) -> list[tuple[str, list[str]]]:
+    """One box's phases with `SMOD,LOC` in front of the commands that need local mode.
 
-    `STBLCLK` and `STBLTRG` are LOC-mode only (`LOC_ONLY_SETUP`), so a box still armed
-    from the acquisition before refuses them — and `send_phases(setup=True)` is exactly
-    what the *second* acquisition from cold sends. A bench session met this by running
-    the loop twice against one box: the first send worked only because the line that
-    drove the enable low had left the box local, and the second was refused on its first
-    string (lab record, task 30).
+    `STBLCLK`, `STBLTRG` and `STBLDAT` are LOC-mode only (`LOC_ONLY`), and a box still
+    armed from the acquisition before refuses all three with error 27. Both golden
+    methods have an empty sequencer `setup`, so the first string either of them sends is
+    the `load` phase's table, and a second acquisition from cold is refused on it: the
+    instrument met that and got past it by hand (lab record, task 41). A bench session
+    had met the same defect one phase over, in `setup` (lab record, task 30), and the
+    fix made there covered only that phase.
 
-    The `load` and `arm` phases put the box back into table mode a moment later, so
-    dropping it out first costs nothing and is what "from cold" already meant. A setup
-    phase carrying no LOC-only command is returned untouched, so a method whose boxes
-    take only a frequency block sends exactly what it sent before.
+    The guard walks a box's phases in order and tracks what the last `SMOD` asked for,
+    so a method whose `setup` already drops the box out of table mode pays for one mode
+    change rather than two, and a phase that starts with `SMOD,LOC` of its own gains
+    nothing. The mode is unknown at the start of a send, so the first LOC-only command
+    is always guarded. A phase carrying no LOC-only command comes back untouched, which
+    is every ARB box in both golden methods.
     """
-    heads = [command.split(",", 1)[0].strip().upper() for command in commands]
-    already = [part.strip().upper() for part in commands[:1]] == ["SMOD,LOC"]
-    if already or not LOC_ONLY_SETUP.intersection(heads):
-        return list(commands)
-    return ["SMOD,LOC", *commands]
+    guarded: list[tuple[str, list[str]]] = []
+    local = False
+    for phase, commands in phases:
+        written: list[str] = []
+        for command in commands:
+            head = command.split(",", 1)[0].split(";", 1)[0].strip().upper()
+            if head in LOC_ONLY and not local:
+                written.append("SMOD,LOC")
+                local = True
+            if head == "SMOD":
+                local = command.partition(",")[2].strip().upper() == "LOC"
+            written.append(command)
+        guarded.append((phase, written))
+    return guarded
 
 
 def _send(
