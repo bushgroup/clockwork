@@ -358,3 +358,99 @@ def test_every_problem_is_reported_at_once() -> None:
 def test_invalid_toml_reports_as_method_error() -> None:
     with pytest.raises(method.MethodError):
         method.loads("this is not [ valid toml")
+
+
+# --- declared DC bias and RF (task 40) -------------------------------------------------
+
+DECLARED = """
+[boxes.dc_bias]
+16 = 5.0
+15 = 0.0
+
+[boxes.rf.1]
+frequency_hz = 943000
+drive_pct = 50.0
+mode = "manual"
+
+[boxes.rf.2]
+drive_pct = 30
+"""
+
+
+def declaring() -> method.Method:
+    """The sample method with AUKLET's analog state declared on its first box."""
+    first, _, rest = SAMPLE.partition("\n[[boxes]]\nname = \"box2\"")
+    return method.loads(first + DECLARED + "\n[[boxes]]\nname = \"box2\"" + rest)
+
+
+def test_a_box_may_declare_dc_bias_and_rf() -> None:
+    box = declaring().box("box1")
+    assert box.dc_bias == ((15, 0.0), (16, 5.0))
+    assert box.rf[0] == method.RfChannel(channel=1, frequency_hz=943000,
+                                         drive_pct=50.0, mode="MANUAL")
+    assert box.rf[1] == method.RfChannel(channel=2, drive_pct=30.0)
+
+
+def test_a_declaration_comes_out_as_setter_strings_in_channel_order() -> None:
+    """Two decimals, which is what the box reports every one of these back at, so a
+    send log shows the declared value and the readback in the same shape (§8.2)."""
+    assert method.declared_commands(declaring().box("box1")) == (
+        "SDCB,15,0.00", "SDCB,16,5.00",
+        "SRFFRQ,1,943000", "SRFDRV,1,50.00", "SRFMODE,1,MANUAL",
+        "SRFDRV,2,30.00",
+    )
+
+
+def test_a_box_declaring_nothing_produces_no_strings() -> None:
+    assert method.declared_commands(method.loads(SAMPLE).box("box1")) == ()
+
+
+def test_a_declaration_round_trips() -> None:
+    declared = declaring()
+    assert method.loads(method.dumps(declared)) == declared
+
+
+def test_a_method_that_declares_nothing_writes_neither_key() -> None:
+    """The rule `acquisition.enable` already follows: a document that says nothing
+    about the analog state hashes exactly as it did before the keys existed."""
+    plain = method.loads(SAMPLE)
+    assert "dc_bias" not in method.to_dict(plain)["boxes"][0]
+    assert "rf" not in method.to_dict(plain)["boxes"][0]
+    assert method.stamp(plain)["method_hash"] == method.stamp(method.loads(SAMPLE))["method_hash"]
+
+
+def test_declaring_changes_the_hash() -> None:
+    assert method.stamp(declaring())["method_hash"] \
+        != method.stamp(method.loads(SAMPLE))["method_hash"]
+
+
+@pytest.mark.parametrize(
+    ("block", "expected"),
+    [
+        ("[boxes.dc_bias]\nguard = 5.0\n", "not a channel number"),
+        ("[boxes.dc_bias]\n0 = 5.0\n", "numbered from 1"),
+        ('[boxes.dc_bias]\n16 = "five"\n', "expected a voltage"),
+        ("[boxes.dc_bias]\n16 = true\n", "expected a voltage"),
+        ("[boxes.rf.1]\nmode = \"SOMETHING\"\n", "MANUAL"),
+        ("[boxes.rf.1]\n", "declares no setting"),
+        ("[boxes.rf.1]\nfrequency_hz = 943000.5\n", "whole number of hertz"),
+        ("[boxes.rf.1]\ndrive_pct = 50.0\nvolts = 5\n", "not a key of schema"),
+        ("[boxes.rf.0]\ndrive_pct = 50.0\n", "numbered from 1"),
+    ],
+)
+def test_a_malformed_declaration_is_refused(block: str, expected: str) -> None:
+    first, _, rest = SAMPLE.partition("\n[[boxes]]\nname = \"box2\"")
+    with pytest.raises(method.MethodError) as exc_info:
+        method.loads(first + "\n" + block + "\n[[boxes]]\nname = \"box2\"" + rest)
+    assert expected in " ".join(exc_info.value.problems)
+
+
+def test_a_declaration_is_not_range_checked_here() -> None:
+    """The board range-checks every value itself and NAKs one it cannot reach
+    (§8.2). A host that guessed the limits would refuse a method the instrument
+    would have accepted."""
+    first, _, rest = SAMPLE.partition("\n[[boxes]]\nname = \"box2\"")
+    loaded = method.loads(first + "\n[boxes.dc_bias]\n16 = -9999.0\n"
+                          + "\n[[boxes]]\nname = \"box2\"" + rest)
+    assert loaded.box("box1").dc_bias == ((16, -9999.0),)
+

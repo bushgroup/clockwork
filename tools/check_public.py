@@ -485,6 +485,7 @@ def main() -> int:
 
     from clockwork import instrument as instrument_module
     from clockwork import method as method_module
+    from clockwork import mips as mips_module
 
     # An instrument document the way SLIMPHONY's reads: a calibration, so the file has a
     # mass axis and `CalibrationDone` is 1, and the window the acquisition ran through
@@ -522,8 +523,23 @@ def main() -> int:
                     acq.Console(fake.command_endpoint) as console:
                 console.configure(offset_v=0.251)
                 acq.start_chain(console, stream, timeout=10.0, settle=2.0, quiet=0.1)
+                # The snapshot a run's `send_phases` returns, made here by hand
+                # because this section drives a `Recording` rather than the loop: what
+                # every box was holding, as found and after setup, and the conditions
+                # note nothing can read off a wire (lab record, task 40).
+                state_box = mips_module.Box(
+                    transport=mips_module.FakeBox(name="MIPS-A", dcb_channels=16,
+                                                  rf_channels=2),
+                    name="box1")
+                state_snapshot = acq.Snapshot(
+                    before=(mips_module.read_state(state_box),),
+                    after=(mips_module.read_state(state_box),),
+                    conditions="self-check, no instrument",
+                )
                 recording = acq.Recording.create(directory, recipe, geometry,
-                                                 instrument=machine)
+                                                 instrument=machine,
+                                                 box_state=state_snapshot.render(),
+                                                 conditions=state_snapshot.conditions)
                 raw, summed = recording.raw_path, recording.summed_path
                 check_true("the file exists before the first frame is asked for",
                            os.path.isfile(raw))
@@ -577,6 +593,13 @@ def main() -> int:
                    and stamped["ClockworkChannelOffset"] == "0.251"
                    and stamped["ClockworkInverted"] == "1"
                    and raw_file.global_params().extra["ClockworkFullScale"] == "0.5")
+        check_true("the boxes' state and the conditions note are stamped too, so a file "
+                   "says what shaped the beam and not only what strings were sent "
+                   "(lab record, task 40)",
+                   "as found" in stamped.get("ClockworkBoxState", "")
+                   and "DCB 1" in stamped.get("ClockworkBoxState", "")
+                   and stamped.get("ClockworkConditions")
+                   == "self-check, no instrument")
         one = UimfFile(raw).read_frame(1)
         total = opened.read_frame(1)
         exact = all(
@@ -594,8 +617,6 @@ def main() -> int:
     # marker, the fold, and a technical replicate. Nothing above this layer is allowed
     # to hold a second copy of that order, so this is where it is checked.
     import time as _time
-
-    from clockwork import mips as mips_module
 
     class SlowBox(mips_module.FakeBox):
         """A box whose every write costs what a USB round trip costs.
@@ -714,11 +735,12 @@ def main() -> int:
         acq.send_phases(recipe, boxes, progress=seen.append)
         sent = [(event.phase, event.command) for event in seen
                 if isinstance(event, acq.PhaseSent)]
+        phase_events = [event for event in seen if isinstance(event, acq.PhaseSent)]
         check_true(
             "send_phases sends setup, load and arm in the method's order, and waits "
             "for the box to say it is ready",
             [phase for phase, _ in sent] == ["setup", "setup", "load", "arm"]
-            and "TBLRDY" in seen[-1].detail,
+            and "TBLRDY" in phase_events[-1].detail,
         )
         check_true(
             "and a setup phase carrying a LOC-only command drops the box out of table "
@@ -745,6 +767,73 @@ def main() -> int:
             == [("load", "SMOD,LOC"), ("load", empty_setup.boxes[0].load[0])],
         )
 
+        # --- what the boxes were holding (lab record, task 40) ----------------
+        states = [event for event in seen if isinstance(event, acq.StateRead)]
+        check_true(
+            "send_phases reads each box's state back before the setup phase and again "
+            f"after it ({len(states)} readbacks)",
+            [event.when for event in states] == ["before", "after"],
+        )
+        check_true(
+            "and the readback asks only what the box's own GCMDS listing names, so a "
+            "getter this firmware lacks is never sent",
+            bool(states) and states[0].state.listed and not states[0].state.refused,
+        )
+        blind = mips_module.Box(transport=mips_module.FakeBox(strict=True), name="blind")
+        blind_state = mips_module.read_state(blind, listing=frozenset({"GVER"}))
+        check_true(
+            "a getter outside the listing is skipped rather than sent, and says so",
+            blind_state.version and not blind_state.refused
+            and "GDCBALL" in blind_state.skipped,
+        )
+
+        analog = mips_module.FakeBox(name="MIPS-A", dcb_channels=16, rf_channels=2)
+        declared = method_module.from_dict(
+            loop_document | {"boxes": [dict(loop_document["boxes"][0]) | {
+                "dc_bias": {"15": 0.0, "16": 5.0},
+                "rf": {"1": {"frequency_hz": 943000, "drive_pct": 50.0,
+                             "mode": "MANUAL"}},
+            }]})
+        analog_box = {"box1": mips_module.Box(transport=analog, name="box1")}
+        agreed: list[acq.Event] = []
+        snapshot = acq.send_phases(declared, analog_box, progress=agreed.append)
+        check_true(
+            "a method may declare DC bias and RF, and the declaration reaches the box "
+            "as ordinary setter strings at the end of the setup phase",
+            analog.dc_bias[15] == 5.0 and analog.dc_bias[14] == 0.0
+            and analog.rf[1]["SRFDRV"] == "50.00",
+        )
+        check_true(
+            "and a box that agrees with what its method declared is warned about "
+            "nothing",
+            not [event for event in agreed if isinstance(event, acq.Warned)
+                 and "declared" in event.message],
+        )
+        check_true(
+            "the snapshot renders both readings and the conditions note, which is what "
+            "the file's stamp holds and what the send log carries",
+            "as found" in snapshot.render() and "after setup" in snapshot.render(),
+        )
+
+        # The failure this exists to catch: a channel moved at the front panel after
+        # the method declared it. Nothing refuses, and the difference is named.
+        analog.dc_bias[15] = 37.0
+        moved = acq.declared_differences(declared.boxes[0],
+                                         mips_module.read_state(analog_box["box1"]))
+        check_true(
+            "a DC bias the box does not hold at what the method declared is warned "
+            "about, with both numbers, and refuses nothing",
+            len(moved) == 1 and "5.00 V" in moved[0] and "37.00 V" in moved[0],
+        )
+
+        arb = mips_module.Box(transport=mips_module.FakeBox(arb_modules=4), name="arb")
+        loose = acq.left_as_found(declared.boxes[0], mips_module.read_state(arb))
+        check_true(
+            "and every ARB module setting the method's setup does not name is reported "
+            f"as left as found ({len(loose)} settings)",
+            any("WFDIR is left as found" in line for line in loose),
+        )
+
         with acq.FakeConsole(notify_on_scans_count=scans // 4) as fake:
             # The stand-in publishes a frame from inside the handler for `acquire
             # frame`, so without a hold its batches race the start list the loop walks
@@ -763,6 +852,13 @@ def main() -> int:
                     directory=directory,
                     post_trigger_samples=fake.post_trigger_samples,
                     silence=0.3, gate_dwell=dwell, progress=seen.append,
+                    snapshot=acq.Snapshot(
+                        before=tuple(event.state for event in states
+                                     if event.when == "before"),
+                        after=tuple(event.state for event in states
+                                    if event.when == "after"),
+                        conditions="self-check, no instrument",
+                    ),
                 )
                 check_true(
                     f"the loop ran a whole acquisition ({run.text})",
@@ -998,9 +1094,10 @@ def main() -> int:
                     console=console.info(),
                     boxes=[("box1", "COM1", boxes["box1"].box_name(),
                             boxes["box1"].version())],
+                    conditions="bradykinin, self-check, no instrument",
                 )
                 with transcript_module.send_log(path, header=header):
-                    acq.send_phases(recipe, boxes)
+                    acq.send_phases(recipe, boxes, snapshot=True)
                     logged = acq.run_acquisition(
                         recipe, boxes=boxes, console=console, stream=stream,
                         directory=directory,
@@ -1047,6 +1144,18 @@ def main() -> int:
             "selfcheck.toml" in sent and "sha256 " in sent
             and "full scale 0.5 V" in sent and "not inverted" in sent
             and "SA220P" in sent and "box1        COM1" in sent,
+        )
+        check_true(
+            "with the boxes' state readback in it, as notes under each box's own name, "
+            "before the setup phase and again after it",
+            sent.count(f"{transcript_module.ASIDE} state before setup") == 1
+            and sent.count(f"{transcript_module.ASIDE} state after setup") == 1
+            and f"box1        {transcript_module.ASIDE}   DCB 1" in sent,
+        )
+        check_true(
+            "and the operator's conditions note in the header, where a replicate's log "
+            "carries it too",
+            "\nconditions\n" in sent and "bradykinin, self-check" in sent,
         )
         check_true(
             "and none of the chunk bookkeeping, batch summaries or byte reprs the "

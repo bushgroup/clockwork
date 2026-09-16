@@ -103,6 +103,14 @@ PROVENANCE_KEYS: tuple[tuple[ParamDef, str], ...] = (
               "Whether channel 1's data was inverted for this acquisition: 1 if so, 0 "
               "if not"),
      "inverted"),
+    (ParamDef(CLIENT_PARAM_ID_BASE + 8, "ClockworkBoxState", "System.String",
+              "What every MIPS box was holding for this acquisition, read back with "
+              "getters: as found before the setup phase, and again after it"),
+     "box_state"),
+    (ParamDef(CLIENT_PARAM_ID_BASE + 9, "ClockworkConditions", "System.String",
+              "Instrument conditions no getter reads, as the operator stated them: "
+              "sample, MCP voltage, pusher period, pDRE, collision energy"),
+     "conditions"),
 )
 """The stamp's fields as `Global_Params` parameters, each paired with the `stamp()` key
 it carries.
@@ -132,6 +140,16 @@ instrument document declared only against a console that reports none. Which of 
 three a file holds is in the parameter's own description rather than in a further key,
 because `ParamDescription` is written into `Global_Params` beside the value and a reader
 has both.
+
+The last two are the other half of the record, and they are text rather than a field
+apiece on purpose. `ClockworkBoxState` is the readback `clockwork.mips.read_state` took
+from every box before and after the `setup` phase, rendered exactly as the send log
+beside the file carries it, so the two cannot disagree and a reader comparing them is
+comparing the same lines; a parameter per DC bias channel would be sixteen per box of
+something no downstream tool has a name for. `ClockworkConditions` is the operator's own
+free text, the one part of an experiment that exists only if somebody typed it. Both were
+absent until task 40, and a file without them says what strings were sent and nothing
+about what the instrument was set to.
 """
 
 SA220P_DETECTOR_BITS = 14
@@ -344,6 +362,8 @@ class Recording:
         adc_name: str = "",
         console_version: str = "",
         stem: str | None = None,
+        box_state: str = "",
+        conditions: str = "",
         clock: Callable[[], float] = time.perf_counter,
         started: float | None = None,
         overwrite: bool = False,
@@ -363,6 +383,12 @@ class Recording:
         `console_version` is what to stamp as the console that acquired the file, and
         `Console.info().text` is the string to pass: it names the card, its firmware, the
         console's version and commit, and on the lab's build the fork and branch as well.
+
+        `box_state` and `conditions` are the same kind of thing one layer over: what the
+        boxes were holding when this run found them and what they were left at, and what
+        the operator said about the rest of the instrument. `clockwork.acq.loop` produces
+        both -- `Snapshot.render()` and the run's conditions note -- and a `Recording`
+        made by hand may pass neither, which stamps neither (lab record, task 40).
 
         `stem` names the files, and defaults to the method's `file_stem`. It is an
         argument rather than a method field because a technical replicate is the same
@@ -404,7 +430,8 @@ class Recording:
             prescan_accumulations=method.acquisition.accumulations,
             detector_bits=detector_bits,
             extra=stamp_globals(method, instrument=instrument, adc_name=adc_name,
-                                console_version=console_version),
+                                console_version=console_version,
+                                box_state=box_state, conditions=conditions),
         )
         writer = UimfWriter(path, globals_, overwrite=overwrite)
         recording = cls.__new__(cls)
@@ -719,6 +746,8 @@ def stamp_globals(
     instrument: Instrument = UNCALIBRATED,
     adc_name: str = "",
     console_version: str = "",
+    box_state: str = "",
+    conditions: str = "",
 ) -> dict[str, object]:
     """The provenance of one acquisition, as `Global_Params` values.
 
@@ -749,6 +778,11 @@ def stamp_globals(
     reported = ConsoleInfo.parse(console_version).full_scale_v if console_version else None
     record["full_scale_v"] = (reported if reported is not None
                               else instrument.vertical.full_scale_v)
+    # Neither is the method's either, and neither is derivable from anything that is:
+    # one is what the boxes answered this run and the other is what the operator said
+    # (lab record, task 40). An empty string is written by nothing, below.
+    record["box_state"] = box_state
+    record["conditions"] = conditions
     values: dict[str, object] = {"AcquisitionMethod": record["method_name"]}
     if adc_name:
         values["ADCName"] = adc_name

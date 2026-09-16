@@ -244,6 +244,38 @@ _COMPRESSOR_SET_ONLY: tuple[str, ...] = ("SARBCMP", "SARBCOFF", "SARBALTTS", "SA
 _DIO_OUTPUTS = "ABCDEFGHIJKLMNOP"
 """The digital outputs `SDIO` can drive. `Q`-`X` are inputs and alias onto `I`-`P`."""
 
+_RF_GETTABLE: dict[str, str] = {
+    "SRFFRQ": "GRFFRQ",
+    "SRFDRV": "GRFDRV",
+    "SRFVLT": "GRFVLT",
+    "SRFMODE": "GRFMODE",
+    "SRFPL": "GRFPL",
+}
+"""Per-channel RF `S…`/`G…` pairs (§8.3). First argument is the channel."""
+
+_RF_READINGS: tuple[str, ...] = ("GRFPPVP", "GRFPPVN", "GRFPWR")
+"""Per-channel measurements, with no setter: the two peaks and the head power."""
+
+_RF_DEFAULTS: dict[str, str] = {
+    "SRFFRQ": "1000000",
+    "SRFDRV": "0.00",
+    "SRFVLT": "0.00",
+    "SRFMODE": "MANUAL",
+    "SRFPL": "50",
+    "GRFPPVP": "0.00",
+    "GRFPPVN": "0.00",
+    "GRFPWR": "0.00",
+}
+"""What a channel holds before anything sets it.
+
+`MANUAL` rather than `AUTO` because that is what both of AUKLET's heads read on
+2026-09-15, and what a head set by hand at the front panel looks like. The three
+measurements are stand-ins on the same footing as `_ARB_DEFAULTS`: a stand-in
+cannot model an RF head, and a test that needs a peak reading writes one in.
+"""
+
+_RF_GET_TO_SET: dict[str, str] = {get: put for put, get in _RF_GETTABLE.items()}
+
 _COMPRESSOR_DEFAULTS: dict[str, str] = {
     "SARBCTBL": "",
     "SARBCMODE": "Normal",
@@ -286,6 +318,7 @@ class FakeBox:
         arb_version: str = "2.21",
         do_channels: int = 16,
         dcb_channels: int = 16,
+        rf_channels: int = 0,
     ) -> None:
         self.name = name
         self.version = version
@@ -327,6 +360,31 @@ class FakeBox:
         self.do_channels = do_channels
         self.dcb_channels = dcb_channels
         """`GCHAN,DO` and `GCHAN,DCB`; 16 each on the bench box (task 04)."""
+
+        self.rf_channels = rf_channels
+        """`GCHAN,RF`, and how many channels `GRFALL` reports.
+
+        Zero by default: most boxes on this instrument carry no RF driver board,
+        and a channel past the count is refused with error 2, which is how
+        AUKLET's two heads were told from the four the firmware allows for (§8.1).
+        """
+
+        self.dc_bias: list[float] = [0.0] * dcb_channels
+        """Every DC bias channel's setpoint, index 0 being channel 1 (§8.2)."""
+
+        self.dc_bias_error: float = 0.0
+        """How far the monitor reading sits from the setpoint, on every channel.
+
+        Zero by default, which is a stand-in and not a claim: a real board reads
+        back within about 0.25 V of its setpoint and never exactly on it. A test
+        that cares about the difference between `GDCBALL` and `GDCBALLV` sets
+        this; everything else is better off with two numbers that agree.
+        """
+
+        self.rf: dict[int, dict[str, str]] = {
+            channel: dict(_RF_DEFAULTS) for channel in range(1, rf_channels + 1)
+        }
+        """Per-channel RF driver state, by 1-based channel and set-command stem."""
 
         self.arb: dict[int, dict[str, str]] = {
             module: dict(_ARB_DEFAULTS) for module in range(1, arb_modules + 1)
@@ -465,7 +523,7 @@ class FakeBox:
         argument = argument.strip()
         handler = getattr(self, "_do_" + name.lower(), None)
         if handler is None:
-            if self._arb(name, argument):
+            if self._arb(name, argument) or self._rf(name, argument):
                 return
             if self.strict:
                 self._nak(1)  # invalid command
@@ -501,12 +559,161 @@ class FakeBox:
             "DO": self.do_channels,
             "DCB": self.dcb_channels,
             "ARB": self.arb_modules,
+            "RF": self.rf_channels,
         }
         found = counts.get(argument.upper())
         if found is None:
             self._nak(22)  # invalid channel request
             return
         self._value(str(found))
+
+    # -- section 8: DC bias and RF channel state ---------------------------
+
+    def _dc_channel(self, text: str) -> int | None:
+        """A 1-based DC bias channel, or a NAK for one this box does not hold."""
+        try:
+            channel = int(text.strip())
+        except ValueError:
+            self._nak(2)
+            return None
+        if not 1 <= channel <= self.dcb_channels:
+            self._nak(2)  # invalid argument, as a real board answers (section 8.1)
+            return None
+        return channel
+
+    def _do_sdcb(self, argument: str) -> None:
+        """`SDCB,<ch>,<volts>`: store a setpoint, in any mode (§8.2).
+
+        In any mode deliberately. This is the one command that does **not**
+        share `SDIO`'s latch problem: the DC bias service loop writes the DAC
+        with the AD5668's update-on-write command rather than waiting for the
+        `LDAC` the table timer owns, so a host may set a channel while a table
+        runs. The delay between the ACK and the voltage is not modelled here,
+        and on a real box it is one pass of that service loop.
+        """
+        index, _, value = argument.partition(",")
+        channel = self._dc_channel(index)
+        if channel is None:
+            return
+        try:
+            volts = float(value.strip())
+        except ValueError:
+            self._nak(2)
+            return
+        self.dc_bias[channel - 1] = volts
+        self._ack()
+
+    def _do_gdcb(self, argument: str) -> None:
+        channel = self._dc_channel(argument)
+        if channel is not None:
+            self._value(f"{self.dc_bias[channel - 1]:.2f}")
+
+    def _do_gdcbv(self, argument: str) -> None:
+        """`GDCBV`: the monitor reading, which is not the setpoint (§8.2)."""
+        channel = self._dc_channel(argument)
+        if channel is not None:
+            self._value(f"{self.dc_bias[channel - 1] + self.dc_bias_error:.2f}")
+
+    def _do_gdcball(self, _: str) -> None:
+        self._value(",".join(f"{volts:.2f}" for volts in self.dc_bias))
+
+    def _do_gdcballv(self, _: str) -> None:
+        self._value(",".join(f"{volts + self.dc_bias_error:.2f}"
+                             for volts in self.dc_bias))
+
+    def _do_sdcball(self, argument: str) -> None:
+        """`SDCBALL`: the whole bank in one command, all or nothing (§8.2)."""
+        fields = [field.strip() for field in argument.split(",") if field.strip()]
+        if len(fields) != self.dcb_channels:
+            self._nak(2)
+            return
+        try:
+            volts = [float(field) for field in fields]
+        except ValueError:
+            self._nak(2)
+            return
+        self.dc_bias = volts
+        self._ack()
+
+    def _rf_channel(self, argument: str) -> tuple[int | None, str]:
+        """Split `<ch>[,<value>]`, rejecting a channel this box does not hold.
+
+        Error 2 rather than a board-missing code, because that is what AUKLET
+        answered for `GRF*,3` and `GRF*,4` on a box with two heads (§8.1).
+        """
+        index, _, value = argument.partition(",")
+        try:
+            channel = int(index.strip())
+        except ValueError:
+            self._nak(2)
+            return None, ""
+        if not 1 <= channel <= self.rf_channels:
+            self._nak(2)
+            return None, ""
+        return channel, value.strip()
+
+    def _do_grfall(self, _: str) -> None:
+        """`GRFALL`: four fields per channel, not the three its help text says.
+
+        Frequency, drive level, positive peak, negative peak, every channel on
+        one line (§8.3). A box with no RF board answers an empty line rather
+        than rejecting, which is what the firmware's loop does when the first
+        channel is invalid.
+        """
+        fields: list[str] = []
+        for channel in range(1, self.rf_channels + 1):
+            state = self.rf[channel]
+            fields += [state["SRFFRQ"], state["SRFDRV"],
+                       state["GRFPPVP"], state["GRFPPVN"]]
+        self._value(",".join(fields))
+
+    def _rf(self, name: str, argument: str) -> bool:
+        """Handle one §8.3 command, or say it is none of them."""
+        if name in _RF_GETTABLE:
+            channel, value = self._rf_channel(argument)
+            if channel is not None:
+                self.rf[channel][name] = value
+                self._ack()
+            return True
+        if name in _RF_GET_TO_SET:
+            channel, _ = self._rf_channel(argument)
+            if channel is not None:
+                self._value(self.rf[channel][_RF_GET_TO_SET[name]])
+            return True
+        if name in _RF_READINGS:
+            channel, _ = self._rf_channel(argument)
+            if channel is not None:
+                self._value(self.rf[channel][name])
+            return True
+        return False
+
+    def _do_gcmds(self, _: str) -> None:
+        """`GCMDS`: every command this stand-in answers, one per line.
+
+        Unframed, after a bare ACK, terminated `\\r\\r\\n` a line, which is how
+        the real listing arrives (§8.4). It is generated from the dispatch rather
+        than written out, so a stand-in that gains a command gains it here too
+        and a readback filtering on this listing cannot drift from what the
+        stand-in will actually answer.
+        """
+        names = {name[4:].upper() for name in dir(self)
+                 if name.startswith("_do_")}
+        # `GARBVER` and `STBLDAT` are answered off the dispatch rather than from a
+        # `_do_` method, so neither is found by the sweep above and both would look
+        # absent to a caller filtering on this listing.
+        names.update({"GARBVER", "STBLDAT", "TBLRPT"})
+        names.update(_ARB_SET_ONLY)
+        names.update(_ARB_NO_ARGUMENT)
+        names.update(_ARB_GETTABLE)
+        names.update(_ARB_GETTABLE.values())
+        names.update(_COMPRESSOR_GETTABLE)
+        names.update(_COMPRESSOR_GETTABLE.values())
+        names.update(_COMPRESSOR_SET_ONLY)
+        names.update(_RF_GETTABLE)
+        names.update(_RF_GETTABLE.values())
+        names.update(_RF_READINGS)
+        self._emit(_ACK_ONLY + "".join(f"{name}\r\r\n" for name in sorted(names))
+                   .encode("ascii"))
 
     def _do_stblnum(self, argument: str) -> None:
         try:

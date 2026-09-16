@@ -6,7 +6,9 @@ states. In particular the four terminator conventions the firmware uses (LF-CR
 after a set-style ACK, CR-LF after a printed value, a doubled newline after an
 asynchronous status line, and a bare LF after one of the two abort forms) all
 collapse to a single token stream under the rule the document gives: drop every
-CR, split on LF, treat 0x06 and 0x15 as tokens of their own, discard blanks.
+CR, split on LF, treat 0x06 and 0x15 as tokens of their own, and skip blanks.
+Framed and skipped rather than discarded outright, because an empty line in one
+position is a real answer: see `Kind.BLANK`.
 
 No Qt, no hardware, no I/O: this module is pure byte handling, which is what
 lets both the real link and the simulated box in `transport.py` share it.
@@ -54,6 +56,16 @@ class Kind(enum.Enum):
     ACK = "ack"
     NAK = "nak"
     LINE = "line"
+    BLANK = "blank"
+    """A line terminator with nothing before it.
+
+    Framed rather than dropped because position gives it a meaning in exactly
+    one place: a get-style command whose value is the empty string answers a
+    bare ACK and then an empty line, which a framer that discarded empty lines
+    could not tell from a box that never answered (§1). Everywhere else a blank
+    is noise -- the LF-CR after a set-style ACK and the doubled newline after a
+    status line each leave one -- and `Box` skips them.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,11 +76,14 @@ class Token:
     def __str__(self) -> str:
         if self.kind is Kind.LINE:
             return f"line {self.text!r}"
+        if self.kind is Kind.BLANK:
+            return "blank line"
         return self.kind.value.upper()
 
 
 ACK_TOKEN = Token(Kind.ACK)
 NAK_TOKEN = Token(Kind.NAK)
+BLANK_TOKEN = Token(Kind.BLANK)
 
 
 class ResponseReader:
@@ -102,8 +117,7 @@ class ResponseReader:
             elif byte == 0x0A:
                 text = self._line.decode("ascii", "replace").strip()
                 self._line.clear()
-                if text:
-                    tokens.append(Token(Kind.LINE, text))
+                tokens.append(Token(Kind.LINE, text) if text else BLANK_TOKEN)
             else:
                 self._line.append(byte)
         return tokens

@@ -58,10 +58,22 @@ from clockwork.acq import (
     cautions,
     refusals,
     run_acquisition,
-    send_phases,
 )
+from clockwork.acq import send_phases as _send_phases
 from clockwork.mips import Box, BoxRejected, FakeBox, compile_table, digital_events
 from clockwork.mips import compressor as mips_compressor
+
+
+def send_phases(*args, snapshot: bool = False, **kwargs):
+    """`send_phases` with the state readback off unless a test asks for it.
+
+    The readback is on by default in the package, and on a real box it costs one
+    `GCMDS` listing and a few dozen round trips. Against `FakeBox` it costs the
+    settling silence `read_unframed` waits out, twice per box per call, which is
+    seconds of wall clock in every one of the forty-odd tests here that is about
+    something else. The tests that *are* about it pass `snapshot=True`.
+    """
+    return _send_phases(*args, snapshot=snapshot, **kwargs)
 
 SCANS = 32
 """Two of the fake's 16-scan spectrum periods, so a fold has something to add."""

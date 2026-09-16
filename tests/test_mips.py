@@ -48,8 +48,10 @@ EXAMPLE = "STBLDAT;25:[A:10,10:A:1,25:A:0:5:34.5,100:];"
 # --------------------------------------------------------------------------
 
 
-def test_set_style_ack_is_one_token() -> None:
-    assert [t.kind for t in ResponseReader().feed(b"\x06\n\r")] == [Kind.ACK]
+def test_set_style_ack_is_an_ack_and_a_blank() -> None:
+    """The LF-CR terminator leaves an empty line, which is framed and skipped."""
+    assert [t.kind for t in ResponseReader().feed(b"\x06\n\r")] \
+        == [Kind.ACK, Kind.BLANK]
 
 
 def test_get_style_reply_is_an_ack_then_a_line() -> None:
@@ -59,25 +61,28 @@ def test_get_style_reply_is_an_ack_then_a_line() -> None:
 
 
 def test_nak_swallows_its_question_mark() -> None:
-    assert [t.kind for t in ResponseReader().feed(b"\x15?\n\r")] == [Kind.NAK]
+    assert [t.kind for t in ResponseReader().feed(b"\x15?\n\r")] \
+        == [Kind.NAK, Kind.BLANK]
 
 
 def test_nak_swallows_its_question_mark_across_a_split_read() -> None:
     reader = ResponseReader()
     assert [t.kind for t in reader.feed(b"\x15")] == [Kind.NAK]
-    assert reader.feed(b"?\n\r") == []
+    assert [t.kind for t in reader.feed(b"?\n\r")] == [Kind.BLANK]
 
 
 def test_status_lines_survive_their_doubled_newline() -> None:
     tokens = ResponseReader().feed(b"TBLRDY\n\r\nTBLTRIG\n\r\n")
-    assert [t.text for t in tokens] == ["TBLRDY", "TBLTRIG"]
+    assert [t.text for t in tokens if t.kind is Kind.LINE] \
+        == ["TBLRDY", "TBLTRIG"]
 
 
 def test_a_line_split_across_reads_is_one_token() -> None:
     reader = ResponseReader()
     assert reader.feed(b"TBLCM") == []
     assert reader.partial() == "TBLCM"
-    assert [t.text for t in reader.feed(b"PLT\n\r\n")] == ["TBLCMPLT"]
+    assert [t.text for t in reader.feed(b"PLT\n\r\n") if t.kind is Kind.LINE] \
+        == ["TBLCMPLT"]
 
 
 @pytest.mark.parametrize(

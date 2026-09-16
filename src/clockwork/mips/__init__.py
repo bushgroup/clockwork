@@ -10,6 +10,7 @@ in it may run on the UI thread.
     box.py         one controller: commands, table loads, arming, status
     table.py       the compiled table layout, predicted and read back
     compressor.py  an ARB compression table, read as far as its loop counts
+    state.py       what a box is holding, read back with getters only
     transport.py   a COM port, or a box simulated in this process
     wire.py        framing, error codes, the asynchronous status lines
 
@@ -69,6 +70,14 @@ from .table import (
     encode,
     parse_report,
 )
+from .state import (
+    ARB_MODULE_GETTERS,
+    MAX_ARB_MODULES,
+    BoxState,
+    RfReading,
+    describe,
+    read_state,
+)
 from .transport import FakeBox, SerialTransport, Transport, open_serial
 from .wire import (
     ACK,
@@ -88,16 +97,19 @@ from .wire import (
 
 __all__ = [
     "ACK",
+    "ARB_MODULE_GETTERS",
     "COMPRESSION_COMMAND",
     "DEFAULT_CHUNK_BYTES",
     "DEFAULT_CHUNK_GAP_S",
     "DEFAULT_TIMEOUT_S",
     "ERR_ALREADY_LOCAL",
+    "MAX_ARB_MODULES",
     "NAK",
     "RING_BUFFER_BYTES",
     "TOKEN_TIMEOUT_S",
     "Box",
     "BoxRejected",
+    "BoxState",
     "BoxTimeout",
     "Compiled",
     "Entry",
@@ -106,6 +118,7 @@ __all__ = [
     "MipsError",
     "Report",
     "ResponseReader",
+    "RfReading",
     "SerialTransport",
     "Table",
     "TableEvent",
@@ -121,6 +134,7 @@ __all__ = [
     "compression_passes",
     "compression_table",
     "decode",
+    "describe",
     "dio_command",
     "differences",
     "digital_events",
@@ -128,5 +142,6 @@ __all__ = [
     "error_text",
     "open_serial",
     "parse_report",
+    "read_state",
     "table_event",
 ]

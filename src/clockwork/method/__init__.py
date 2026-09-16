@@ -186,14 +186,46 @@ def table_period(
 
 
 @dataclass(frozen=True, slots=True)
+class RfChannel:
+    """One RF head a method declares, by 1-based channel.
+
+    Every field is optional and a field left out is not sent, so a method that
+    cares only about drive level declares only that and leaves the frequency
+    where the head was tuned. `mode` is `MANUAL` or `AUTO` (wire format §8.3);
+    `voltage_v` is the setpoint `AUTO` servos towards and is meaningless in
+    `MANUAL`, which is why nothing here defaults it.
+    """
+
+    channel: int
+    frequency_hz: int | None = None
+    drive_pct: float | None = None
+    voltage_v: float | None = None
+    mode: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class BoxMethod:
-    """One box's strings, in three phases, each sent in the order written."""
+    """One box's strings, in three phases, each sent in the order written.
+
+    `dc_bias` and `rf` are the analog state the strings do not carry: what a
+    trainee would otherwise have set at the front panel that morning, declared
+    so that a file can say what shaped the beam (lab record, task 40). Both are
+    turned into ordinary setter strings by `declared_commands` and sent at the
+    end of the `setup` phase, and both are partial by design -- a channel the
+    method does not name is left exactly as the box had it, and reported as
+    left as found rather than silently zeroed.
+    """
 
     name: str
     port: str
     setup: tuple[str, ...] = field(default_factory=tuple)
     load: tuple[str, ...] = field(default_factory=tuple)
     arm: tuple[str, ...] = field(default_factory=tuple)
+    dc_bias: tuple[tuple[int, float], ...] = field(default_factory=tuple)
+    """Declared DC bias setpoints, `(channel, volts)`, in channel order."""
+
+    rf: tuple[RfChannel, ...] = field(default_factory=tuple)
+    """Declared RF driver settings, in channel order."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,6 +327,123 @@ def _no_unknown_keys(
                 "[[boxes]] table, or TOML reads it as part of the last one"
             )
         problems.append(f"{path}.{key}: not a key of schema {SCHEMA_VERSION}{hint}")
+
+
+def _dc_bias(
+    box_raw: dict, path: str, problems: list[str]
+) -> tuple[tuple[int, float], ...] | None:
+    """`[boxes.dc_bias]`: a table of 1-based channel to volts.
+
+    TOML has no integer keys, so the channel is a bare key read back as a
+    string and parsed here. Returned sorted by channel, which is what makes two
+    methods that declare the same biases in different orders hash alike.
+
+    No range check on the voltage: the limits belong to the board, which
+    range-checks every value itself and NAKs one it cannot reach (§8.2), and a
+    host that guessed them would refuse a method the instrument would have
+    accepted.
+    """
+    raw = box_raw.get("dc_bias")
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict):
+        problems.append(f"{path}.dc_bias: expected a table of channel = volts")
+        return None
+    declared: dict[int, float] = {}
+    for key, value in raw.items():
+        try:
+            channel = int(key)
+        except ValueError:
+            problems.append(f"{path}.dc_bias: {key!r} is not a channel number")
+            continue
+        if channel < 1:
+            problems.append(f"{path}.dc_bias.{key}: channels are numbered from 1")
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            problems.append(f"{path}.dc_bias.{key}: expected a voltage")
+            continue
+        declared[channel] = float(value)
+    if problems and any(problem.startswith(f"{path}.dc_bias") for problem in problems):
+        return None
+    return tuple(sorted(declared.items()))
+
+
+def _rf(box_raw: dict, path: str, problems: list[str]) -> tuple[RfChannel, ...] | None:
+    """`[boxes.rf.<channel>]`: one table per RF head, every field optional.
+
+    An empty table is a problem rather than a no-op: a method that names a
+    channel and declares nothing about it has said something it did not mean,
+    and the readback would report it as left as found either way.
+    """
+    raw = box_raw.get("rf")
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict):
+        problems.append(f"{path}.rf: expected a table per channel, [boxes.rf.1] and so on")
+        return None
+    channels: list[RfChannel] = []
+    bad = False
+    for key, value in raw.items():
+        where = f"{path}.rf.{key}"
+        try:
+            channel = int(key)
+        except ValueError:
+            problems.append(f"{path}.rf: {key!r} is not a channel number")
+            bad = True
+            continue
+        if channel < 1:
+            problems.append(f"{where}: channels are numbered from 1")
+            bad = True
+            continue
+        if not isinstance(value, dict):
+            problems.append(f"{where}: expected a table of settings")
+            bad = True
+            continue
+        _no_unknown_keys(
+            value, where, ("frequency_hz", "drive_pct", "voltage_v", "mode"), problems
+        )
+        before = len(problems)
+        frequency = value.get("frequency_hz")
+        if frequency is not None and (isinstance(frequency, bool)
+                                      or not isinstance(frequency, int)):
+            problems.append(f"{where}.frequency_hz: expected a whole number of hertz")
+            frequency = None
+        drive = _optional_number(value, "drive_pct", where, problems)
+        voltage = _optional_number(value, "voltage_v", where, problems)
+        mode = value.get("mode")
+        if mode is not None:
+            if not isinstance(mode, str) or mode.upper() not in ("MANUAL", "AUTO"):
+                problems.append(f"{where}.mode: expected 'MANUAL' or 'AUTO'")
+                mode = None
+            else:
+                mode = mode.upper()
+        if len(problems) > before:
+            # A field this channel got wrong is the problem to report. Saying in
+            # the same breath that the channel declares nothing would be a second
+            # complaint about the first one, and the one a reader would fix.
+            bad = True
+            continue
+        if (frequency, drive, voltage, mode) == (None, None, None, None):
+            problems.append(f"{where}: declares no setting; leave the channel out instead")
+            bad = True
+            continue
+        channels.append(RfChannel(channel=channel, frequency_hz=frequency,
+                                  drive_pct=drive, voltage_v=voltage, mode=mode))
+    if bad:
+        return None
+    return tuple(sorted(channels, key=lambda entry: entry.channel))
+
+
+def _optional_number(
+    table: dict, key: str, where: str, problems: list[str]
+) -> float | None:
+    value = table.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        problems.append(f"{where}.{key}: expected a number")
+        return None
+    return float(value)
 
 
 def _positive_int(value: object, path: str, problems: list[str]) -> int | None:
@@ -487,7 +636,8 @@ def from_dict(data: dict) -> Method:
                 problems.append(f"{path}: expected a table")
                 continue
             _no_unknown_keys(
-                box_raw, path, ("name", "port", "setup", "load", "arm"), problems
+                box_raw, path,
+                ("name", "port", "setup", "load", "arm", "dc_bias", "rf"), problems,
             )
             name = _identifier(box_raw.get("name"), f"{path}.name", problems)
             port = _identifier(box_raw.get("port"), f"{path}.port", problems)
@@ -495,13 +645,17 @@ def from_dict(data: dict) -> Method:
                 key: _phase(box_raw, key, path, problems, warnings)
                 for key in ("setup", "load", "arm")
             }
+            dc_bias = _dc_bias(box_raw, path, problems)
+            rf = _rf(box_raw, path, problems)
             if name is not None:
                 if name in seen_names:
                     problems.append(f"{path}.name: duplicate box name {name!r}")
                 seen_names.add(name)
             if phases["load"]:
                 any_load = True
-            if name is not None and port is not None and None not in phases.values():
+            if (name is not None and port is not None
+                    and None not in phases.values()
+                    and dc_bias is not None and rf is not None):
                 boxes.append(
                     BoxMethod(
                         name=name,
@@ -509,6 +663,8 @@ def from_dict(data: dict) -> Method:
                         setup=phases["setup"],
                         load=phases["load"],
                         arm=phases["arm"],
+                        dc_bias=dc_bias,
+                        rf=rf,
                     )
                 )
         if not any_load:
@@ -583,10 +739,63 @@ def to_dict(method: Method) -> dict:
                 "setup": list(box.setup),
                 "load": list(box.load),
                 "arm": list(box.arm),
+                # Written only where the box declares one, so a method that says
+                # nothing about the analog state round-trips to a document that
+                # still says nothing and hashes as it did before these keys
+                # existed -- the same rule `acquisition.enable` follows above.
+                **({"dc_bias": {str(channel): volts for channel, volts in box.dc_bias}}
+                   if box.dc_bias else {}),
+                **({"rf": {
+                    str(entry.channel): {
+                        key: value for key, value in (
+                            ("frequency_hz", entry.frequency_hz),
+                            ("drive_pct", entry.drive_pct),
+                            ("voltage_v", entry.voltage_v),
+                            ("mode", entry.mode),
+                        ) if value is not None
+                    }
+                    for entry in box.rf
+                }} if box.rf else {}),
             }
             for box in method.boxes
         ],
     }
+
+
+def declared_commands(box: BoxMethod) -> tuple[str, ...]:
+    """The setter strings a box's declared DC bias and RF come to.
+
+    Generated rather than written by a trainee, and sent at the **end** of the
+    `setup` phase so that the declaration is what the box is left holding: a
+    hand-written string earlier in the phase that touches the same channel is
+    overwritten rather than overwriting, which is the point of declaring it.
+
+    Order is channel order within each family, DC bias before RF. Nothing here
+    is conditional on what the box currently holds -- that comparison is the
+    readback's, after these have been sent (`clockwork.acq.loop`).
+
+    Every string is a `S…` command from wire format §8.2 and §8.3. `SDCB` is
+    safe to send in any mode, unlike `SDIO`; the RF setters change the voltage
+    on a head at the speed a serial command arrives, which is what a hand on the
+    front panel does and is the reason a method declaring them is a decision
+    (Matt, 2026-09-15, task 40).
+    """
+    # Two decimals, which is the precision the box reports every one of these
+    # back at: a send log then shows the declared value and the readback in the
+    # same shape, and a reader comparing the two is comparing strings.
+    commands: list[str] = [
+        f"SDCB,{channel},{volts:.2f}" for channel, volts in box.dc_bias
+    ]
+    for entry in box.rf:
+        if entry.frequency_hz is not None:
+            commands.append(f"SRFFRQ,{entry.channel},{entry.frequency_hz}")
+        if entry.drive_pct is not None:
+            commands.append(f"SRFDRV,{entry.channel},{entry.drive_pct:.2f}")
+        if entry.voltage_v is not None:
+            commands.append(f"SRFVLT,{entry.channel},{entry.voltage_v:.2f}")
+        if entry.mode is not None:
+            commands.append(f"SRFMODE,{entry.channel},{entry.mode}")
+    return tuple(commands)
 
 
 def loads(text: str) -> Method:
@@ -655,7 +864,9 @@ __all__ = [
     "Enable",
     "BoxMethod",
     "Method",
+    "RfChannel",
     "Step",
+    "declared_commands",
     "from_dict",
     "to_dict",
     "loads",

@@ -35,6 +35,15 @@ setup = ["STBLCLK,EXT", "STBLTRG,POS"]
 load = ["STBLDAT;0:A:1[A:1,783:15:10,806:16:37,5000:];"]
 arm = ["SMOD,TBL"]
 
+[boxes.dc_bias]
+15 = 0.0
+16 = 5.0
+
+[boxes.rf.1]
+frequency_hz = 943000
+drive_pct = 50.0
+mode = "MANUAL"
+
 [[boxes]]
 name = "box2"
 port = "COM4"
@@ -50,6 +59,10 @@ load = []
 arm = []
 ```
 
+A `[boxes.dc_bias]` or `[boxes.rf.<n>]` table belongs to the `[[boxes]]` table above it, so it goes
+between that box and the next one. Box 1 above is the box with the DC bias and RF boards in it; the
+ARB boxes have neither.
+
 - `schema_version` pins the document to the shape this section describes. Clockwork rejects a
   method whose `schema_version` it does not recognize rather than guess at an unknown layout.
   Version 1, which stored one flat list of strings per box and had no start sequence, is rejected
@@ -60,8 +73,8 @@ arm = []
   say how those are divided into acquisition console frames and what survives on disk,
   `file_stem`, the base name the UIMF file is written under, and `enable`, which names the digital
   output that gates the digitizer.
-- `[[boxes]]` is an array of tables, one per box, each naming the box, its COM port, and its
-  strings in three phases.
+- `[[boxes]]` is an array of tables, one per box, each naming the box, its COM port, its
+  strings in three phases, and optionally the DC bias and RF settings it should hold.
 - `start` and `reset` are the two ordered cross-box sequences, written as `[box, command]` pairs.
 
 `start` and `reset` are top-level keys and belong above the first `[[boxes]]` table. TOML gives a
@@ -88,6 +101,67 @@ strings by how long their effect lasts.
 Each phase is an array of strings sent in the order written, and any of the three may be empty. A
 box that only ever needs its persistent block, as `box3` does above, carries a `setup` and nothing
 else. At least one box in a method has something to `load`.
+
+## The analog state a method may declare
+
+The strings above are the experiment's timing. They say nothing about the DC biases that hold the
+ions, or the RF that confines them, because a pulse sequence only moves a channel between values
+the box already holds. Those values were set at a front panel, and until a method could declare
+them a file said what was sent and nothing about what shaped the beam.
+
+Two optional tables per box say them.
+
+```toml
+[boxes.dc_bias]
+15 = 0.0
+16 = 5.0
+
+[boxes.rf.1]
+frequency_hz = 943000
+drive_pct = 50.0
+mode = "MANUAL"
+```
+
+`dc_bias` maps a 1-based channel to a voltage. `rf` is one table per 1-based RF channel, with
+`frequency_hz`, `drive_pct`, `voltage_v` and `mode` (`MANUAL` or `AUTO`), each optional.
+
+Both are **partial by design**. A channel a method does not name is left exactly as the box had
+it, and reported as left as found rather than silently zeroed. Nothing is range-checked here: the
+board checks every value against its own limits and rejects one it cannot reach, and a host that
+guessed those limits would refuse a method the instrument would have accepted.
+
+Clockwork turns each declaration into ordinary setter strings and sends them at the **end** of the
+`setup` phase, after the trainee's own strings, so the declaration is what the box is left
+holding. `SDCB` may be sent in any mode, unlike `SDIO`; the RF setters change the voltage on a head
+at the speed a serial command arrives, which is what a hand on the front panel does, so declaring
+one is a decision rather than a formality.
+
+Note that a channel a method declares **and** a pulse-sequence table drives ends up wherever the
+table last put it. Declare the resting value, not the pulsed one.
+
+## What the boxes were holding
+
+Before a method is sent, clockwork reads every box's persistent state back with getters and
+nothing else, and reads it again after the `setup` phase. Both readings go into the send log
+beside the UIMF file, under each box's own name, and both are stamped into the file under
+`ClockworkBoxState`. What is read is the identity and firmware, the channel counts, the DC bias
+bank as both setpoints and monitor readings, every RF channel, the sequencer clock and status, and
+each ARB module's frequency, range, direction, mode and alternate-waveform state.
+
+Two things are reported from the comparison, and neither stops an acquisition:
+
+- **Left as found.** Every ARB module setting the method's `setup` does not name, with what the box
+  is holding. A setting nobody sets is whatever the last method left behind, which is how a
+  transmission run inherited a reversed direction from the run before it and transmitted nothing.
+- **Declared but not held.** Every DC bias or RF channel whose readback disagrees with what the
+  method declared, with both numbers. A declared bias is compared against the setpoint the box
+  reports; the monitor reading is compared against that setpoint instead, because it is a
+  measurement of the output and not of the command.
+
+Alongside them travels a free-text conditions note the operator writes, which goes in the send
+log's header and into the file under `ClockworkConditions`. It is the part of an experiment no
+getter reads: the sample, the MCP voltage, the pusher period, the pDRE setting, the collision
+energy.
 
 ## Starting, and starting again
 
@@ -185,9 +259,11 @@ traces back to the exact strings sent to every box and the order they went in.
 | `console_version` | The acquisition console's reported version, or `None` if unavailable |
 
 Those five fields land in the finished UIMF file's `Global_Params`, under parameter IDs clockwork
-owns. Two more join them there from the [instrument file](instrument-file-format.md),
-`ClockworkChannelOffset` and `ClockworkFullScale`, which record the window the acquisition ran
-through. A method's hash changes if and only if some field in the document changes, which makes it
+owns. Three more join them there from the [instrument file](instrument-file-format.md),
+`ClockworkChannelOffset`, `ClockworkFullScale` and `ClockworkInverted`, which record the window the
+acquisition ran through; and two more from the run itself, `ClockworkBoxState` and
+`ClockworkConditions`, which record what the boxes were holding and what the operator said about
+the rest of the instrument. A method's hash changes if and only if some field in the document changes, which makes it
 a stable key for grouping acquisitions by the method that produced them. The file name is not one
 of the fields: a technical replicate is the same method written to a different file, so every
 replicate of one method stamps to the same hash.
@@ -200,7 +276,10 @@ per fix. Rejected: an unrecognized `schema_version`, a missing or empty field, a
 does not define, a duplicate box name, a box name or port with whitespace around it, a
 `repetition_mode` that is not one of the two, a `keep_raw` that is not a boolean, a `file_stem`
 containing a path separator, a `start` or `reset` step naming a box the method does not have, an
-empty `start`, and a method in which no box has anything to `load`.
+empty `start`, a method in which no box has anything to `load`, a `dc_bias` or `rf` key that is not
+a channel number or is below 1, an `rf` `mode` that is neither `MANUAL` nor `AUTO`, a
+`frequency_hz` that is not a whole number, and an `rf` channel table that declares no setting at
+all.
 
 One class of problem is repaired rather than rejected. A command string with whitespace around it
 is stripped, and the repair is reported in `Method.warnings`, one line per string, naming the

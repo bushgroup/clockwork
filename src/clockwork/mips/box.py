@@ -50,7 +50,9 @@ from __future__ import annotations
 import logging
 import time
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from ..transcript import DECIDED, FROM_BOX, TO_BOX, UNPROMPTED
 from ..transcript import render as _render
@@ -68,6 +70,9 @@ from .wire import (
     error_text,
     table_event,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only
+    from collections.abc import Iterator
 
 _LOG = logging.getLogger("clockwork.mips.wire")
 """The transcript's name for this link. Documented in `clockwork.transcript`."""
@@ -165,6 +170,8 @@ class Box:
     _reader: ResponseReader = field(default_factory=ResponseReader, repr=False)
     _tokens: deque[Token] = field(default_factory=deque, repr=False)
     _querying_error: bool = field(default=False, repr=False)
+    _aside: int = field(default=0, repr=False)
+    """Nesting depth of `summarised()`, which keeps traffic out of the send log."""
 
     @classmethod
     def open(
@@ -190,6 +197,36 @@ class Box:
     def __exit__(self, *_: object) -> None:
         self.close()
 
+    @contextmanager
+    def summarised(self) -> Iterator[Box]:
+        """Keep everything sent inside the block out of the send log, not the transcript.
+
+        For an exchange whose individual round trips say nothing a trainee wants
+        and whose *result* says everything: a state readback is forty-odd getters
+        and one `GCMDS` listing per box, which in a file whose job is to show the
+        method's strings in the order they went would bury them (lab record, tasks
+        39 and 40). The caller writes the block it made of them instead, with
+        `clockwork.transcript.note_block`.
+
+        The wire transcript is untouched, so the getters and their answers are
+        still on the forensic record byte for byte, and the two files of one run
+        still cannot disagree: everything in the send log is in the transcript,
+        which is the invariant, and not the other way round.
+
+        **A status line a box raises on its own still gets through.** `TBLRDY`,
+        `TBLTRIG`, `TBLCMPLT` and `ABORTED` arrive unprompted and are news
+        wherever they land, including in the middle of a readback; what this
+        suppresses is the traffic the caller chose to send.
+
+        Nests, so a helper that uses it inside a block that already has does not
+        turn logging back on halfway.
+        """
+        self._aside += 1
+        try:
+            yield self
+        finally:
+            self._aside -= 1
+
     # -- reading -----------------------------------------------------------
 
     def _pump(self, timeout: float) -> None:
@@ -213,9 +250,17 @@ class Box:
                        extra=_sent(UNPROMPTED, self.name, event.value))
 
     def _sift(self) -> None:
-        """Move the status lines out of the token queue and into `events`."""
+        """Move the status lines out of the token queue and into `events`.
+
+        Blank lines go out with them, unkept. Every terminator convention on
+        this link leaves one somewhere (`Kind.BLANK`), and the one position
+        where a blank means something is read directly by `_await_reply` and
+        never reaches here.
+        """
         keep: deque[Token] = deque()
         for token in self._tokens:
+            if token.kind is Kind.BLANK:
+                continue
             event = table_event(token.text) if token.kind is Kind.LINE else None
             if event is None:
                 keep.append(token)
@@ -223,18 +268,33 @@ class Box:
                 self._file(event)
         self._tokens = keep
 
-    def _next_token(self, deadline: float, what: str, *, verbatim: bool = False) -> Token:
-        """The next token, filing status lines on the way past.
+    def _next_token(
+        self,
+        deadline: float,
+        what: str,
+        *,
+        verbatim: bool = False,
+        blank_ok: bool = False,
+    ) -> Token:
+        """The next token, filing status lines and skipping blanks on the way past.
 
         `verbatim` suppresses that filing, for the one line where the
         distinction cannot be made from the text: `GTBLSTA` answers `ABORTED`,
         which is also exactly what an abort's status line says. Position is the
         only thing that separates them, and position is only known here, at the
         point where a get-style command has had its ACK and its value is next.
+
+        `blank_ok` is the one place a blank line is an answer rather than a
+        terminator's leftover: the value of a get-style command whose value is
+        empty (`Kind.BLANK`). It is set at exactly that position and nowhere
+        else, because a blank skipped there would be the *next* command's ACK
+        read as this one's value.
         """
         while True:
             while self._tokens:
                 token = self._tokens.popleft()
+                if token.kind is Kind.BLANK and not blank_ok:
+                    continue
                 if not verbatim and token.kind is Kind.LINE:
                     event = table_event(token.text)
                     if event is not None:
@@ -299,7 +359,7 @@ class Box:
             summary = (f"resync after {time.monotonic() - started:.2f} s discarded "
                        f"{len(self._tokens)} token(s), kept {len(self.events)} status line(s)")
             _LOG.debug("%s   %s", self.name, summary,
-                       extra=_sent(DECIDED, self.name, summary))
+                       extra=self._marking(_sent(DECIDED, self.name, summary)))
         self._tokens.clear()
         self._reader = ResponseReader()
         collected = list(self.events)
@@ -342,6 +402,10 @@ class Box:
         self.transport.write(payload)
         return self._await_reply(text, value=value, timeout=timeout)
 
+    def _marking(self, extra: dict[str, object]) -> dict[str, object] | None:
+        """One record's send-log marking, or none inside `summarised()`."""
+        return None if self._aside else extra
+
     def _reading_error_code(self, mark: str, text: str) -> dict[str, object] | None:
         """The send log's `extra` for this command, or nothing while asking `GERR`.
 
@@ -349,7 +413,9 @@ class Box:
         no information at all in a send log: its answer is already on the NAK's own
         line, in words, beside the string that provoked it.
         """
-        return None if self._querying_error else _sent(mark, self.name, text)
+        if self._querying_error or self._aside:
+            return None
+        return _sent(mark, self.name, text)
 
     def _answered(self, text: str) -> None:
         """One classified reply, for the send log and for nothing else.
@@ -359,7 +425,7 @@ class Box:
         through, and `\\x15?` is a refusal whose reason took another round trip to
         learn. This is that round trip's outcome, written where a reader is.
         """
-        if self._querying_error or not _LOG.isEnabledFor(logging.DEBUG):
+        if self._querying_error or self._aside or not _LOG.isEnabledFor(logging.DEBUG):
             return
         _LOG.debug(text, extra=_sent(FROM_BOX, self.name, text, only=True))
 
@@ -380,8 +446,12 @@ class Box:
         if not value:
             self._answered("ACK")
             return None
-        answer = self._next_token(deadline, "value", verbatim=True).text
-        self._answered(f"ACK {answer}")
+        # `blank_ok`: a value that is the empty string answers a bare ACK and
+        # then an empty line, which is every `GARBCTBL` on a box with no
+        # compression table loaded and every `GDCBALL` on a box with no DC bias
+        # board (sections 6.6, 8.2). Without it those read as silence and time out.
+        answer = self._next_token(deadline, "value", verbatim=True, blank_ok=True).text
+        self._answered(f"ACK {answer}" if answer else "ACK (empty)")
         return answer
 
     def _read_error_code(self) -> int | None:
@@ -470,7 +540,7 @@ class Box:
             if _LOG.isEnabledFor(logging.DEBUG):
                 taken = "the box was already in local mode, which is the mode asked for"
                 _LOG.debug("%s   %s", self.name, taken,
-                           extra=_sent(DECIDED, self.name, taken))
+                           extra=self._marking(_sent(DECIDED, self.name, taken)))
 
     # -- loading a table ---------------------------------------------------
 
@@ -537,7 +607,7 @@ class Box:
             # correction to the wire format's section 2 would be argued from, and
             # it is the line a send log carries as the command itself.
             _LOG.debug("%s >   string: %s", self.name, table_string,
-                       extra=_sent(TO_BOX, self.name, table_string))
+                       extra=self._marking(_sent(TO_BOX, self.name, table_string)))
 
         # perf_counter, not monotonic: on Windows `time.monotonic()` ticks at
         # about 15.6 ms, which is coarser than a whole table write, so it
@@ -582,6 +652,69 @@ class Box:
             prediction_error=prediction_error,
         )
 
+    def read_unframed(
+        self, command: str, *, settle: float = 0.5, limit: float = 8.0
+    ) -> str:
+        """Send a command whose reply has no framing, and hand back the text.
+
+        `GCMDS` and `TBLCHK` both print a human-readable report with no
+        terminator a framer can recognise and no documented line count (§8.4,
+        §4), so neither can be read through `command`: there is no way to say in
+        advance how many lines to expect. This writes on the transport instead
+        and reads until the box has been quiet for `settle`, giving up at
+        `limit`, and returns everything that arrived, a NAK included -- a bare
+        NAK being the whole reply on a firmware without the command, which is an
+        answer and not a failure.
+
+        The framer is reset either side, so nothing this leaves behind is read
+        as the next command's reply. Both halves go straight to the transport,
+        which is why they are logged here by hand: `Box` transcribes what it
+        writes and what it frames, and this does neither.
+        """
+        self.resync(settle=0.2)
+        if _LOG.isEnabledFor(logging.DEBUG):
+            _LOG.debug("%s > %s, read unframed off the transport", self.name, command,
+                       extra=self._marking(_sent(TO_BOX, self.name, command)))
+        self.transport.write(command.encode("ascii") + b"\n")
+        started = time.monotonic()
+        last_heard = started
+        chunks: list[bytes] = []
+        while True:
+            now = time.monotonic()
+            if now - last_heard >= settle or now - started >= limit:
+                break
+            data = self.transport.read_some(min(0.1, settle))
+            if data:
+                chunks.append(data)
+                if _LOG.isEnabledFor(logging.DEBUG):
+                    _LOG.debug("%s < %s", self.name, _render(data))
+                last_heard = time.monotonic()
+        self.resync(settle=0.2)
+        text = b"".join(chunks).decode("ascii", "replace")
+        self._answered(f"{len(text)} bytes, {text.count(chr(10))} lines, unframed")
+        return text
+
+    def command_listing(self, *, settle: float = 1.0, limit: float = 20.0) -> frozenset[str]:
+        """`GCMDS`, as the set of command names this firmware has.
+
+        The one round trip that says which getters a box answers, which is what
+        a state readback filters on: sending one the firmware lacks costs a
+        rejection, and a rejection on this firmware shifts every later reply by
+        one (§8.4). An empty set means the box would not list them -- a firmware
+        without `GCMDS` NAKs it -- and a caller that gets one is choosing
+        between provoking rejections and reading nothing.
+
+        The listing is one bare command name per line, each terminated `\\r\\r\\n`
+        on the boxes this has been read from. Lines are stripped of the ACK byte
+        that precedes the first of them and of anything else non-printing, and a
+        line carrying a space is not a command name and is dropped.
+        """
+        listing = self.read_unframed("GCMDS", settle=settle, limit=limit)
+        return frozenset(
+            word for word in (line.strip("\x06\x15? \t\r\n") for line in listing.splitlines())
+            if word and word.isascii() and word.isprintable() and " " not in word
+        )
+
     def report(self, count: int, *, timeout: float | None = None) -> _table.Report:
         """`TBLRPT`: dump `count + 1` bytes of the table buffer.
 
@@ -598,7 +731,7 @@ class Box:
         payload = f"TBLRPT,{count}\n".encode("ascii")
         if _LOG.isEnabledFor(logging.DEBUG):
             _LOG.debug("%s > %s, expecting %d lines", self.name, _render(payload), wanted,
-                       extra=_sent(TO_BOX, self.name, f"TBLRPT,{count}"))
+                       extra=self._marking(_sent(TO_BOX, self.name, f"TBLRPT,{count}")))
         self.transport.write(payload)
         lines: list[str] = []
         while len(lines) < wanted:
@@ -647,5 +780,5 @@ class Box:
             # firmware's parser, and §2 is corrected from it.
             verdict = f"TBLRPT round trip: {'; '.join(problems) if problems else 'clean'}"
             _LOG.debug("%s   %s", self.name, verdict,
-                       extra=_sent(DECIDED, self.name, verdict))
+                       extra=self._marking(_sent(DECIDED, self.name, verdict)))
         return problems

@@ -1,13 +1,14 @@
-# MIPS wire format: pulse-sequence Tables, timing/trigger model, Twave, and ARB
+# MIPS wire format: pulse-sequence Tables, timing/trigger model, Twave, ARB, and channel state
 
 Single source of truth for how Clockwork talks to MIPS boxes. Both
 the `clockwork` package must conform to this file
 rather than encoding protocol knowledge locally. Scope: serial framing,
 the Table (pulse sequence) wire format and execution model,
-trigger/clock semantics, the Twave command set, and the ARB module
+trigger/clock semantics, the Twave command set, the ARB module
 (§6; on this instrument the ARB modules, not Twave, drive all TW
-regions). Remaining module-specific command sets (DCbias, RF driver,
-DIO beyond what tables need) get added as needed.
+regions), and the DC bias and RF driver channel state a pulse sequence
+does not carry (§8). Remaining module-specific command sets (DIO beyond
+what tables need) get added as needed.
 
 ## Provenance
 
@@ -138,10 +139,20 @@ Arduino `Print::println` and so ends **CR then LF**:
   string from `\x06` to `,\x06` (echo mode). The sequencer should leave
   both at defaults and treat `0x06`/`0x15` as the accept/reject bytes.
 - A host tokenizer that drops every `\r`, splits the rest on `\n`, treats
-  `0x06` and `0x15` as standalone tokens and discards empty lines reduces
+  `0x06` and `0x15` as standalone tokens and skips empty lines reduces
   all of the terminator conventions above (and the doubled ones in the
   next section) to a single stream of ACK / NAK / text tokens. That is
   the only framing a sequencer needs.
+- **Skips, not discards: one empty line is an answer.** A get-style
+  command whose value is the empty string prints `println("")` after its
+  ACK, so the whole reply is `06 0D 0A` and the value is an empty line.
+  `GARBCTBL` on a box with no compression table loaded (§6.6) and
+  `GDCBALL` on a box with no DC bias board (§8.2) both answer that way.
+  A framer that threw empty lines away could not tell it from a box that
+  never answered, and would report a timeout where the box replied
+  promptly and correctly. So a framer keeps the empty line as a token of
+  its own and the layer above skips it everywhere except at the one
+  position where a value is expected.
 - **Command termination:** the input ring buffer maps `\r` to `\n`
   (`Serial.cpp: RB_Get()`), and a stray `\n` in the command state is
   skipped, so `\n`, `\r` and `\r\n` are all accepted terminators.
@@ -1412,3 +1423,190 @@ exists, rather than a one-off manual check:
   to the sequencer's read timeouts, and the load timeout in particular
   has to exceed the streaming time plus the 3-second flush a parse error
   costs before its NAK (§4).
+
+---
+
+## 8. DC bias and RF channel state
+
+The intro's "added as needed" set, added: the two module families whose
+settings shape the beam and appear in no table. A pulse sequence moves a
+few DC bias channels between values the box already holds; everything
+else on a DC bias board and everything on an RF driver board is static
+configuration, set at the front panel or over serial and persisted with
+`SAVE`. This section is here so that a host can **read that state back**
+before an acquisition and, where a method declares it, **set it**.
+
+Placed after §7 rather than between §4 and §5 so that every existing
+`§5`/`§6`/`§7` citation in the code and the lab record stays correct.
+
+### 8.1 How many channels there are
+
+| Command | Args | Notes |
+|---|---|---|
+| `GCHAN` | `DCB\|RF\|ARB\|DO\|DI\|DIO\|DAC\|TWAVE\|ESI\|FIL\|RFamp` | Channel count for that subsystem (`Serial.cpp`, `GetNumChans`). `DIO` answers a fixed 24, `DI` 8; the rest count installed boards |
+
+`GCHAN,DCB` and `GCHAN,RF` are what a readback sizes itself from. Asking
+for a channel past the count is not silent: it is rejected with error 2
+(`ERR_BADARG`), which is the answer, not a fault. Measured on AUKLET
+2026-09-15 (lab record, task 40), where `GCHAN,RF` answered 2 and every
+`GRF*,3` and `GRF*,4` was refused with error 2 — that box has two RF
+heads, not the four the firmware's loops allow for.
+
+### 8.2 DC bias commands
+
+`<ch>` is 1-based over the whole system, across boards: board *b*
+channel *i* is system channel *8b + i + 1*. (The **table** wire format
+stores the same channel zero-based; see §2, "DC bias channels are stored
+zero-based". The commands here do not.)
+
+| Command | Args | Notes |
+|---|---|---|
+| `SDCB`/`GDCB` | `<ch>,<volts>` / `<ch>` | Set/read the **setpoint**. The set form writes the board's data structure only; the DC bias service loop pushes it to the DAC (below) |
+| `GDCBV` | `<ch>` | The channel's **monitor** reading: a filtered ADC measurement of the output, not the setpoint |
+| `SDCBALL` | `<v1>,<v2>,...` (line) | Every channel's setpoint in one command, range-checked as a set before any DAC is written, then latched together with one `LDAC` pulse |
+| `GDCBALL` | none | Every channel's setpoint, comma-separated, one line, in channel order |
+| `GDCBALLV` | none | Every channel's monitor reading, same shape |
+| `SDCBDELTA` | `<volts>` | Add a delta to every channel; rejected whole if any channel would leave range |
+| `SDCPWR`/`GDCPWR` | `ON\|OFF` | DC bias supply power |
+| `SDCBOF`/`GDCBOF` | `<board>,<volts>` | The board's float/offset voltage, which every channel on it is measured against |
+| `GDCMIN`/`GDCMAX` | `<board>` | The board's range limits |
+
+`GDCBALL` and `GDCBALLV` stop at the first channel the box has no data
+for, so the field count **is** the channel count and agrees with
+`GCHAN,DCB` (`DCbias.cpp`, `DCbiasReportAllSetpoints`,
+`DCbiasReportAllValues`). Both are one round trip for the whole bank,
+which is why a readback should prefer them to sixteen `GDCB`s.
+
+**Setpoint and monitor are different numbers and both are real.** The
+monitor is an AD7998 reading through the board's calibration, filtered
+in the service loop (a 0.1/0.5 weighted update per pass), so two reads
+seconds apart differ by the monitor's own noise. Measured on AUKLET
+2026-09-15 across all sixteen channels: every channel read back within
+0.25 V of its setpoint, the largest departures being 0.21–0.23 V on two
+channels near −70 V (lab record, task 40). A host comparing a readback
+against what it sent compares against `GDCBALL`; `GDCBALLV` is evidence
+about the hardware, not about the command.
+
+**An `SDCB` sent in table mode does take effect, unlike `SDIO`.** This is
+the one place the two diverge and it is worth stating outright, because
+§3's `LDAC` argument looks like it should apply here too. It does not:
+the DC bias service loop writes each changed channel with
+`AD5668(..., Cmd=3)`, and command 3 on that DAC is *write-and-update
+regardless of `LDAC`* (`Hardware.cpp`, `AD5668`, whose own comment says
+so). The digital outputs have no such escape — their shift registers
+have only the `LDAC` latch, which entering table mode hands to the table
+timer (§4). So a host may set a DC bias channel at any time, and must
+put the box in `LOC` mode to move a DIO line.
+
+Three consequences of the set path being the service loop rather than
+the command:
+
+- **The ACK is not the voltage.** `SDCB` acknowledges after storing the
+  setpoint; the DAC is written on the next pass of the service loop. A
+  host that reads `GDCBV` immediately after `SDCB` is reading the old
+  output.
+- **A change larger than 1 V calls `DelayMonitoring()`**, which holds off
+  the setpoint-versus-readback trip test while the output settles. A
+  smaller change does not, so a host stepping a channel in sub-volt
+  steps gets no such grace.
+- **A table event on the same channel overwrites it**, and the table's
+  own DC bias writes are `LDAC`-latched. A channel a method declares
+  *and* a table drives ends up wherever the table last put it. Declare
+  the resting value, not the pulsed one.
+
+`SDCB` range-checks against the board's limits *minus the board's float
+voltage* and NAKs with error 2 on a value outside them, without writing
+anything (`DCbias.cpp`, `DCbiasSet`, via `CheckValue`).
+
+### 8.3 RF driver commands
+
+`<ch>` is 1-based across installed RF driver boards, two channels per
+board.
+
+| Command | Args | Notes |
+|---|---|---|
+| `SRFFRQ`/`GRFFRQ` | `<ch>,<hz>` / `<ch>` | Drive frequency in Hz, integer |
+| `SRFDRV`/`GRFDRV` | `<ch>,<percent>` / `<ch>` | Drive level, percent of full scale |
+| `SRFVLT`/`GRFVLT` | `<ch>,<volts>` / `<ch>` | Output voltage **setpoint**, the target in `AUTO` mode |
+| `GRFPPVP`/`GRFPPVN` | `<ch>` | Measured output, positive and negative phase, peak-to-peak volts |
+| `GRFPWR` | `<ch>` | Head power draw, watts |
+| `SRFMODE`/`GRFMODE` | `<ch>,MANUAL\|AUTO` / `<ch>` | `MANUAL` holds the drive level; `AUTO` servos drive to hold `SRFVLT` |
+| `SRFPL`/`GRFPL` | `<ch>,<watts>` | Power limit for the channel |
+| `GRFALL` | none | Every channel in one round trip; see the shape below |
+| `TUNERFCH`/`RETUNERFCH`/`TUNEABORT` | `<ch>` | Auto-tune. Not something a method should send |
+
+**`GRFALL` carries four fields per channel, not three.** The dispatch
+table's comment and `MIPScommands.txt` both say "Freq, RFVpp + and -",
+and the function prints frequency, **drive level**, positive peak and
+negative peak, comma-separated, every channel on one line
+(`RFdriver.cpp`, `RFreportAll`). A parser written from the help text is
+off by one field per channel from the first channel on. Confirmed
+against per-channel getters on AUKLET 2026-09-15: `GRFALL` answered
+`943000,50.00,240.28,233.84,804000,30.00,97.95,128.42` for two channels
+whose `GRFFRQ`/`GRFDRV` were 943000/50.00 and 804000/30.00 (lab record,
+task 40).
+
+The peak readings in `GRFALL` are live measurements and drift between
+reads the way `GDCBALLV` does — 240.28 against a per-channel 239.97 on
+the same channel seconds apart. Frequency and drive level are settings
+and do not.
+
+**`GRFALL` reports no mode and no power**, so a readback that wants
+either asks `GRFMODE,<ch>` and `GRFPWR,<ch>` per channel. `MANUAL` on
+every channel is what a head set by hand at the front panel looks like.
+
+**Setting RF drive raises voltage on a head.** Nothing in the firmware
+ramps it: `SRFDRV` writes the drive level and the next service pass
+applies it. A host that sends a declared drive level is doing what a
+hand on the front panel does, at the speed a serial command arrives.
+
+### 8.4 Reading state back without desynchronising the link
+
+A getter this firmware does not have is rejected like any other unknown
+command, and **a rejection leaves something on the wire that arrives
+after it**: the next getter then reads the previous command's leftover,
+and every answer from there on is shifted by one and still looks
+plausible. §1's framing accounts for the NAK sequence's own `?` and for
+the `GERR` round trip behind it, so what is left over is not either of
+those and its origin has not been pinned down; what is established is
+the behaviour and the remedy. Measured on BUFFLEHEAD 2026-09-14 (lab
+record, task 10), where an undrained sweep that provoked six rejections
+per module reported two ARB modules absent, a fourth answering
+`LEVEL Hz`, and a fifth module that does not exist answering at all —
+none of it true. The same sweep with a drain to silence after each
+rejection reported all four modules present and modules 5 and 6 absent,
+which is the box.
+
+Two rules follow, and a host reading state before an acquisition needs
+both:
+
+1. **Resync after every rejection** before sending the next command:
+   drop what is on the wire until the box has been quiet. Draining
+   status lines is not enough; the leftover is an ordinary token.
+2. **Ask `GCMDS` first and send only what it lists.** `GCMDS` prints
+   every command this firmware has, one per line, and is the only way to
+   know in advance rather than by provoking a rejection. It is worth the
+   round trip on any firmware that is not the one this document
+   describes, which so far is every box on this instrument (§7).
+
+`GCMDS` has no reply framing of its own. Like `TBLCHK` it prints a
+human-readable report after the ACK, with no terminator a framer can
+recognise and no documented line count, so it is read by writing the
+command and taking whatever arrives until the box has been quiet for a
+settling time. Observed lengths: 529 lines on AUKLET, 594 on BUFFLEHEAD,
+586 on CORMORANT, 2026-09-14 and 2026-09-15.
+
+**What a state readback consists of**, all getters, nothing written
+(lab record, task 40): `GVER` and `GNAME` for identity; `GCHAN,DCB`,
+`GCHAN,RF` and `GCHAN,ARB` for the shape; `GDCBALL` and `GDCBALLV` for
+the DC bias bank; `GRFALL` plus `GRFMODE`/`GRFPWR` per channel for the
+RF heads; `GTBLFRQ` and `GTBLSTA` for the sequencer; and per ARB module
+`GWFREQ`, `GWFVRNG`, `GWFDIR`, `GARBMODE`, `GALTWFM`, `GALTENA`,
+`GALTHWD` and `GARBCTBL` (§6.2, §6.4, §6.6).
+
+Two of those have a known refusal that is not a defect. `GARBCORDER` is
+rejected with error 3 and the text *"already in LOC mode"* on every
+module of both ARB boxes (2026-09-15) — a getter refused for a mode
+reason, whose message names the mode the box is already in. And
+`SARBCCLK` has no getter at all on 1.243t, so a module's common-clock
+assignment is not readable and rests on the strings that set it (§7).

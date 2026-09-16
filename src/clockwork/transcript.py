@@ -229,13 +229,30 @@ def send_log_name(stem: str) -> str:
     return f"{stem}.sent.txt"
 
 
-def note(message: str, *args: object) -> None:
+def note(message: str, *args: object, source: str = "") -> None:
     """Put one line of a caller's own into the transcript, in its own place.
 
     For the traffic the package cannot see. `%`-style arguments are formatted only
     if a transcript is open, so an expensive message costs nothing when none is.
+
+    `source` fills the name column, for a note that is about one correspondent
+    rather than about the run: a box's state readback is written a line at a time
+    under the box's own name, so that a reader following one box down the column
+    sees what it was holding as well as what it was sent (lab record, task 40).
     """
-    _LOG.debug(message, *args, extra=sent(ASIDE, ""))
+    _LOG.debug(message, *args, extra=sent(ASIDE, source))
+
+
+def note_block(text: str, *, source: str = "") -> None:
+    """A multi-line note, one record a line, so every line keeps its columns.
+
+    A block written as one record would put its first line in the columns and
+    every line after it hard against the left margin, which is exactly the shape
+    a reader scanning the mark column cannot follow. Blank lines are dropped.
+    """
+    for line in text.splitlines():
+        if line.strip():
+            note("%s", line, source=source)
 
 
 def run_header(
@@ -246,6 +263,7 @@ def run_header(
     instrument_path: str | os.PathLike[str] | None = None,
     console: object = None,
     boxes: Iterable[Sequence[str]] = (),
+    conditions: str = "",
 ) -> str:
     """The block that says what this run was, for the top of a log.
 
@@ -265,6 +283,14 @@ def run_header(
     `boxes` is a sequence of `(name, port, identity, firmware)` rows, any field of
     which may be empty. A caller that has open `Box` objects has all four already:
     the port it opened, `box_name()` and `version()`.
+
+    `conditions` is the trainee's own free text -- sample, MCP voltage, pusher
+    period, pDRE, collision energy -- and goes last, indented under a heading of
+    its own. **It is the piece no getter reads**: everything else in this block
+    and every readback in the file came off a wire, and this is the part of the
+    experiment that exists only if somebody typed it (lab record, task 40). It is
+    in the header rather than written mid-run so that a replicate's log carries
+    it too, without the run that wrote it having to say it twice.
     """
     lines: list[str] = []
     if method is not None:
@@ -300,6 +326,9 @@ def run_header(
     for row in boxes:
         name, rest = row[0], [str(part) for part in row[1:] if part]
         lines.append(f"{name:<11} {'  '.join(rest)}".rstrip())
+    if conditions.strip():
+        lines.append("conditions")
+        lines += [f"  {line}".rstrip() for line in conditions.strip().splitlines()]
     return "\n".join(lines)
 
 
@@ -554,6 +583,7 @@ __all__ = [
     "Transcript",
     "default_name",
     "note",
+    "note_block",
     "render",
     "run_header",
     "send_log",
