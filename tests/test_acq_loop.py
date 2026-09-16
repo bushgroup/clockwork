@@ -245,20 +245,33 @@ def shrunk(command: str, *, scans: int, passes: int) -> str:
     return command
 
 
-def make_boxes(*names: str, arb_modules: int = 0, transport=None) -> dict[str, Box]:
+def make_boxes(*names: str, arb_modules: int = 0, rf_channels: int = 0,
+               transport=None) -> dict[str, Box]:
     return {
         name: Box(transport=transport() if transport
-                  else FakeBox(arb_modules=arb_modules), name=name)
+                  else FakeBox(arb_modules=arb_modules, rf_channels=rf_channels), name=name)
         for name in names
     }
 
 
 def boxes_for(loaded, **kwargs) -> dict[str, Box]:
-    """A stand-in box per box the method names.
+    """A stand-in box per box the method names, each with the heads that method drives.
 
     The roster comes off the method rather than out of this file, so a golden method
-    that renames its boxes needs no edit here."""
-    return make_boxes(*[box.name for box in loaded.boxes], **kwargs)
+    that renames its boxes needs no edit here.
+
+    The RF head count comes off the method for the same reason, and has to since a method
+    may declare `[boxes.rf.<n>]` and have its setters sent at the end of `setup`. A
+    stand-in built with no heads rejects `SRFFRQ,1,...` with error 2, which is the correct
+    answer for a box that has no such channel and the wrong one for a box the method
+    plainly believes has two -- so a method's declaration sizes the box it is sent to, and
+    a box the method declares nothing for keeps none. `loop_rig.py` sizes its rehearsal
+    boxes by the same rule (lab record, task 37)."""
+    boxes: dict[str, Box] = {}
+    for entry in loaded.boxes:
+        heads = max((channel.channel for channel in entry.rf), default=0)
+        boxes |= make_boxes(entry.name, rf_channels=heads, **kwargs)
+    return boxes
 
 
 class SlowBox(FakeBox):
