@@ -163,6 +163,11 @@ class Console:
         sent one: a client attached to a console another process configured has
         not, and must not claim to know what that process chose."""
 
+        self.inverted: bool | None = None
+        """What the last `invert` asked for, mirroring `offset_v` for the same reason:
+        the console does not report channel inversion back, so this client's own last
+        send is the only record of it and is `None` until one has been sent."""
+
         self.last_reply_seconds = 0.0
         """How long the last answered request waited, on `time.perf_counter`.
 
@@ -346,7 +351,11 @@ class Console:
         self.offset_v = float(offset_v)
 
     def invert(self, inverted: bool) -> None:
+        """Channel 1 data inversion, applied in the card's digital path ahead of zero
+        suppression, so the fixed threshold's semantics do not change with it
+        (`docs/console-protocol.md`)."""
         self._ack("invert", "true" if inverted else "false")
+        self.inverted = bool(inverted)
 
     def enable_io_port(self, port: int = 2) -> None:
         """Make the Control I/O port an acquisition enable input.

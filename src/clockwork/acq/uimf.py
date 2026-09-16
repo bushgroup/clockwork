@@ -99,6 +99,10 @@ PROVENANCE_KEYS: tuple[tuple[ParamDef, str], ...] = (
               "reported it, or as the instrument document declared it when the console "
               "reports none"),
      "full_scale_v"),
+    (ParamDef(CLIENT_PARAM_ID_BASE + 7, "ClockworkInverted", "System.Int32",
+              "Whether channel 1's data was inverted for this acquisition: 1 if so, 0 "
+              "if not"),
+     "inverted"),
 )
 """The stamp's fields as `Global_Params` parameters, each paired with the `stamp()` key
 it carries.
@@ -114,17 +118,20 @@ The method's *name* is not here. PNNL already has a name for it, `AcquisitionMet
 and one fact under two keys is two things to keep in step. The instrument's name is not
 here either, for the same reason: it goes under PNNL's `InstrumentName`.
 
-The last two are the vertical settings in force, which the stamp did not record until
-task 25. Two files acquired through different ranges, or on either side of an
-attenuator, are otherwise indistinguishable once they leave the instrument, and the
-chain in front of this digitizer changed on the day it was cabled up. The offset is
-clockwork's own `vertical` command, which the console confirms. The full scale is a
+The last three are the vertical settings in force, which the stamp did not record until
+task 25 (the offset and the full scale) and task 38 (the inversion). Two files acquired
+through different ranges, either side of an attenuator, or through opposite inversions,
+are otherwise indistinguishable once they leave the instrument, and the chain in front of
+this digitizer changed on the day it was cabled up. The offset and the inversion are
+clockwork's own `vertical` and `invert` commands, which the console confirms with an
+`ack` and never reports back, so both are stamped from the instrument document, exactly
+as `clockwork.acq.loop._vertical_warnings` checks them against it. The full scale is a
 `config.txt` key the console reads at startup, and since task 24 the fork reports it in
 its `info` reply, so a file carries what the card is set to and falls back to what the
-instrument document declared only against a console that reports none. Which of the two
-a file holds is in the parameter's own description rather than in a third key, because
-`ParamDescription` is written into `Global_Params` beside the value and a reader has
-both.
+instrument document declared only against a console that reports none. Which of the
+three a file holds is in the parameter's own description rather than in a further key,
+because `ParamDescription` is written into `Global_Params` beside the value and a reader
+has both.
 """
 
 SA220P_DETECTOR_BITS = 14
@@ -730,9 +737,10 @@ def stamp_globals(
     """
     record = stamp(method, console_version=console_version or None)
     # The vertical settings are not the method's and `stamp()` does not produce them, so
-    # they join the record here rather than there. `None` for either is written by
-    # nothing: a rig with no configured window states no window (lab record, task 25).
+    # they join the record here rather than there. `None` for any of the three is written
+    # by nothing: a rig with no configured window states no window (lab record, task 25).
     record["channel_offset_v"] = instrument.vertical.offset_v
+    record["inverted"] = instrument.vertical.inverted
     # The full scale the console reports beats the one the document declares, because one
     # of them is the card and the other is a file somebody edited. A console that reports
     # none leaves the document's value, which is every stock build and every fork before

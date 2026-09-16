@@ -287,6 +287,7 @@ def test_configure_sends_the_sequence_the_console_expects(
     assert fake.offset_v == 0.251
     assert fake.inverted is True
     assert fake.io_ports_enabled == [2]
+    assert client.inverted is True, "the console never reports it back; the client is the record"
 
 
 def test_configure_can_leave_the_control_io_port_alone(

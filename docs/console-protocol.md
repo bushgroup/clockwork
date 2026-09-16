@@ -202,6 +202,12 @@ below.
   16-bit sample scale, no pre- or post-gate samples. Threshold and hysteresis are hardcoded
   upstream and read from `config.txt` by the fork; the gate samples are hardcoded in both.
   Samples are shifted by +32768 into an unsigned range before storage.
+- `invert` sets `AQMD3_ATTR_CHANNEL_DATA_INVERSION_ENABLED` on the channel itself, in the
+  digitizer's digital path ahead of this zero-suppress gate (fork source,
+  `AqMD3_console/src/aqmd3_console.cpp` and `libaqmd3/src/digitizer.cpp`, commit
+  `795fef641dac9131dea79f4f576b61d21038771f`). So the threshold above keeps the same meaning
+  whichever way channel 1 is inverted: it is always the same excursion, positive-going after
+  inversion, that gets kept.
 - The markers stream is parsed per the Acqiris `CPP_IVIC_StreamingZeroSuppress` example; the
   samples stream is fetched in the amount the gates describe. Each trigger becomes one scan row:
   the gated samples with negative run-length entries for the zero gaps, plus `TIC`, `BPI`,

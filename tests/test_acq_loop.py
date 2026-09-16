@@ -1320,6 +1320,22 @@ def test_an_offset_that_agrees_is_not_warned_about(rig):
     assert [event for event in seen if isinstance(event, Warned)] == []
 
 
+def test_an_inversion_that_disagrees_with_the_instrument_document_is_warned_about(rig):
+    """The rig's console was configured with `inverted` at its default, false."""
+    from clockwork.instrument import Instrument, Vertical
+
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    seen: list[acq.Event] = []
+    machine = Instrument(vertical=Vertical(full_scale_v=0.5, offset_v=0.251, inverted=True))
+    run = rig.acquire(method, boxes, instrument=machine, progress=seen.append)
+    assert run.complete, "a half-checkable window is not a thing to stop a run on"
+    warnings = [event.message for event in seen if isinstance(event, Warned)]
+    assert len(warnings) == 1
+    assert "inversion" in warnings[0]
+
+
 def test_the_offset_is_checked_against_what_the_client_sent() -> None:
     """The console only ever knows the offset this client gave it, so the document is
     the only other source and a disagreement is the document's to fix."""
@@ -1330,6 +1346,7 @@ def test_the_offset_is_checked_against_what_the_client_sent() -> None:
 
     class Stub:
         offset_v = None
+        inverted = None
 
     assert _vertical_warnings(Stub(), machine) == [], "nothing sent, nothing to check"
 
@@ -1354,6 +1371,7 @@ def test_the_full_scale_is_checked_against_what_the_console_reports() -> None:
 
     class Stub:
         offset_v = 0.251
+        inverted = None
 
     agrees = ConsoleInfo.parse("Full Scale: 0.5")
     assert _vertical_warnings(Stub(), machine, agrees) == []
@@ -1380,6 +1398,7 @@ def test_both_halves_of_the_window_can_disagree_at_once() -> None:
 
     class Stub:
         offset_v = 0.200
+        inverted = None
 
     warnings = _vertical_warnings(Stub(), machine, ConsoleInfo.parse("Full Scale: 2.5"))
     assert len(warnings) == 2
@@ -1391,5 +1410,30 @@ def test_a_document_with_no_offset_checks_nothing() -> None:
 
     class Stub:
         offset_v = 0.251
+        inverted = None
 
     assert _vertical_warnings(Stub(), Instrument(vertical=Vertical(full_scale_v=0.5))) == []
+
+
+def test_the_inversion_is_checked_against_what_the_client_sent() -> None:
+    """The console never reports it back, so the document is the only other source,
+    exactly as for the offset (lab record, task 38)."""
+    from clockwork.acq.loop import _vertical_warnings
+    from clockwork.instrument import Instrument, Vertical
+
+    machine = Instrument(vertical=Vertical(full_scale_v=0.5, offset_v=0.251, inverted=True))
+
+    class Stub:
+        offset_v = 0.251
+        inverted = None
+
+    assert _vertical_warnings(Stub(), machine) == [], "nothing sent, nothing to check"
+
+    Stub.inverted = True
+    assert _vertical_warnings(Stub(), machine) == []
+
+    Stub.inverted = False
+    warnings = _vertical_warnings(Stub(), machine)
+    assert len(warnings) == 1
+    assert "inversion" in warnings[0]
+    assert "document's value" in warnings[0]

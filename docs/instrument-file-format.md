@@ -24,6 +24,7 @@ measured = 2026-09-09
 [vertical]
 full_scale_v = 0.5
 offset_v = 0.251
+inverted = false
 ```
 
 - `schema_version` pins the document to the shape this section describes. Clockwork rejects a
@@ -34,7 +35,8 @@ offset_v = 0.251
 - `calibration` is the pair a frame carries as `CalibrationSlope` and `CalibrationIntercept`,
   plus the day they were determined. A calibration with no date cannot be told from one nobody
   has checked, which is why the date is part of the document.
-- `vertical` is the full scale and the channel offset the acquisition ran at, in volts.
+- `vertical` is the full scale and the channel offset the acquisition ran at, in volts, plus
+  whether channel 1's data was inverted.
 
 Every table is optional, and so is the whole document. An acquisition given no instrument file
 writes `CalibrationDone = 0` and stamps no vertical settings, which is what clockwork wrote before
@@ -73,19 +75,28 @@ which form a pair typed out of such a file is in.
 
 ## Vertical settings
 
-Two files acquired through different ranges, or on either side of an attenuator, are otherwise
-indistinguishable once they leave the instrument. Recording the window is what tells them apart,
-so both numbers are stamped into every file the acquisition writes, under
-`ClockworkChannelOffset` and `ClockworkFullScale`.
+Two files acquired through different ranges, on either side of an attenuator, or through
+opposite inversions, are otherwise indistinguishable once they leave the instrument. Recording
+the window is what tells them apart, so all three are stamped into every file the acquisition
+writes, under `ClockworkChannelOffset`, `ClockworkFullScale` and `ClockworkInverted`.
 
-The offset is the value clockwork sends with its own `vertical` command, and the acquisition
-console confirms it. The full scale is a `config.txt` key the console reads at startup and does
-not report back, so `full_scale_v` is the value the lab configured rather than one the card
-confirmed. The stamp says as much in the parameter's own description. Note that a console running
-a different `config.txt` from the one this document describes will acquire through a window the
-file does not name; `clockwork.acq.run` compares the offset the console actually holds against
-the document and warns when the two disagree, which catches the same drift on the one setting
-that is observable.
+The offset and the inversion are the values clockwork sends with its own `vertical` and `invert`
+commands; the acquisition console acknowledges both and reports neither back, so the document is
+the only record of them and the stamp is written from it directly. The full scale is a
+`config.txt` key the console reads at startup and does not report back either, so `full_scale_v`
+is the value the lab configured rather than one the card confirmed — except that since task 24 a
+forked console's `info` reply does carry the full scale actually in force, and that value is
+preferred over the document's when it is available. The stamp says which source each field came
+from in the parameter's own description. Note that a console running a different `config.txt`
+from the one this document describes will acquire through a window the file does not name;
+`clockwork.acq.loop._vertical_warnings` compares the offset and the inversion the console was
+actually sent, and the full scale it reports, against the document and warns when any of them
+disagree, which catches drift on the settings that are observable.
+
+Inversion happens in the digitizer's own channel path, ahead of the zero-suppress gate
+(`console-protocol.md`), so the fixed zero-suppress threshold keeps the same meaning — the same
+excursion, positive-going after inversion — whichever way this is set. What changes is which side
+of zero the acquisition was looking at, and `inverted` is the only place a file says which.
 
 ## Validation
 

@@ -1300,29 +1300,35 @@ def _vertical_warnings(
     are checkable since task 24**: the offset is what this client last sent, and the full
     scale is what `info` reports the console is using. A console that reports no full
     scale is a stock build or an older fork, and leaves that half unchecked as before.
+    **Inversion is checked the same way the offset is** (lab record, task 38): the console
+    never reports it back, so `console.inverted` -- this client's own last send -- is the
+    only other source there is, exactly as `console.offset_v` is for the offset.
 
-    Warnings and not refusals. The two disagreements are stamped differently, since the
-    console is the authority on the full scale and the document is the only source for
-    the offset, and each message says which value the file will carry. Both name the two
-    numbers and which of them is the machine, so that a trainee can act on one without
-    opening anything.
+    Warnings and not refusals. The full-scale disagreement is stamped differently from
+    the other two, since the console is the authority there and the document is the only
+    source for the offset and the inversion, and each message says which value the file
+    will carry. All three name the two values and which of them is the machine, so that a
+    trainee can act on one without opening anything.
     """
     pairs = (
-        ("channel offset", instrument.vertical.offset_v, console.offset_v,
+        ("channel offset", instrument.vertical.offset_v, console.offset_v, "V",
          "the file will be stamped with the document's value"),
         ("full scale", instrument.vertical.full_scale_v,
-         info.full_scale_v if info is not None else None,
+         info.full_scale_v if info is not None else None, "V",
          "the file will be stamped with the console's value"),
+        ("inversion", instrument.vertical.inverted, console.inverted, "",
+         "the file will be stamped with the document's value"),
     )
     messages: list[str] = []
-    for name, declared, actual, stamped in pairs:
+    for name, declared, actual, unit, stamped in pairs:
         if declared is None or actual is None:
             continue
         if math.isclose(declared, actual, rel_tol=1e-9, abs_tol=1e-12):
             continue
+        suffix = f" {unit}" if unit else ""
         messages.append(
-            f"the console was set to a {name} of {actual} V and the instrument "
-            f"document says {declared} V; {stamped}, so one of the two is wrong"
+            f"the console was set to a {name} of {actual}{suffix} and the instrument "
+            f"document says {declared}{suffix}; {stamped}, so one of the two is wrong"
         )
     return messages
 

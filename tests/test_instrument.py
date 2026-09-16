@@ -21,6 +21,7 @@ measured = 2026-09-09
 [vertical]
 full_scale_v = 0.5
 offset_v = 0.251
+inverted = true
 """
 
 
@@ -32,7 +33,8 @@ def test_loads_sample_document() -> None:
     assert machine.calibration == instrument.Calibration(
         slope=0.738123, intercept=0.07690495, measured=datetime.date(2026, 9, 9)
     )
-    assert machine.vertical == instrument.Vertical(full_scale_v=0.5, offset_v=0.251)
+    assert machine.vertical == instrument.Vertical(full_scale_v=0.5, offset_v=0.251,
+                                                    inverted=True)
 
 
 def test_round_trips_through_dumps() -> None:
@@ -71,6 +73,20 @@ def test_a_partial_vertical_keeps_the_field_it_has() -> None:
     assert machine.vertical == instrument.Vertical(full_scale_v=2.5, offset_v=None)
     assert machine.vertical.stated
     assert instrument.loads(instrument.dumps(machine)) == machine
+
+
+def test_inverted_alone_states_the_vertical_table() -> None:
+    """`false` is a real, declared setting and not the absence of one."""
+    machine = instrument.loads("[vertical]\ninverted = false\n")
+    assert machine.vertical == instrument.Vertical(inverted=False)
+    assert machine.vertical.stated
+    assert instrument.loads(instrument.dumps(machine)) == machine
+
+
+def test_rejects_an_inverted_that_is_not_a_boolean() -> None:
+    with pytest.raises(instrument.InstrumentError) as excinfo:
+        instrument.loads("[vertical]\ninverted = 1\n")
+    assert "vertical.inverted" in str(excinfo.value)
 
 
 def test_a_calibration_with_only_a_date_survives_the_round_trip() -> None:

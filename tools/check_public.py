@@ -495,7 +495,8 @@ def main() -> int:
         calibration=instrument_module.Calibration.from_tenths_of_ns(
             7.38123e-05, 769.0495, _dt.date(2026, 9, 9)
         ),
-        vertical=instrument_module.Vertical(full_scale_v=0.5, offset_v=0.251),
+        vertical=instrument_module.Vertical(full_scale_v=0.5, offset_v=0.251,
+                                            inverted=True),
     )
     check_true("the two forms of one calibration agree to a part in 1e9",
                abs(machine.calibration.slope - 0.738123) < 1e-9
@@ -574,6 +575,7 @@ def main() -> int:
         check_true("the vertical settings in force are stamped into both files",
                    stamped["ClockworkFullScale"] == "0.5"
                    and stamped["ClockworkChannelOffset"] == "0.251"
+                   and stamped["ClockworkInverted"] == "1"
                    and raw_file.global_params().extra["ClockworkFullScale"] == "0.5")
         one = UimfFile(raw).read_frame(1)
         total = opened.read_frame(1)

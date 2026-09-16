@@ -26,6 +26,7 @@ document in the same flat TOML the method uses (lab record, task 25, decided wit
     [vertical]
     full_scale_v = 0.5
     offset_v = 0.251
+    inverted = false
 
 Every table is optional and so is the document: `UNCALIBRATED` is what an acquisition uses
 when nobody supplies one, and it writes the file this code wrote before this module existed,
@@ -130,26 +131,32 @@ class Calibration:
 
 @dataclass(frozen=True, slots=True)
 class Vertical:
-    """The window channel 1 acquires through: full scale, and where the offset puts it.
+    """The window channel 1 acquires through: full scale, where the offset puts it, and
+    which way up the data is.
 
-    Both are `None` when unknown, and unknown is not a failure. The offset is clockwork's
-    own `vertical` command and is always knowable; the full scale is a `config.txt` key the
-    console reads at startup and does not report back, so what this holds is the value the
-    lab configured rather than one the card confirmed (lab record, task 25, routed to
-    task 24).
+    All three are `None` when unknown, and unknown is not a failure. The offset and the
+    inversion are clockwork's own `vertical` and `invert` commands and are always
+    knowable; the full scale is a `config.txt` key the console reads at startup and does
+    not report back, so what this holds is the value the lab configured rather than one
+    the card confirmed (lab record, task 25, routed to task 24).
 
-    Recorded at all because two files acquired through different ranges, or either side of
-    an attenuator, are otherwise indistinguishable -- and the chain in front of this
-    digitizer changed on the day it was cabled up.
+    Recorded at all because two files acquired through different ranges, either side of
+    an attenuator, or through opposite inversions, are otherwise indistinguishable -- and
+    the chain in front of this digitizer changed on the day it was cabled up. Inversion
+    happens in the card's digital path ahead of zero suppression, so the threshold's
+    semantics do not change with it (`docs/console-protocol.md`); what changes is which
+    side of zero the acquisition was looking at, and this is the only record of that.
     """
 
     full_scale_v: float | None = None
     offset_v: float | None = None
+    inverted: bool | None = None
 
     @property
     def stated(self) -> bool:
         """Whether this says anything worth stamping into a file."""
-        return self.full_scale_v is not None or self.offset_v is not None
+        return (self.full_scale_v is not None or self.offset_v is not None
+                or self.inverted is not None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +230,17 @@ def _number(
     return value
 
 
+def _bool(table: dict, key: str, path: str, problems: list[str]) -> bool | None:
+    """An optional boolean, absent as None."""
+    if key not in table:
+        return None
+    value = table[key]
+    if not isinstance(value, bool):
+        problems.append(f"{path}.{key}: expected a boolean")
+        return None
+    return value
+
+
 def _text(table: dict, key: str, path: str, problems: list[str]) -> str:
     value = table.get(key, "")
     if not isinstance(value, str):
@@ -272,13 +290,15 @@ def from_dict(data: dict) -> Instrument:
         measured = None
 
     raw_vertical = _table(data, "vertical", problems)
-    _no_unknown_keys(raw_vertical, "vertical", ("full_scale_v", "offset_v"), problems)
+    _no_unknown_keys(raw_vertical, "vertical",
+                     ("full_scale_v", "offset_v", "inverted"), problems)
     # Full scale is positive by definition; the offset is a position within it and is
     # negative as readily as positive. Neither is checked against the card's own list of
     # ranges here: what the SA220P accepts is a protocol fact and belongs in
     # `docs/console-protocol.md` before it belongs in code (lab record, task 24).
     full_scale = _number(raw_vertical, "full_scale_v", "vertical", problems, positive=True)
     offset = _number(raw_vertical, "offset_v", "vertical", problems)
+    inverted = _bool(raw_vertical, "inverted", "vertical", problems)
 
     if problems:
         raise InstrumentError(problems)
@@ -287,7 +307,7 @@ def from_dict(data: dict) -> Instrument:
         description=description,
         calibration=Calibration(slope=slope or 0.0, intercept=intercept or 0.0,
                                 measured=measured),
-        vertical=Vertical(full_scale_v=full_scale, offset_v=offset),
+        vertical=Vertical(full_scale_v=full_scale, offset_v=offset, inverted=inverted),
         schema_version=SCHEMA_VERSION,
     )
 
@@ -322,6 +342,8 @@ def to_dict(instrument: Instrument) -> dict:
             table["full_scale_v"] = vertical.full_scale_v
         if vertical.offset_v is not None:
             table["offset_v"] = vertical.offset_v
+        if vertical.inverted is not None:
+            table["inverted"] = vertical.inverted
         data["vertical"] = table
     return data
 

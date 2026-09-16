@@ -35,7 +35,7 @@ CALIBRATION = instrument_module.Calibration(
 SLIMPHONY = instrument_module.Instrument(
     name="SLIM3",
     calibration=CALIBRATION,
-    vertical=instrument_module.Vertical(full_scale_v=0.5, offset_v=0.251),
+    vertical=instrument_module.Vertical(full_scale_v=0.5, offset_v=0.251, inverted=True),
 )
 
 
@@ -314,9 +314,10 @@ def test_the_vertical_settings_reach_the_stamp(tmp_path, geometry):
     extra = UimfFile(path).global_params().extra
     assert extra["ClockworkChannelOffset"] == "0.251"
     assert extra["ClockworkFullScale"] == "0.5"
+    assert extra["ClockworkInverted"] == "1"
 
 
-def test_the_two_new_keys_sit_in_clockworks_own_block(tmp_path, geometry):
+def test_the_three_new_keys_sit_in_clockworks_own_block(tmp_path, geometry):
     """Above mainspring's, below nobody's, and named so an unrecognised name cannot be
     parsed into a future PNNL enum member."""
     from mainspring.uimf.writer import CLIENT_PARAM_ID_BASE
@@ -325,6 +326,10 @@ def test_the_two_new_keys_sit_in_clockworks_own_block(tmp_path, geometry):
     for name in ("ClockworkChannelOffset", "ClockworkFullScale"):
         assert added[name].param_id > CLIENT_PARAM_ID_BASE
         assert added[name].data_type == "System.Double"
+    assert added["ClockworkInverted"].param_id > CLIENT_PARAM_ID_BASE
+    # No `System.Boolean` in UIMF-Library's parameter types; an int of 0 or 1 is the
+    # nearest fit and is how `CalibrationDone` already states its own true/false.
+    assert added["ClockworkInverted"].data_type == "System.Int32"
     ids = [key.param_id for key, _field in PROVENANCE_KEYS]
     assert len(ids) == len(set(ids)), "two parameters would collide on one ID"
 
@@ -390,6 +395,22 @@ def test_a_zero_offset_is_stamped_rather_than_dropped() -> None:
     assert offsets == [0.0]
 
 
+def test_an_uninverted_document_is_stamped_rather_than_dropped() -> None:
+    """`False` is a real, declared setting and a falsy one, exactly like a zero offset."""
+    machine = instrument_module.Instrument(
+        vertical=instrument_module.Vertical(inverted=False)
+    )
+    stamped = stamp_globals(make_method(), instrument=machine)
+    values = {getattr(key, "name", key): value for key, value in stamped.items()}
+    assert values["ClockworkInverted"] is False
+
+
+def test_an_instrument_with_no_stated_inversion_stamps_none() -> None:
+    stamped = stamp_globals(make_method())
+    names = {getattr(key, "name", key) for key in stamped}
+    assert "ClockworkInverted" not in names
+
+
 def test_the_companion_carries_the_same_stamp(tmp_path, geometry):
     method = make_method(accumulations=1)
     with Recording.create(tmp_path, method, geometry, instrument=SLIMPHONY) as recording:
@@ -400,3 +421,4 @@ def test_the_companion_carries_the_same_stamp(tmp_path, geometry):
     extra = UimfFile(summed).global_params().extra
     assert extra["ClockworkFullScale"] == "0.5"
     assert extra["ClockworkChannelOffset"] == "0.251"
+    assert extra["ClockworkInverted"] == "1"
