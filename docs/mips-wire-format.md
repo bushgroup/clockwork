@@ -19,8 +19,8 @@ Custom Electronics vendor documents, inventoried in the lab's vendor-document ma
   (2026-06-30), firmware version string `1.263, June 20, 2026`.
   Key files: `src/Table.cpp`, `include/Table.h`, `src/Serial.cpp`,
   `src/Twave.cpp`, `src/Compressor.cpp`, `src/DIO.cpp`,
-  `src/ARB.cpp`, `src/ARBcompressor.cpp`, `include/ARB.h`,
-  `MIPScommands.txt`.
+  `src/DCbias.cpp`, `src/ARB.cpp`, `src/ARBcompressor.cpp`,
+  `include/ARB.h`, `MIPScommands.txt`.
 - **ARB module firmware:** `github.com/GordonAnderson/ARB`, commit
   `1e8a149` (2024-12-07), version 1.24: the ARB module's own on-board
   firmware (the other end of the controller↔module link). Note the
@@ -657,7 +657,7 @@ Grouped from `MIPScommands.txt` + dispatch table in `Serial.cpp`
 | `TBLSTRT` | none | Software trigger (TBL mode) |
 | `TBLSTOP` | none | Graceful stop, stays in table mode |
 | `TBLABRT` | none | Abort table mode |
-| `GTBLSTA` | none | `IDLE\|READY\|TRIGGERED\|ABORTED` |
+| `GTBLSTA` | none | `IDLE\|READY\|TRIGGERED\|ABORTED`. Anything but `IDLE` says the table's own loop owns the box, which is the condition §8.2's DC bias monitor rule is read against |
 | `GTBLFRQ` | none | Current internal clock frequency (Hz). **Undefined under `EXT`/`EXTN`/`EXTS`**: `TableFreq()` fills its answer only in the four internal-clock branches and prints an uninitialised local otherwise (42000000 has been seen; it measures nothing) |
 | `STBLNUM`/`GTBLNUM` | `1..5` | Active table buffer |
 | `STBLADV`/`GTBLADV` | `ON\|OFF` | Auto-advance buffer after each trigger |
@@ -674,7 +674,7 @@ Grouped from `MIPScommands.txt` + dispatch table in `Serial.cpp`
 | `TBLCHK` | none | On-box timing-violation check (prints human-readable report) |
 | `TBLRPT` | count | Debug: dump `count + 1` table-buffer bytes as hex, with a five-line preamble and **no ACK** (see below) |
 | `SEXTFREQ`/`GEXTFREQ` | Hz | Declare external clock frequency |
-| `STBLTSKS`/`GTBLTSKS`, `TBLTSKENA` | `TRUE\|FALSE` | Run system tasks in table idle time (needs `SEXTFREQ` on ext clock; use with care) |
+| `STBLTSKS`/`GTBLTSKS`, `TBLTSKENA` | `TRUE\|FALSE` | Run system tasks in table idle time (needs `SEXTFREQ` on ext clock; use with care). Both are `FALSE` by default, which is what stops every 100 ms service task while a table is loaded, the DC bias monitors among them (§8.2) |
 | `STBLUSBTST`/`GTBLUSBTST` | `TRUE\|FALSE` | USB link test during table loop |
 | `SDIO` | `<chan A-P>,<0\|1>` | Set one digital output directly from the host, independent of any loaded table. Accepted in any mode; **immediate only in LOC**, see below |
 | `GDIO` | `<chan A-X>` | Read one line: an output `A`-`P` from the image register, an input `Q`-`X` from the hardware. **It cannot confirm an output actually moved**, see below |
@@ -1508,6 +1508,41 @@ seconds apart differ by the monitor's own noise. Measured on AUKLET
 channels near −70 V (lab record, task 40). A host comparing a readback
 against what it sent compares against `GDCBALL`; `GDCBALLV` is evidence
 about the hardware, not about the command.
+
+**The monitors stop converting in table mode, and what they answer
+there is not a stale reading either.** `GDCBV` and `GDCBALLV` print
+`DCbiasStates[brd]->Readbacks[]` and start no conversion of their own
+(`DCbias.cpp`, `DCbiasReadV`, `DCbiasReportAllValues`). That array is
+written in one place, the DC bias service task, which is a 100 ms
+thread on the box's scheduler, and the scheduler does not run in table
+mode: `ProcessTables()` is a blocking loop that reaches it through
+`ProcessTasks()`, which returns at once unless `STBLTSKS` is `TRUE`,
+and through a second `control.run()` gated on `TBLTSKENA`. Both flags
+are `FALSE` by default (`Table.cpp`), and even with them set a pass
+abandons the monitor update at the first channel for which the table
+has written a DC bias since the pass began (`ValueChange`). From
+`SMOD,TBL` until the box is local again the array holds whatever the
+0.1/0.5 filter had reached at the moment of arming, so a bank that the
+`setup` phase drove from zero a moment earlier freezes part way to its
+setpoints and every channel reports the same fraction of its own.
+
+Measured on AUKLET 2026-09-16, armed, `GTBLSTA` `READY` and `GDCPWR`
+`ON`: fifteen of sixteen channels read 0.750 ± 0.005 of setpoint and
+were bit-identical across three reads over 40 s, and the sixteenth,
+set 16 ms later than the rest and so one filter update behind, read
+0.49. Two updates of a 0.5-weighted filter starting from zero is
+exactly 0.750. The same box in `LOC` with `GTBLSTA` `IDLE`, minutes
+later and with nothing else changed, read every channel within 0.25 V
+of setpoint at a mean ratio of 1.0016, reproducing the previous day's
+reading channel for channel (lab record, task 43).
+
+**Read the monitors in `LOC`, or not at all.** A host that compares a
+declared bank against a readback takes that readback before it arms
+the box, or reads `GTBLSTA` and declines the comparison when the answer
+is not `IDLE`. `GDCBALL` carries no such condition. The setpoints are a
+stored value and are right in either mode, which is why the setpoint
+half of such a comparison survives an arming that the monitor half does
+not.
 
 **An `SDCB` sent in table mode does take effect, unlike `SDIO`.** This is
 the one place the two diverge and it is worth stating outright, because

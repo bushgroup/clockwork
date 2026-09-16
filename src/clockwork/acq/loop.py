@@ -98,6 +98,7 @@ from ..mips import (
     compression_passes,
     digital_events,
     dio_command,
+    read_sequencer,
     read_state,
 )
 from ..mips import RfReading
@@ -148,6 +149,9 @@ __all__ = [
     "RunBegun",
     "Snapshot",
     "StateRead",
+    "WHEN_AFTER",
+    "WHEN_ARMED",
+    "WHEN_BEFORE",
     "Warned",
     "cautions",
     "declared_differences",
@@ -184,6 +188,19 @@ Every one of AUKLET's sixteen channels read back within 0.25 V of its setpoint o
 2026-09-15, the worst two at 0.21-0.23 V near -70 V (lab record, task 40); this
 is twice that, so an ordinary board is quiet and a channel that is not following
 its setpoint at all is not.
+"""
+
+WHEN_BEFORE = "before setup"
+WHEN_AFTER = "after setup, before load"
+WHEN_ARMED = "armed"
+"""Where in the phases each of the three readbacks was taken.
+
+Spelled out rather than left as `before`/`after` because these strings are the
+send log's block titles and the file stamp's section headings, and the middle
+one moved: it used to be taken after the `arm` phase and is now taken between
+`setup` and `load`, which is the difference between a DC bias monitor that is
+converting and one that is not (§8.2, lab record, task 43). A reader of a
+`<stem>.sent.txt` from either side of that change can tell which they have.
 """
 
 RF_FREQUENCY_TOLERANCE = 0.01
@@ -409,12 +426,14 @@ class BoxReady(Event):
 
 @dataclass(frozen=True, slots=True)
 class StateRead(Event):
-    """A box's persistent state was read back, before or after its `setup` phase.
+    """A box's persistent state was read back at one of the send's three moments.
 
     The event carries a one-line summary for a status bar; the state itself goes
-    to the send log a line at a time and to the file's stamp. `when` is `before`
-    or `after`, which is the whole point of taking it twice: what the box was
-    holding when the run found it, and what the method's `setup` left it at.
+    to the send log a line at a time and to the file's stamp. `when` is one of
+    `WHEN_BEFORE`, `WHEN_AFTER` or `WHEN_ARMED`, and says where in the phases the
+    reading was taken, which is the whole point of taking more than one: what the
+    box was holding when the run found it, what the method's `setup` left it at,
+    and that it was left armed.
     """
 
     box: str
@@ -431,26 +450,39 @@ class StateRead(Event):
             parts.append(f"{len(self.state.modules)} ARB modules")
         if self.state.refused:
             parts.append(f"{len(self.state.refused)} refused")
-        return f"{self.box} state {self.when} setup: " + (", ".join(parts) or "nothing to read")
+        if self.state.table_status and not parts:
+            parts.append(f"table {self.state.table_status}")
+        return f"{self.box} state {self.when}: " + (", ".join(parts) or "nothing to read")
 
 
 @dataclass(frozen=True, slots=True)
 class Snapshot:
-    """What every box held, read before the `setup` phase and again after it.
+    """What every box held, read at three points in the send.
 
     Returned by `send_phases` and handed to `run_acquisition`, which stamps it
-    into the file. Two readings rather than one because they answer different
-    questions: `before` is the instrument as the run found it, which is the only
-    record of what a front panel was set to that morning, and `after` is what the
-    experiment actually ran against.
+    into the file. Three readings rather than one because they answer different
+    questions. `before` is the instrument as the run found it, which is the only
+    record of what a front panel was set to that morning. `after` is what the
+    experiment ran against, taken between the `setup` and `load` phases, where
+    the box is local and every getter answers a live number. `armed` is two
+    getters at the end of the send, so that the record still says the box was
+    left holding a table rather than idle, which `after` no longer sees.
 
-    A run that sent no `setup` phase has `before` and no `after`, and a run that
-    took no snapshot at all has neither, which a caller can tell from a run that
-    read nothing back because every box refused.
+    `after` sits where it does because of one firmware fact: a box's DC bias
+    monitors stop converting the moment it enters table mode, and answer a frozen
+    fraction of setpoint rather than the output or the last real reading (§8.2,
+    lab record, task 43). Taken after the `arm` phase, as it was until then, the
+    whole monitor half of the reading was a number no one should believe, and
+    fifteen of AUKLET's sixteen channels warned on every acquisition.
+
+    A run that sent no `setup` phase has `before` and neither of the others, and
+    a run that took no snapshot at all has none, which a caller can tell from a
+    run that read nothing back because every box refused.
     """
 
     before: tuple[BoxState, ...] = ()
     after: tuple[BoxState, ...] = ()
+    armed: tuple[BoxState, ...] = ()
     conditions: str = ""
     """The trainee's free text, carried here so that one object holds everything
     the file's stamp needs about conditions."""
@@ -458,7 +490,9 @@ class Snapshot:
     def render(self) -> str:
         """The whole snapshot as text, which is what the stamp holds."""
         blocks: list[str] = []
-        for label, states in (("as found", self.before), ("after setup", self.after)):
+        for label, states in (("as found", self.before),
+                              (WHEN_AFTER, self.after),
+                              (WHEN_ARMED, self.armed)):
             if states:
                 blocks.append(f"--- {label} ---")
                 blocks += [state.render() for state in states]
@@ -468,7 +502,7 @@ class Snapshot:
         return "\n".join(blocks)
 
     def __bool__(self) -> bool:
-        return bool(self.before or self.after or self.conditions.strip())
+        return bool(self.before or self.after or self.armed or self.conditions.strip())
 
 
 @dataclass(frozen=True, slots=True)
@@ -1171,8 +1205,10 @@ def left_as_found(box: BoxMethod, state: BoxState) -> list[str]:
 def declared_differences(box: BoxMethod, state: BoxState) -> list[str]:
     """Where a box disagrees with the DC bias and RF its method declared.
 
-    Run against the readback taken **after** the `setup` phase, which is where
-    the declared setters went. Every difference is a line and nothing here raises:
+    Run against the readback taken **after the `setup` phase and before the
+    `load` phase**, which is where the declared setters went and is the last
+    moment the box is certain to be local. Every difference is a line and
+    nothing here raises:
     the decision of record is that a mismatch warns and the acquisition goes on
     (Matt, 2026-09-15, task 40), because a monitor that drifts past tolerance or a
     channel the box quantised should not stop an instrument session, and a trainee
@@ -1184,8 +1220,16 @@ def declared_differences(box: BoxMethod, state: BoxState) -> list[str]:
     declaration, because it is a measurement of the output and not of the command.
     A declared RF frequency is compared fractionally, because what these boxes do
     to a frequency is quantise it.
+
+    The monitor comparison is made only where the box says its table is idle.
+    A box in table mode answers `GDCBALLV` from an array its service loop has
+    stopped writing, so the numbers are neither the output nor the last real
+    reading (§8.2). One line says the comparison was declined, in place of one
+    line per channel saying something untrue about it; this is the backstop, and
+    the placement of the readback is what stops it being needed (`send_phases`).
     """
     lines: list[str] = []
+    converting = state.monitors_converting
     for channel, declared in box.dc_bias:
         setpoint = state.dc_bias(channel)
         if setpoint is None:
@@ -1196,9 +1240,14 @@ def declared_differences(box: BoxMethod, state: BoxState) -> list[str]:
             lines.append(f"{box.name} DC bias {channel} was declared {declared:.2f} V "
                          f"and reads back {setpoint:.2f} V")
         monitor = state.dc_bias_readback(channel)
-        if monitor is not None and abs(monitor - setpoint) > DC_BIAS_MONITOR_TOLERANCE_V:
+        if converting and monitor is not None \
+                and abs(monitor - setpoint) > DC_BIAS_MONITOR_TOLERANCE_V:
             lines.append(f"{box.name} DC bias {channel} is set to {setpoint:.2f} V "
                          f"and monitors {monitor:.2f} V")
+    if box.dc_bias and not converting:
+        lines.append(f"{box.name} DC bias monitors were not compared: the readback was "
+                     f"taken with the table {state.table_status}, where they do not "
+                     "convert")
     readings = {reading.channel: reading for reading in state.rf}
     for entry in box.rf:
         reading = readings.get(entry.channel)
@@ -1250,29 +1299,45 @@ def _snapshot(
     readback is a record, and a run with no record of one box is better than no
     run. The failure is reported as a `Warned` and the box is left out.
     """
-    states: list[BoxState] = []
-    for entry in method.boxes:
-        box = boxes[entry.name]
-        if entry.name not in listings:
-            try:
-                with box.summarised():
-                    listings[entry.name] = box.command_listing()
-            except (MipsError, ValueError, OSError) as exc:
-                report(Warned(f"{entry.name}: GCMDS would not answer ({exc}), so its "
-                              "state readback is sent without knowing the box has it"))
-                listings[entry.name] = frozenset()
+    states = [_read_one(boxes[entry.name], entry.name, listings, when, report)
+              for entry in method.boxes]
+    return tuple(state for state in states if state is not None)
+
+
+def _read_one(
+    box: Box,
+    name: str,
+    listings: dict[str, frozenset[str]],
+    when: str,
+    report: Callable[[Event], None],
+    *,
+    sequencer_only: bool = False,
+) -> BoxState | None:
+    """One box's readback, reported, written to the send log, and returned.
+
+    `sequencer_only` is the two-getter reading `read_sequencer` takes, which is
+    what the `armed` snapshot costs; everything else reads the whole state.
+    """
+    if name not in listings:
         try:
-            state = read_state(box, listing=listings[entry.name])
-        # `OSError` among them because a port that has been unplugged raises
-        # `serial.SerialException`, which is one, and losing a box is exactly the
-        # case this is here to survive rather than the case it should die on.
+            with box.summarised():
+                listings[name] = box.command_listing()
         except (MipsError, ValueError, OSError) as exc:
-            report(Warned(f"{entry.name}: state readback {when} setup failed ({exc})"))
-            continue
-        states.append(state)
-        report(StateRead(entry.name, when, state))
-        _note_block(f"state {when} setup\n" + state.render(), source=entry.name)
-    return tuple(states)
+            report(Warned(f"{name}: GCMDS would not answer ({exc}), so its "
+                          "state readback is sent without knowing the box has it"))
+            listings[name] = frozenset()
+    try:
+        reader = read_sequencer if sequencer_only else read_state
+        state = reader(box, listing=listings[name])
+    # `OSError` among them because a port that has been unplugged raises
+    # `serial.SerialException`, which is one, and losing a box is exactly the
+    # case this is here to survive rather than the case it should die on.
+    except (MipsError, ValueError, OSError) as exc:
+        report(Warned(f"{name}: state readback {when} failed ({exc})"))
+        return None
+    report(StateRead(name, when, state))
+    _note_block(f"state {when}\n" + state.render(), source=name)
+    return state
 
 
 def send_phases(
@@ -1306,15 +1371,24 @@ def send_phases(
     one. Sending twice in a row is the ordinary case and it must not be the case that
     fails.
 
-    `snapshot` reads every box's persistent state back before anything is sent and
-    again after the `setup` phase, and returns both. **This is the half of the record
-    the strings do not carry**: the DC biases and RF drive that shape the beam, and the
-    ARB modules' frequency, range and direction, none of which a method has to name and
-    all of which decide what the experiment was (lab record, task 40). Each reading goes
-    to the send log under its box's own name as it is taken, so the file beside the UIMF
-    says what the boxes held as well as what they were sent, and the returned `Snapshot`
-    is what `run_acquisition` stamps into the file. Getters only: nothing in the readback
-    writes. It costs a `GCMDS` listing and a few dozen round trips per box.
+    `snapshot` reads every box's persistent state back before anything is sent, again
+    in the seam between its `setup` and `load` phases, and a third time, two getters
+    wide, once it is armed. **This is the half of the record the strings do not
+    carry**: the DC biases and RF drive that shape the beam, and the ARB modules'
+    frequency, range and direction, none of which a method has to name and all of
+    which decide what the experiment was (lab record, task 40). Each reading goes to
+    the send log under its box's own name as it is taken, so the file beside the UIMF
+    says what the boxes held as well as what they were sent, and the returned
+    `Snapshot` is what `run_acquisition` stamps into the file. Getters only: nothing in
+    the readback writes. It costs a `GCMDS` listing and a few dozen round trips per box.
+
+    **The second reading is in that seam and not after the `arm` phase**, which is
+    where it sat until the instrument caught it. A box's DC bias monitors stop
+    converting the moment it enters table mode and answer a frozen fraction of
+    setpoint, so a readback taken with the box armed reported fifteen of AUKLET's
+    sixteen channels as not following their setpoints, on every acquisition, and
+    nothing was wrong with the instrument (§8.2, lab record, task 43). Between `setup`
+    and `load` the box is local and every getter answers a live number.
 
     Two things are reported from it, both as `Warned` and neither stopping anything.
     Every ARB module setting the method's `setup` does not set is named with what the
@@ -1345,8 +1419,10 @@ def send_phases(
             + ", ".join(sorted(missing))
         )
     listings: dict[str, frozenset[str]] = {}
-    before = _snapshot(method, boxes, listings, "before", report) if snapshot else ()
+    before = _snapshot(method, boxes, listings, WHEN_BEFORE, report) if snapshot else ()
 
+    after: list[BoxState] = []
+    armed: list[BoxState] = []
     for entry in method.boxes:
         box = boxes[entry.name]
         report(BoxReady(entry.name, entry.port, box.version(), box.box_name()))
@@ -1355,26 +1431,60 @@ def send_phases(
         # holding rather than what a hand-written line overwrote (`declared_commands`).
         phases: tuple[tuple[str, Sequence[str]], ...] = \
             (("setup", tuple(entry.setup) + declared_commands(entry)),) if setup else ()
-        for phase, commands in _guarded(phases + (("load", entry.load),
-                                                  ("arm", entry.arm))):
-            for command in commands:
-                _send(box, entry.name, phase, command, report,
-                      arm_timeout=arm_timeout, verify_tables=verify_tables)
+        # Guarded in one pass over all three phases and *sent* in two, so that the
+        # reading can go in the seam without costing the box a second mode change:
+        # what decides where an `SMOD,LOC` goes is the whole phase list, and that
+        # list is still walked whole.
+        walked = _guarded(phases + (("load", entry.load), ("arm", entry.arm)))
+        _walk_phases(box, entry.name, [item for item in walked if item[0] == "setup"],
+                     report, arm_timeout=arm_timeout, verify_tables=verify_tables)
+        rest = [item for item in walked if item[0] != "setup"]
 
-    after: tuple[BoxState, ...] = ()
-    if snapshot and setup:
-        # After the phases rather than between `setup` and `load`, because the boxes
-        # are armed by then and the readback is getters only: nothing it sends needs
-        # local mode, so nothing it does costs a mode change or disturbs a loaded table.
-        after = _snapshot(method, boxes, listings, "after", report)
-        held = {state.name: state for state in after}
-        for entry in method.boxes:
-            state = held.get(entry.name)
-            if state is None:
-                continue
-            for message in left_as_found(entry, state) + declared_differences(entry, state):
-                report(Warned(message))
-    return Snapshot(before=before, after=after, conditions=conditions)
+        if snapshot and setup:
+            # Here, and not after the `arm` phase where it used to be. The readback
+            # is getters only and would disturb nothing there, but a box in table
+            # mode answers `GDCBALLV` from an array its service loop has stopped
+            # writing, so the monitor half of it would be fiction (§8.2, lab
+            # record, task 43). Between `setup` and `load` the box is local: the
+            # guard has put it there for a LOC-only `setup` command, or the `load`
+            # phase's own guard is one string away from doing so.
+            state = _read_one(box, entry.name, listings, WHEN_AFTER, report)
+            if state is not None:
+                after.append(state)
+                for message in left_as_found(entry, state) \
+                        + declared_differences(entry, state):
+                    report(Warned(message))
+
+        _walk_phases(box, entry.name, rest, report,
+                     arm_timeout=arm_timeout, verify_tables=verify_tables)
+
+        if snapshot and setup and any(commands for _, commands in rest):
+            # Two getters, so that the record of the armed box is not lost with the
+            # move above: what `GTBLSTA` says after the last string is the only
+            # place a file says the box was left holding a table. `GDIO` is not
+            # asked, because on an output it answers the image and not the pin (§4).
+            state = _read_one(box, entry.name, listings, WHEN_ARMED, report,
+                              sequencer_only=True)
+            if state is not None:
+                armed.append(state)
+    return Snapshot(before=before, after=tuple(after), armed=tuple(armed),
+                    conditions=conditions)
+
+
+def _walk_phases(
+    box: Box,
+    name: str,
+    phases: Sequence[tuple[str, Sequence[str]]],
+    report: Callable[[Event], None],
+    *,
+    arm_timeout: float,
+    verify_tables: bool,
+) -> None:
+    """Send one box some of its already-guarded phases, in the order given."""
+    for phase, commands in phases:
+        for command in commands:
+            _send(box, name, phase, command, report,
+                  arm_timeout=arm_timeout, verify_tables=verify_tables)
 
 
 def _guarded(

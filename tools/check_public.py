@@ -770,9 +770,11 @@ def main() -> int:
         # --- what the boxes were holding (lab record, task 40) ----------------
         states = [event for event in seen if isinstance(event, acq.StateRead)]
         check_true(
-            "send_phases reads each box's state back before the setup phase and again "
-            f"after it ({len(states)} readbacks)",
-            [event.when for event in states] == ["before", "after"],
+            "send_phases reads each box's state back before the setup phase, again in "
+            f"the seam before the load phase, and once more armed ({len(states)} "
+            "readbacks)",
+            [event.when for event in states]
+            == [acq.WHEN_BEFORE, acq.WHEN_AFTER, acq.WHEN_ARMED],
         )
         check_true(
             "and the readback asks only what the box's own GCMDS listing names, so a "
@@ -810,13 +812,40 @@ def main() -> int:
                  and "declared" in event.message],
         )
         check_true(
-            "the snapshot renders both readings and the conditions note, which is what "
-            "the file's stamp holds and what the send log carries",
-            "as found" in snapshot.render() and "after setup" in snapshot.render(),
+            "the snapshot renders all three readings and the conditions note, which is "
+            "what the file's stamp holds and what the send log carries",
+            "as found" in snapshot.render() and acq.WHEN_AFTER in snapshot.render()
+            and acq.WHEN_ARMED in snapshot.render(),
+        )
+
+        # The DC bias monitors stop converting the moment a box enters table mode and
+        # answer a frozen array afterwards (docs/mips-wire-format.md §8.2), which is
+        # why the reading above is taken between the setup and load phases. Both
+        # halves of that are checked here: the stand-in freezes, and the comparison
+        # declines a frozen monitor in one line rather than reading it as a fault.
+        armed_state = mips_module.read_state(analog_box["box1"])
+        analog.dc_bias_monitor[15] = 3.75  # 0.750 of setpoint, as AUKLET's froze
+        frozen = mips_module.read_state(analog_box["box1"])
+        check_true(
+            f"the DC bias monitors freeze in table mode ({armed_state.table_status}) "
+            "and the comparison says so rather than reading one as a disagreement",
+            not armed_state.monitors_converting
+            and frozen.dc_bias_readback(16) == 3.75 and frozen.dc_bias(16) == 5.0
+            and acq.declared_differences(declared.boxes[0], frozen)
+            == [f"box1 DC bias monitors were not compared: the readback was taken "
+                f"with the table {frozen.table_status}, where they do not convert"],
+        )
+        check_true(
+            "and the reading the send actually keeps was taken where they convert, so "
+            "an ordinary acquisition warns about no monitor at all",
+            snapshot.after[0].monitors_converting
+            and not [event for event in agreed if isinstance(event, acq.Warned)
+                     and "monitors" in event.message],
         )
 
         # The failure this exists to catch: a channel moved at the front panel after
         # the method declared it. Nothing refuses, and the difference is named.
+        analog_box["box1"].local()
         analog.dc_bias[15] = 37.0
         moved = acq.declared_differences(declared.boxes[0],
                                          mips_module.read_state(analog_box["box1"]))
@@ -854,9 +883,11 @@ def main() -> int:
                     silence=0.3, gate_dwell=dwell, progress=seen.append,
                     snapshot=acq.Snapshot(
                         before=tuple(event.state for event in states
-                                     if event.when == "before"),
+                                     if event.when == acq.WHEN_BEFORE),
                         after=tuple(event.state for event in states
-                                    if event.when == "after"),
+                                    if event.when == acq.WHEN_AFTER),
+                        armed=tuple(event.state for event in states
+                                    if event.when == acq.WHEN_ARMED),
                         conditions="self-check, no instrument",
                     ),
                 )
@@ -1147,9 +1178,9 @@ def main() -> int:
         )
         check_true(
             "with the boxes' state readback in it, as notes under each box's own name, "
-            "before the setup phase and again after it",
-            sent.count(f"{transcript_module.ASIDE} state before setup") == 1
-            and sent.count(f"{transcript_module.ASIDE} state after setup") == 1
+            "titled with where in the phases each one was taken",
+            all(sent.count(f"{transcript_module.ASIDE} state {when}") == 1
+                for when in (acq.WHEN_BEFORE, acq.WHEN_AFTER, acq.WHEN_ARMED))
             and f"box1        {transcript_module.ASIDE}   DCB 1" in sent,
         )
         check_true(

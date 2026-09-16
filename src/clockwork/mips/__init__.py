@@ -76,6 +76,7 @@ from .state import (
     BoxState,
     RfReading,
     describe,
+    read_sequencer,
     read_state,
 )
 from .transport import FakeBox, SerialTransport, Transport, open_serial
@@ -142,6 +143,7 @@ __all__ = [
     "error_text",
     "open_serial",
     "parse_report",
+    "read_sequencer",
     "read_state",
     "table_event",
 ]

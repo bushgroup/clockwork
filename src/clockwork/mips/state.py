@@ -45,8 +45,10 @@ __all__ = [
     "BoxState",
     "MAX_ARB_MODULES",
     "RESYNC_AFTER_NAK_S",
+    "SEQUENCER_GETTERS",
     "RfReading",
     "describe",
+    "read_sequencer",
     "read_state",
 ]
 
@@ -97,11 +99,27 @@ saved ARB trigger delay, which `notes/sync-design.md` reads the start list's
 step gap against.
 """
 
+SEQUENCER_GETTERS: tuple[str, ...] = ("GTBLFRQ", "GTBLSTA")
+"""The table engine's own state, which is the one part of a readback that
+changes when a box is armed.
+
+Public because it is also the whole of `read_sequencer`, the cheap reading a
+caller takes after the `arm` phase when the expensive one had to be taken
+before it (§8.2, and `clockwork.acq.loop.send_phases`).
+"""
+
 _IDENTITY_GETTERS: tuple[str, ...] = ("GVER", "GNAME")
 _COUNT_GETTERS: tuple[str, ...] = ("GCHAN,DCB", "GCHAN,RF", "GCHAN,ARB")
 _BANK_GETTERS: tuple[str, ...] = ("GDCBALL", "GDCBALLV")
-_SEQUENCER_GETTERS: tuple[str, ...] = ("GTBLFRQ", "GTBLSTA")
 _RF_CHANNEL_GETTERS: tuple[str, ...] = ("GRFMODE", "GRFPWR")
+
+_TABLE_IDLE: frozenset[str] = frozenset({"IDLE", "ABORTED"})
+"""`GTBLSTA` answers that mean no table owns the box's service loop.
+
+`READY` and `TRIGGERED` are both inside table mode: the first is a box that
+has armed and not yet run, the second one whose timer has been triggered
+(§4). Only `IDLE` and `ABORTED` are reached by leaving it.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +183,38 @@ class BoxState:
     def count(self, subsystem: str) -> int | None:
         """`GCHAN,<subsystem>` as an integer, or None if it did not answer."""
         return _as_int(self.values.get(f"GCHAN,{subsystem}"))
+
+    # -- the table engine --------------------------------------------------
+
+    @property
+    def table_status(self) -> str:
+        """`GTBLSTA`, upper-cased: `IDLE`, `READY`, `TRIGGERED`, `ABORTED`.
+
+        Empty for a box that was not asked or would not answer, which is a real
+        case rather than a defensive one: `GTBLSTA` is absent from v1.163t and
+        NAKs there as an invalid command (§4).
+        """
+        return self.values.get("GTBLSTA", "").strip().upper()
+
+    @property
+    def monitors_converting(self) -> bool:
+        """Whether `GDCBALLV` was answered by a monitor that is still reading.
+
+        False while a table owns the box. The DC bias monitors are maintained by
+        a 100 ms service task that does not run in table mode, so from `SMOD,TBL`
+        until the box is local again `GDCBALLV` reports a frozen array: not the
+        output, and not the last true reading either, but wherever the box's
+        filter had got to when it armed. Measured on AUKLET 2026-09-16 at 0.750
+        of setpoint on fifteen of sixteen channels, bit-identical over 40 s
+        (§8.2, lab record, task 43).
+
+        A box that did not answer `GTBLSTA` is treated as converting. The
+        readback is meant to be taken in local mode in the first place, and a
+        firmware too old to have the getter is also too old to be told apart
+        from one that answered `IDLE`; assuming the worst there would silently
+        drop the comparison on exactly the boxes nothing else knows about.
+        """
+        return self.table_status in _TABLE_IDLE or not self.table_status
 
     # -- DC bias -----------------------------------------------------------
 
@@ -244,7 +294,10 @@ class BoxState:
         read down a page beside the strings that were sent: the box, then what
         it is, then the bank, then the heads, then a row per module.
         """
-        lines = [f"{self.name}: {self.version}  {self.identity}".rstrip()]
+        # A reading too narrow to have asked for either is `read_sequencer`'s, and
+        # a bare `auklet:` reads as a box that would not say what it is.
+        described = f"{self.version}  {self.identity}".strip()
+        lines = [f"{self.name}: {described}" if described else self.name]
         counts = ", ".join(
             f"{count} {subsystem}" for subsystem in ("DCB", "RF", "ARB")
             if (count := self.count(subsystem)) is not None
@@ -261,6 +314,13 @@ class BoxState:
                 f"  DCB {index + 1:<7} {_volts(value):>9}"
                 + (f"   (reads {_volts(monitor):>9})" if monitor is not None else "")
             )
+        if readbacks and not self.monitors_converting:
+            # Said here rather than left for a reader to infer from the `table`
+            # line six rows up, because these numbers go into the file's stamp
+            # and a stamp is read years later by somebody who has not read §8.2.
+            lines.append(f"  note        the monitor readings above were taken with the "
+                         f"table {self.table_status.lower()}, where they do not convert; "
+                         "they are not what the channels are at")
         for reading in self.rf:
             lines.append(
                 f"  RF {reading.channel:<8} {_hertz(reading.frequency_hz)} Hz, "
@@ -313,49 +373,25 @@ def read_state(
     record names the box even if everything after it fails; then the counts,
     because the RF and module sweeps are sized from them; then the state itself.
     """
-    if listing is None:
-        with box.summarised():
-            listing = box.command_listing()
-    values: dict[str, str] = {}
-    skipped: list[str] = []
-    refused: dict[str, str] = {}
-
-    def ask(command: str) -> str | None:
-        head = command.partition(",")[0]
-        if listing and head not in listing:
-            skipped.append(command)
-            return None
-        try:
-            answer = box.command(command, value=True)
-        except (MipsError, ValueError) as exc:
-            # A rejection is a result: half of what a readback learns is which
-            # getters a firmware has and which channels a board carries. The
-            # drain is not optional -- without it the next getter reads this
-            # one's leftover (section 8.4).
-            box.resync(settle=RESYNC_AFTER_NAK_S)
-            refused[command] = str(exc)
-            return None
-        if answer is not None:
-            values[command] = answer
-        return answer
-
+    reading = _Reading(box, _listing(box, listing))
+    ask = reading.ask
     # Forty-odd round trips that say nothing one at a time. They stay in the wire
     # transcript and out of the send log, where the block this returns goes instead
     # (`Box.summarised`, lab record, task 40).
     with box.summarised():
         for getter in _IDENTITY_GETTERS + _COUNT_GETTERS:
             ask(getter)
-        for getter in _SEQUENCER_GETTERS + _BANK_GETTERS:
+        for getter in SEQUENCER_GETTERS + _BANK_GETTERS:
             ask(getter)
 
         if ask("GRFALL") is not None:
-            channels = _as_int(values.get("GCHAN,RF")) or 0
+            channels = _as_int(reading.values.get("GCHAN,RF")) or 0
             for channel in range(1, channels + 1):
                 for getter in _RF_CHANNEL_GETTERS:
                     ask(f"{getter},{channel}")
 
         if modules is None:
-            modules = min(_as_int(values.get("GCHAN,ARB")) or 0, MAX_ARB_MODULES)
+            modules = min(_as_int(reading.values.get("GCHAN,ARB")) or 0, MAX_ARB_MODULES)
         if modules:
             for getter in COMPRESSOR_GETTERS:
                 ask(getter)
@@ -363,13 +399,93 @@ def read_state(
             for getter in ARB_MODULE_GETTERS:
                 ask(f"{getter},{module}")
 
-    return BoxState(
-        name=box.name,
-        values=values,
-        skipped=tuple(skipped),
-        refused=refused,
-        listed=bool(listing),
-    )
+    return reading.state()
+
+
+def read_sequencer(box: Box, *, listing: frozenset[str] | None = None) -> BoxState:
+    """Read back the table engine's state and nothing else: two round trips.
+
+    The reading a caller takes **after** the `arm` phase, when the whole-state
+    reading had to be taken before it. A `read_state` taken with the box armed
+    reports DC bias monitors that have stopped converting (§8.2), so
+    `clockwork.acq.loop.send_phases` takes the expensive reading between `setup`
+    and `load` and this one at the end, and the record still says the box was
+    left armed rather than idle.
+
+    Getters only, like `read_state`, and a `BoxState` in the same shape so that
+    the same `render` writes it into the same send log. It names the box, says
+    what the table engine answered, and is silent about everything a two-getter
+    reading cannot know.
+
+    `listing` is the box's `GCMDS` set and is read here if not supplied, which
+    costs more than the reading itself; a caller that has just taken a
+    `read_state` has one in hand and should pass it.
+    """
+    reading = _Reading(box, _listing(box, listing))
+    with box.summarised():
+        for getter in SEQUENCER_GETTERS:
+            reading.ask(getter)
+    return reading.state()
+
+
+def _listing(box: Box, listing: frozenset[str] | None) -> frozenset[str]:
+    """The box's `GCMDS` set, read here if the caller has not got one already.
+
+    One unframed round trip of a few hundred lines, and what makes every getter
+    after it safe (§8.4). A caller holding one from earlier in the same session
+    passes it and pays nothing; an empty set is a box that would not list its
+    commands, and every getter then goes out blind.
+    """
+    if listing is not None:
+        return listing
+    with box.summarised():
+        return box.command_listing()
+
+
+class _Reading:
+    """One box's answers as they accumulate, keeping the two rules of §8.4.
+
+    A getter the box's `GCMDS` listing does not name is never sent, and a
+    rejection that gets through anyway is drained before the next command. An
+    empty listing means nothing is known about what the box has, so everything
+    is sent blind; that is a `read_state` whose `GCMDS` failed, and it is also
+    every `read_sequencer`, whose two getters cost less than a listing would.
+    """
+
+    def __init__(self, box: Box, listing: frozenset[str]) -> None:
+        self.box = box
+        self.listing = listing
+        self.values: dict[str, str] = {}
+        self.skipped: list[str] = []
+        self.refused: dict[str, str] = {}
+
+    def ask(self, command: str) -> str | None:
+        head = command.partition(",")[0]
+        if self.listing and head not in self.listing:
+            self.skipped.append(command)
+            return None
+        try:
+            answer = self.box.command(command, value=True)
+        except (MipsError, ValueError) as exc:
+            # A rejection is a result: half of what a readback learns is which
+            # getters a firmware has and which channels a board carries. The
+            # drain is not optional -- without it the next getter reads this
+            # one's leftover (section 8.4).
+            self.box.resync(settle=RESYNC_AFTER_NAK_S)
+            self.refused[command] = str(exc)
+            return None
+        if answer is not None:
+            self.values[command] = answer
+        return answer
+
+    def state(self) -> BoxState:
+        return BoxState(
+            name=self.box.name,
+            values=self.values,
+            skipped=tuple(self.skipped),
+            refused=self.refused,
+            listed=bool(self.listing),
+        )
 
 
 # -- parsing the box's own strings ---------------------------------------------------

@@ -105,7 +105,8 @@ PROVENANCE_KEYS: tuple[tuple[ParamDef, str], ...] = (
      "inverted"),
     (ParamDef(CLIENT_PARAM_ID_BASE + 8, "ClockworkBoxState", "System.String",
               "What every MIPS box was holding for this acquisition, read back with "
-              "getters: as found before the setup phase, and again after it"),
+              "getters: as found before the setup phase, again between the setup and "
+              "load phases, and the table's own state once the box was armed"),
      "box_state"),
     (ParamDef(CLIENT_PARAM_ID_BASE + 9, "ClockworkConditions", "System.String",
               "Instrument conditions no getter reads, as the operator stated them: "
@@ -142,10 +143,14 @@ because `ParamDescription` is written into `Global_Params` beside the value and 
 has both.
 
 The last two are the other half of the record, and they are text rather than a field
-apiece on purpose. `ClockworkBoxState` is the readback `clockwork.mips.read_state` took
-from every box before and after the `setup` phase, rendered exactly as the send log
-beside the file carries it, so the two cannot disagree and a reader comparing them is
-comparing the same lines; a parameter per DC bias channel would be sixteen per box of
+apiece on purpose. `ClockworkBoxState` is what `clockwork.mips.read_state` read off every
+box at the three points of the send, rendered exactly as the send log beside the file
+carries it, so the two cannot disagree and a reader comparing them is comparing the same
+lines. The second of the three moved in task 43, from after the `arm` phase to the seam
+between `setup` and `load`, because a box's DC bias monitors stop converting in table
+mode and the numbers stamped from there were not measurements of anything (§8.2); a file
+written before that carries two sections where a file written after carries three. A
+parameter per DC bias channel would be sixteen per box of
 something no downstream tool has a name for. `ClockworkConditions` is the operator's own
 free text, the one part of an experiment that exists only if somebody typed it. Both were
 absent until task 40, and a file without them says what strings were sent and nothing

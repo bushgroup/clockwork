@@ -381,6 +381,22 @@ class FakeBox:
         this; everything else is better off with two numbers that agree.
         """
 
+        self.dc_bias_monitor: list[float] = [0.0] * dcb_channels
+        """What `GDCBV` and `GDCBALLV` answer, which is not read on demand.
+
+        The real box's monitors are an array a 100 ms service task maintains,
+        and those two commands print it without converting anything. The task
+        does not run in table mode, so from `SMOD,TBL` until the box is local
+        again the array is frozen where it was (§8.2). `_service` below is that
+        task, and this is that array.
+
+        Frozen here at the last value the task reached, where a real box freezes
+        part way through its filter's approach to it: modelling a one-pole
+        filter would put a number in this stand-in that no test could check
+        against anything. What both have in common is the fact worth modelling,
+        which is that a monitor read with the box armed is not the output.
+        """
+
         self.rf: dict[int, dict[str, str]] = {
             channel: dict(_RF_DEFAULTS) for channel in range(1, rf_channels + 1)
         }
@@ -480,9 +496,25 @@ class FakeBox:
         self.error = code
         self._emit(_NAK)
 
+    def _service(self) -> None:
+        """One pass of the box's 100 mS service loop, which runs only in LOC.
+
+        Called before each command rather than on a clock: nothing in this
+        stand-in models time, and the fact worth modelling is not the 100 mS.
+        It is that the loop stops dead in table mode, so a monitor read with the
+        box armed answers whatever the last pass in local mode left there,
+        however long ago that was (§8.2). The lag between an `SDCB` and the
+        output it asks for is the part left out, and a test that needs it writes
+        `dc_bias_monitor` itself.
+        """
+        if self.mode != "LOC":
+            return
+        self.dc_bias_monitor = [volts + self.dc_bias_error for volts in self.dc_bias]
+
     def _drain(self) -> None:
         """Take whole commands off the input buffer and answer them."""
         while True:
+            self._service()
             data = bytes(self._in)
             # A table load is terminated by its second semicolon, everything
             # else by a newline. Find whichever ends the command in hand.
@@ -612,14 +644,13 @@ class FakeBox:
         """`GDCBV`: the monitor reading, which is not the setpoint (§8.2)."""
         channel = self._dc_channel(argument)
         if channel is not None:
-            self._value(f"{self.dc_bias[channel - 1] + self.dc_bias_error:.2f}")
+            self._value(f"{self.dc_bias_monitor[channel - 1]:.2f}")
 
     def _do_gdcball(self, _: str) -> None:
         self._value(",".join(f"{volts:.2f}" for volts in self.dc_bias))
 
     def _do_gdcballv(self, _: str) -> None:
-        self._value(",".join(f"{volts + self.dc_bias_error:.2f}"
-                             for volts in self.dc_bias))
+        self._value(",".join(f"{volts:.2f}" for volts in self.dc_bias_monitor))
 
     def _do_sdcball(self, argument: str) -> None:
         """`SDCBALL`: the whole bank in one command, all or nothing (§8.2)."""

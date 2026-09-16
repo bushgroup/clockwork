@@ -1,9 +1,14 @@
-"""Task 40: the snapshot a run takes, and what it says about the boxes.
+"""Tasks 40 and 43: the snapshot a run takes, and what it says about the boxes.
 
 The half of the golden record the strings do not carry. `send_phases` reads every
-box back before it sends anything and again after the `setup` phase, reports the
-ARB settings the method leaves as it found them and the declared DC bias and RF
-the box disagrees with, and hands back a `Snapshot` the file's stamp holds.
+box back before it sends anything, again in the seam between `setup` and `load`,
+and a third time once it is armed; it reports the ARB settings the method leaves
+as it found them and the declared DC bias and RF the box disagrees with, and hands
+back a `Snapshot` the file's stamp holds.
+
+The middle reading is in that seam because a box stops converting its DC bias
+monitors the moment it enters table mode (task 43); the last section here is that
+fact and what the comparison does about it.
 """
 
 from __future__ import annotations
@@ -18,6 +23,9 @@ from mainspring.uimf import UimfFile
 from clockwork import method as method_module
 from clockwork import transcript
 from clockwork.acq import (
+    WHEN_AFTER,
+    WHEN_ARMED,
+    WHEN_BEFORE,
     Geometry,
     Recording,
     Snapshot,
@@ -59,16 +67,17 @@ def auklet_box() -> Box:
     return Box(transport=fake, name="auklet")
 
 
-# --- the two readings ------------------------------------------------------------------
+# --- the three readings ----------------------------------------------------------------
 
 
-def test_send_phases_reads_each_box_before_and_after_its_setup() -> None:
+def test_send_phases_reads_each_box_at_the_three_points_of_the_send() -> None:
     method = method_module.from_dict(document())
     seen: list[object] = []
     snapshot = send_phases(method, {"auklet": auklet_box()}, progress=seen.append)
     assert [event.when for event in seen if isinstance(event, StateRead)] \
-        == ["before", "after"]
+        == [WHEN_BEFORE, WHEN_AFTER, WHEN_ARMED]
     assert len(snapshot.before) == 1 and len(snapshot.after) == 1
+    assert len(snapshot.armed) == 1
     assert snapshot.before[0].name == "auklet"
 
 
@@ -77,7 +86,7 @@ def test_a_run_that_sends_no_setup_takes_one_reading_and_says_so() -> None:
     nothing for an "after" reading to be after."""
     method = method_module.from_dict(document())
     snapshot = send_phases(method, {"auklet": auklet_box()}, setup=False)
-    assert len(snapshot.before) == 1 and snapshot.after == ()
+    assert len(snapshot.before) == 1 and snapshot.after == () and snapshot.armed == ()
 
 
 def test_the_snapshot_can_be_turned_off_entirely() -> None:
@@ -154,6 +163,7 @@ def test_a_bias_the_box_does_not_hold_is_warned_about_and_refuses_nothing() -> N
     box = auklet_box()
     snapshot = send_phases(method, {"auklet": box})
     assert declared_differences(method.boxes[0], snapshot.after[0]) == []
+    box.local()  # the send left it armed, where the monitors would not be read
     box.transport.dc_bias[15] = 37.0  # the CLOCK activation, left behind
     moved = declared_differences(method.boxes[0], read_state(box))
     assert len(moved) == 1
@@ -168,6 +178,102 @@ def test_a_monitor_that_is_not_following_its_setpoint_is_its_own_line() -> None:
     box.transport.dc_bias[15] = 5.0
     box.transport.dc_bias_error = 4.0
     lines = declared_differences(method.boxes[0], read_state(box))
+    assert len(lines) == 1 and "monitors 9.00 V" in lines[0]
+
+
+# --- the monitors and table mode (task 43) ---------------------------------------------
+
+
+def test_a_monitor_read_with_the_box_armed_is_not_what_the_channel_is_at() -> None:
+    """The instrument's own defect, in the stand-in.
+
+    A box's DC bias monitors are an array a 100 ms service task keeps, and that
+    task does not run in table mode, so `GDCBALLV` on an armed box answers
+    whatever the last pass in local mode left there (§8.2). AUKLET showed it as
+    fifteen channels at 0.750 of setpoint on 2026-09-16, bit-identical over 40 s;
+    here it is the bank as it stood before the `setup` phase moved it.
+    """
+    method = method_module.from_dict(document(dc_bias={"16": 5.0}))
+    box = auklet_box()
+    send_phases(method, {"auklet": box})  # leaves the box armed
+    # The array the service task stopped writing, left at 0.750 of setpoint, which
+    # is where AUKLET's froze. Nothing the host can send from here moves it.
+    box.transport.dc_bias_monitor[15] = 3.75
+    armed = read_state(box)
+    assert armed.table_status == "READY" and not armed.monitors_converting
+    assert armed.dc_bias(16) == 5.0 and armed.dc_bias_readback(16) == 3.75
+    assert "do not convert" in armed.render()
+
+
+def test_the_comparison_declines_the_monitors_rather_than_reading_a_frozen_one() -> None:
+    """One line saying the comparison was not made, in place of one per channel
+    saying something untrue about it."""
+    method = method_module.from_dict(document(dc_bias={"16": 5.0}))
+    box = auklet_box()
+    send_phases(method, {"auklet": box})
+    box.transport.dc_bias_monitor[15] = 3.75
+    lines = declared_differences(method.boxes[0], read_state(box))
+    assert len(lines) == 1 and "were not compared" in lines[0]
+    assert "table READY" in lines[0] and "3.75" not in lines[0]
+
+
+def test_the_shipped_placement_reads_the_monitors_where_they_convert() -> None:
+    """And so warns about nothing, which is the whole point of the move."""
+    method = method_module.from_dict(document(dc_bias={"16": 5.0}))
+    seen: list[object] = []
+    snapshot = send_phases(method, {"auklet": auklet_box()}, progress=seen.append)
+    after = snapshot.after[0]
+    assert after.table_status == "IDLE" and after.monitors_converting
+    assert after.dc_bias_readback(16) == 5.0
+    assert not [event for event in seen
+                if isinstance(event, Warned) and "monitor" in event.message]
+
+
+def test_the_armed_reading_keeps_the_record_the_move_would_have_lost() -> None:
+    """Two getters at the end of the send, so the file still says the box was left
+    holding a table rather than idle."""
+    method = method_module.from_dict(document())
+    snapshot = send_phases(method, {"auklet": auklet_box()})
+    assert [state.table_status for state in snapshot.armed] == ["READY"]
+    # Two getters, not a whole state: the expensive reading has already been taken.
+    assert not snapshot.armed[0].dc_bias_setpoints and not snapshot.armed[0].rf
+    assert f"--- {WHEN_ARMED} ---" in snapshot.render()
+
+
+def test_a_box_nothing_was_sent_to_after_its_setup_is_not_read_a_third_time() -> None:
+    """Both golden methods' ARB boxes: empty `load`, empty `arm`, and nothing
+    between the second reading and the end of the send for a third to record."""
+    arb = {"name": "bufflehead", "port": "COM7", "setup": ["SWFREQ,1,15000"],
+           "load": [], "arm": []}
+    document_with_arb = document()
+    document_with_arb["boxes"] = document_with_arb["boxes"] + [arb]
+    method = method_module.from_dict(document_with_arb)
+    boxes = {"auklet": auklet_box(),
+             "bufflehead": Box(transport=FakeBox(arb_modules=4), name="bufflehead")}
+    snapshot = send_phases(method, boxes)
+    assert [state.name for state in snapshot.after] == ["auklet", "bufflehead"]
+    assert [state.name for state in snapshot.armed] == ["auklet"]
+
+
+def test_a_box_that_will_not_say_what_its_table_is_doing_is_still_compared() -> None:
+    """`GTBLSTA` is absent from v1.163t and NAKs there as an invalid command (§4).
+
+    Assuming the worst would drop the monitor comparison on exactly the firmware
+    nothing else knows anything about, and the readback is taken in local mode
+    in the first place.
+    """
+
+    class Older(FakeBox):
+        def _do_gtblsta(self, _: str) -> None:
+            self._nak(1)
+
+    box = Box(transport=Older(dcb_channels=16), name="auklet")
+    box.transport.dc_bias[15] = 5.0
+    box.transport.dc_bias_error = 4.0
+    state = read_state(box)
+    assert state.table_status == "" and state.monitors_converting
+    method = method_module.from_dict(document(dc_bias={"16": 5.0}))
+    lines = declared_differences(method.boxes[0], state)
     assert len(lines) == 1 and "monitors 9.00 V" in lines[0]
 
 
@@ -225,6 +331,7 @@ def test_the_snapshot_is_stamped_into_the_file_as_the_log_renders_it() -> None:
     box = auklet_box()
     snapshot = send_phases(method, {"auklet": box})
     snapshot = Snapshot(before=snapshot.before, after=snapshot.after,
+                        armed=snapshot.armed,
                         conditions="bradykinin 1 uM; MCP 1750 V")
     with tempfile.TemporaryDirectory() as directory:
         recording = Recording.create(directory, method, geometry(),
@@ -235,7 +342,8 @@ def test_the_snapshot_is_stamped_into_the_file_as_the_log_renders_it() -> None:
         stamped = UimfFile(path).global_params().extra
     assert stamped["ClockworkConditions"] == "bradykinin 1 uM; MCP 1750 V"
     assert "as found" in stamped["ClockworkBoxState"]
-    assert "after setup" in stamped["ClockworkBoxState"]
+    assert WHEN_AFTER in stamped["ClockworkBoxState"]
+    assert WHEN_ARMED in stamped["ClockworkBoxState"]
     assert "DCB 16" in stamped["ClockworkBoxState"]
 
 
@@ -259,8 +367,9 @@ def test_the_send_log_carries_the_block_under_each_box_own_name() -> None:
         with transcript.send_log(path, header=header):
             send_phases(method, {"auklet": auklet_box()})
         written = open(path, encoding="utf-8").read()
-    assert f"auklet      {transcript.ASIDE} state before setup" in written
-    assert f"auklet      {transcript.ASIDE} state after setup" in written
+    assert f"auklet      {transcript.ASIDE} state {WHEN_BEFORE}" in written
+    assert f"auklet      {transcript.ASIDE} state {WHEN_AFTER}" in written
+    assert f"auklet      {transcript.ASIDE} state {WHEN_ARMED}" in written
     assert f"auklet      {transcript.ASIDE}   DCB 16" in written
     # The getters themselves are not here: the block stands for them (task 40).
     assert "GDCBALL" not in written
