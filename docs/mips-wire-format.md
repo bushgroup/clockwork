@@ -1414,28 +1414,31 @@ exists, rather than a one-off manual check:
 
 - Current firmware version per box (`GVER`; protocol above is v1.263).
   Capture as a fixture/setup step that logs each box's version.
-  **Answered for one box, 2026-09-14** (lab record, task 10): firmware
-  `1.243t, Mar 5, 2024`, below the v1.263 this document describes.
-  Every number that box supplied that night measures 1.243t rather
-  than confirming this document; the remaining boxes are still
-  unlogged.
+  **Answered for all three SLIMPHONY boxes** (lab record, tasks 10,
+  19, 37): `1.243t, Mar 5, 2024`; `1.211t, Nov 4, 2021`; `1.235t,
+  August 7, 2023` — all below the v1.263 this document describes, so
+  every number any of them supplies measures this firmware family
+  rather than confirming the document. All three are below the 1.262
+  window where `101`–`108` store as token − 1 (§6.5).
 - ARB module firmware version per module (`GARBVER,<mod>`; alternate
   waveform needs ≥ 2.1, `CUR` ≥ 2.21, §6.4). Same fixture.
   **Answered for one box, 2026-09-14** (lab record, task 10): all four
   modules answer at ARB version 2.25, past the alternate-waveform gate
-  on both counts.
+  on both counts. The second ARB box's `GCMDS` listing carries the
+  getter but its modules have not been asked it.
 - Each module's actual sync/compress line-role config
   (`SARBSYNLN`/`SARBCMPLN`; defaults 1/2, but see the §6.3 crossed-
   naming discrepancy) plus `SARBCPEX`/`SARBHISR`/`SALTHWD` states.
   Query and log at arm time rather than assuming defaults.
-  **Answered negatively for one box, 2026-09-14** (lab record, task
-  10): on 1.243t none of `SARBCCLK`, `SARBSYNLN`, `SARBCMPLN`,
-  `SARBCPEX`, `SARBHISR` or `SARBDBRD` exists; a full `GCMDS` listing
-  names none of the six, and each one sent to a module is rejected as
-  an invalid command. `SARBCCLK` in particular has no getter on this
-  firmware, so a module's as-found common-clock assignment is never
-  readable; the line-role config and the common-clock assignment rest
-  on the strings that set them and nothing else.
+  **Answered negatively for both ARB boxes** (lab record, task 10):
+  on 1.243t and on 1.235t none of `SARBCCLK`, `SARBSYNLN`,
+  `SARBCMPLN`, `SARBCPEX`, `SARBHISR` or `SARBDBRD` exists; a full
+  `GCMDS` listing names none of the six on either box, and each one
+  sent to a module is rejected as an invalid command. `SARBCCLK` in
+  particular has no getter on either firmware, so a module's
+  as-found common-clock assignment is never readable; the line-role
+  config and the common-clock assignment rest on the strings that
+  set them and nothing else.
 - Each module's UI "Sync input" config, required for the module to
   follow table `s` events (§6.3 config gotcha), but front-panel-only,
   so it must be inspected/set at the box and persisted with Save.
