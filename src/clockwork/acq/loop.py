@@ -47,6 +47,18 @@ mode is latched by the table's next event instead, up to a whole table period la
 (lab record, task 26). It needs `acquisition.enable` to say which line, and refuses the
 combination without it. See `AcquisitionRefused`.
 
+**Every `per_repetition` repetition carries evidence that its gate came back down.** The
+digitizer's enable is a level, so a frame is gated by a line going up and coming down
+again, and the two checks that watch the instant a frame is asked for can say nothing
+about the second half of that. The sequencer's own table lowers the line one console
+batch past the last counted scan and then ends, so the `TBLCMPLT` the box prints is that
+repetition's statement that it fell; the drain inside the frame wait collects it already,
+so the witness costs nothing. A frame counts out either way -- its length is the console's
+count of pushes and an enable stuck high passes every one of them -- which is how two
+hundred frames were acquired, folded and verified over two days with the sequencer's clock
+cable off and nothing objecting (lab record, tasks 42 and 46). A miss is a `Warned` and
+two consecutive misses end the run. See `enable_witness`.
+
 **A method is checked against its own strings before anything is sent.** The counts
 `[acquisition]` states are written a second time inside the trainee's strings -- the
 sequencer table's loop count and period, each compression table's `]N`, and the ticks
@@ -126,6 +138,7 @@ from .wire import (
 
 __all__ = [
     "ABORT_AFTER_FAILURES",
+    "ABORT_AFTER_UNWITNESSED",
     "ARM_TIMEOUT_S",
     "FRAME_POLL_S",
     "FRAME_TIMEOUT_FLOOR_S",
@@ -157,6 +170,7 @@ __all__ = [
     "Warned",
     "cautions",
     "declared_differences",
+    "enable_witness",
     "left_as_found",
     "refusals",
     "run_acquisition",
@@ -350,6 +364,25 @@ and the run goes on, because the ninety-nine are worth having. But a console tha
 died fails every frame the same way, and a hundred repetitions of a 60-second timeout is
 an hour of a trainee's afternoon spent proving it. Three in a row is a broken run.
 Pass `abort_after=None` to let a run try every frame it was asked for.
+"""
+
+ABORT_AFTER_UNWITNESSED = 2
+"""Consecutive repetitions whose sequencer table did not complete, before a run stops.
+
+Under `per_repetition` the sequencer's table lowers the digitizer's enable itself and
+then ends, and the `TBLCMPLT` it prints saying so is the only per-repetition evidence a
+run has that its gate ever came down (`_check_witness`). A frame goes on counting its
+`frame_length` whether or not it does, because a frame's length is the console's count
+of pushes and a gate stuck high simply passes them all: two hundred frames were acquired
+that way over two days with the sequencer's clock cable off, and every one of them
+folded exactly and verified clean (lab record, tasks 42 and 46).
+
+Two rather than the three `ABORT_AFTER_FAILURES` allows, because these are not the same
+kind of event. A failed frame can be a dropped message or a console hiccup, and one
+among a hundred is worth going on from; a table either ran to its end or it did not, and
+the fault that produces a missing completion -- no clock on the box's trigger input --
+produces a hundred in a row, none of which is distinguishable from a good frame in the
+file it writes. So the first miss is a `Warned` and the second ends the run.
 """
 
 
@@ -698,6 +731,22 @@ class FrameRecord:
     boxes' serial round trips and whatever else the interpreter was doing.
     """
 
+    table_completed_s: float | None = None
+    """When the sequencer's table said `TBLCMPLT`, in seconds from this frame's start.
+
+    The witness that this repetition's gate came *down*, which nothing else in a
+    `per_repetition` run produces: the table lowers the digitizer's enable one tick past
+    its last counted scan and the completion line is the box saying it reached the end of
+    the table, so a frame that has one was gated and a frame that has none may have been
+    recorded against an enable that never fell (`_check_witness`, lab record, task 46).
+
+    `None` on a frame whose witness never arrived **and** on every frame of a method that
+    has no witness to give -- `enable_witness(method)` is the question of which of the two
+    it is, and it is a property of the method rather than of a frame, so it is not
+    repeated on every record. Measured on the instrument it lands 141 to 234 ms before the
+    frame ends, so it is a little under `seconds` on a frame that has it.
+    """
+
     settle_seconds: float | None = None
     """How long after the last scan arrived the file's row count last moved.
 
@@ -870,6 +919,60 @@ def cautions(method: Method) -> list[str]:
     return _consistency(method)[1]
 
 
+def enable_witness(method: Method) -> str | None:
+    """Which box's `TBLCMPLT` proves a repetition of this method was actually gated.
+
+    The digitizer's enable is a level on Control I/O 2, so a run's frames are gated by a
+    line going up and coming back down again; the two gate guards in `_Loop` both watch
+    the instant a frame is *asked for*, and neither can see a gate that stays open after
+    one. Under `per_repetition` the sequencer's own table is what brings the line down --
+    an `A:0` one console batch past the last counted scan, the second-to-last event it
+    holds -- so the `TBLCMPLT` the box prints when it reaches the end of that table is a
+    per-repetition statement that the enable fell. It costs nothing to collect: it is on
+    the wire whether or not anything reads it, and the drain inside the frame wait reads
+    it already (`_check_witness`, lab record, task 46).
+
+    Returns the box to watch, or None where this method has no such witness to give:
+
+    * a method that does not declare `acquisition.enable`, since which output carries the
+      gate is a fact about the cabling that nothing else in the package knows;
+    * `single_frame`, whose table completes once per method frame rather than once per
+      repetition, and whose gate the loop lowers itself between frames (`_lower_enable`);
+    * a method whose one `STBLDAT` belongs to a box other than the one `enable` names, or
+      which loads none, or loads several, since then which table drives the line cannot be
+      told from the strings;
+    * a table that never lowers the enable at all -- the detection-response golden method,
+      whose single frame is written that way on purpose. The combination that would matter
+      here, more than one `per_repetition` console frame against a table that never lowers
+      the line, is already refused by `_check_enable_fall`.
+
+    The falls are read off the compiled table through the same `digital_events` the
+    consistency check uses, so "does this method's table lower the enable" has one answer
+    in one place. A string that will not compile answers None rather than raising: it has
+    already reached the caller as a caution, and a witness is not the place to refuse one.
+    """
+    acquisition = method.acquisition
+    enable = acquisition.enable
+    if enable is None or acquisition.repetition_mode != "per_repetition":
+        return None
+    tables = _sequencer_tables(method)
+    if len(tables) != 1 or tables[0][0] != enable.box:
+        return None
+    try:
+        events = digital_events(compile_table(tables[0][1]), enable.channel)
+    except (TableSyntaxError, ValueError):
+        return None
+    if not any(value == "0" for _, _, value in events):
+        return None
+    return enable.box
+
+
+def _sequencer_tables(method: Method) -> list[tuple[str, str]]:
+    """Every `STBLDAT` this method loads, with the box that loads it."""
+    return [(box.name, command) for box in method.boxes for command in box.load
+            if not is_comment(command) and _head(command) == "STBLDAT"]
+
+
 def _consistency(method: Method) -> tuple[list[str], list[str]]:
     """The counts `[acquisition]` states against the counts its strings embed.
 
@@ -896,8 +999,7 @@ def _consistency(method: Method) -> tuple[list[str], list[str]]:
     interpreter.** Timing, channels and waveforms are the v2 compiler's.
     """
     acquisition = method.acquisition
-    tables = [(box.name, command) for box in method.boxes for command in box.load
-              if not is_comment(command) and _head(command) == "STBLDAT"]
+    tables = _sequencer_tables(method)
     compressions = [(box.name, command) for box in method.boxes for command in box.load
                     if not is_comment(command) and _head(command) == "SARBCTBL"]
     problems: list[str] = []
@@ -1696,12 +1798,17 @@ def run_acquisition(
     which is what dates a box's status line to when it arrived rather than to the end of
     the frame. The three constants carry the measurements behind them.
 
-    `guard_gate` is the enable-gate check, in its two halves, and turning it off turns
-    off both: the run's first frame is held open for `gate_dwell` seconds before anything
-    is released, which is long enough for a digitizer that was already recording to
-    publish, and every frame is checked for a batch once its start list has been walked.
-    `gate_dwell` defaults to one batch of pushes at the period the console measured plus
-    `GATE_PUBLISH_ALLOWANCE_S`; zero keeps the per-frame check and drops the dwell.
+    `guard_gate` is the enable-gate check, in its three parts, and turning it off turns
+    off all three: the run's first frame is held open for `gate_dwell` seconds before
+    anything is released, which is long enough for a digitizer that was already recording
+    to publish; every frame is checked for a batch once its start list has been walked;
+    and every `per_repetition` repetition is checked for the `TBLCMPLT` that says its
+    table lowered the enable again (`enable_witness`, `ABORT_AFTER_UNWITNESSED`). The
+    first two watch the instant a frame is asked for and the third watches what happened
+    after one, which is the gap two days of ungated frames went through (lab record,
+    task 46). `gate_dwell` defaults to one batch of pushes at the period the console
+    measured plus `GATE_PUBLISH_ALLOWANCE_S`; zero keeps the other two and drops the
+    dwell.
 
     `ungate_chain` is passed to `start_chain` and is how a cold instrument opens its
     chain at all: the period measurement needs triggers the card will not count while
@@ -1790,6 +1897,7 @@ def run_acquisition(
             frame_poll=frame_poll,
             gate_dwell=(gate_dwell if gate_dwell is not None
                         else _gate_dwell(recording.geometry)),
+            witness_box=enable_witness(method) if guard_gate else None,
             rearm_with_reset=rearm_with_reset, abort_after=abort_after,
             stop=stop, clock=clock, started=started,
             frame_timeout=(frame_timeout if frame_timeout is not None
@@ -1965,6 +2073,9 @@ class _Loop:
     clock: Callable[[], float]
     started: float
     gate_dwell: float
+    witness_box: str | None = None
+    """Whose `TBLCMPLT` says a repetition was gated, or None (`enable_witness`)."""
+
     stop: Callable[[], str | None] | None = None
     start_step_gap: float = START_STEP_GAP_S
     row_settle: float = ROW_SETTLE_S
@@ -1974,6 +2085,10 @@ class _Loop:
     folds: list[FoldRecord] = field(default_factory=list)
     stopped_early: str | None = None
     _consecutive_failures: int = 0
+    _consecutive_unwitnessed: int = 0
+    _witnessed_at: float | None = None
+    """When this frame's sequencer table completed, on the run's clock."""
+
     _gate_checked: bool = False
     _folder: ThreadPoolExecutor | None = None
     _pending: list[Future[FoldRecord]] = field(default_factory=list)
@@ -2109,6 +2224,11 @@ class _Loop:
                                acquisition.console_frames))
         seen: list[Batch] = []
         began = self.clock()
+        # Cleared here and not when the record is built, so that the window a witness is
+        # accepted in runs from this frame's `acquire frame` to its end. A completion
+        # line the previous repetition's table sent late belongs to the previous
+        # repetition and would otherwise be counted twice.
+        self._witnessed_at = None
         outcome, detail = "", ""
         timings: dict[str, float] = {}
         """What `release` measured, which only it can: it runs inside `run_frame`."""
@@ -2171,6 +2291,10 @@ class _Loop:
             # from one that was cut off, and a frame that failed must not carry it.
             self.recording.end_frame(complete=outcome == "acquired")
 
+        # Last look at the boxes before the record is sealed: the wait drains on
+        # `frame_poll` and ends on the poll after its last one, so a completion line that
+        # arrived inside the row settle would otherwise be read a frame late.
+        self._note_box_events()
         record = FrameRecord(
             method_frame=method_frame,
             repetition=repetition,
@@ -2189,9 +2313,12 @@ class _Loop:
             ended_by=ended_by,
             settle_seconds=settle_seconds,
             start_list_seconds=timings.get("start_list", 0.0),
+            table_completed_s=(None if self._witnessed_at is None
+                               else self._witnessed_at - began),
         )
         self.frames.append(record)
         self.report(FrameEnded(record))
+        self._check_witness(record)
         self._note_box_events()
 
         if record.acquired:
@@ -2203,6 +2330,61 @@ class _Loop:
                 f"{self._consecutive_failures} frames in a row failed, the last with "
                 f"{record.outcome}: {record.detail}"
             )
+
+    def _check_witness(self, record: FrameRecord) -> None:
+        """Say so when a repetition has no evidence its gate ever came down.
+
+        The third part of the enable-gate guard, and the one that watches *after* a frame
+        rather than at the instant it is asked for. Under `per_repetition` the sequencer's
+        table lowers the digitizer's enable itself, one console batch past the last
+        counted scan, and then ends; the `TBLCMPLT` it prints is the box saying it got
+        there. A frame with none of that counted its `frame_length` anyway, because a
+        frame's length is the console's count of pushes and a gate stuck high passes all
+        of them -- which is exactly what two days of runs did with the sequencer's clock
+        cable off the box, two hundred frames that folded exactly and verified clean with
+        nothing in the loop objecting (lab record, tasks 42 and 46).
+
+        **Only on a frame that acquired**, and only where `enable_witness` says this
+        method has a witness to give. A frame that failed has already said so, and a table
+        that did not finish behind it is a consequence of the failure rather than a
+        finding of its own; warning about it as well would put a second line on every
+        frame of a run whose console had died.
+
+        **First miss warns, second consecutive miss ends the run**, in the same place and
+        the same shape as `abort_after`: this repetition's record is kept, its method
+        frame is still folded, the files still close, and the repetition after it never
+        gets a start list. `ABORT_AFTER_UNWITNESSED` says why two and not three. A run
+        already stopping for another reason keeps that reason, since the first thing that
+        went wrong is the one worth reading.
+        """
+        if self.witness_box is None or not record.acquired:
+            return
+        where = f"frame {record.method_frame}.{record.repetition}"
+        if record.table_completed_s is not None:
+            self._consecutive_unwitnessed = 0
+            return
+        self._consecutive_unwitnessed += 1
+        self.report(Warned(
+            f"{where}: {self.witness_box} never said TBLCMPLT, so nothing says the "
+            f"digitizer's enable came back down. The frame counted its "
+            f"{self.method.acquisition.frame_length} scans either way -- a frame's length "
+            "is the console's count of pushes, and a gate left high passes every one of "
+            "them -- so this is the one way a repetition can look perfect and have been "
+            "recorded against a gate that never closed. The usual cause is no clock on "
+            f"{self.witness_box}'s trigger input, which leaves the table stopped at tick 0 "
+            "with the enable high"
+        ))
+        if (self._consecutive_unwitnessed < ABORT_AFTER_UNWITNESSED
+                or self.stopped_early is not None):
+            return
+        self.stopped_early = (
+            f"{self._consecutive_unwitnessed} repetitions in a row ran without "
+            f"{self.witness_box}'s table completing, so the digitizer's enable has not "
+            f"been seen to come down since before {where}. Every frame from here would be "
+            "recorded against a gate that may never have closed, and would count out and "
+            "fold and verify exactly as though it had"
+        )
+        self.report(Warned(f"stopping after {where}: {self.stopped_early}"))
 
     def _wait_for_frame(
         self,
@@ -2301,8 +2483,8 @@ class _Loop:
         **Before `acquire frame` and not inside the release.** The invariant is that the
         gate is low when the console is asked for the frame, so lowering it a few
         milliseconds afterwards would leave the card free to take records the frame
-        counts -- a batch short of publishing anything, and so invisible to both halves
-        of the gate check.
+        counts -- a batch short of publishing anything, and so invisible to both of
+        the gate checks that watch `acquire frame`.
 
         It also re-arms the box, which is the same `SMOD,LOC` / `SMOD,TBL` a replicate's
         reset list makes, so a `single_frame` table spent by the previous method frame
@@ -2461,9 +2643,17 @@ class _Loop:
         `TBLTRIG`, `TBLCMPLT` and the `TBLRDY` of a table that re-armed itself, which
         under `per_repetition` is how a box says it is ready for the next start edge.
         Read without waiting: a box that has not got there yet says so on the next frame.
+
+        The sequencer's `TBLCMPLT` is also timestamped here rather than merely relayed,
+        because it is this frame's evidence that the digitizer's enable came back down
+        (`_check_witness`). Dating it costs nothing beyond the drain that was happening
+        anyway, and the drain runs on `frame_poll` throughout the wait, so the stamp is
+        within one poll of the line arriving rather than at the end of the frame.
         """
         for name, box in self.boxes.items():
             for event in box.drain(0.0):
+                if event is TableEvent.COMPLETE and name == self.witness_box:
+                    self._witnessed_at = self.clock()
                 self.report(BoxSaid(name, event.value))
 
     # -- the fold ----------------------------------------------------------------------

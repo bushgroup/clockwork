@@ -1143,6 +1143,174 @@ def test_the_dwell_is_one_batch_of_pushes_plus_the_path_a_batch_takes(rig):
     assert 0.16 < dwell < 0.17
 
 
+# --- the witness that a repetition was actually gated -------------------------------------
+
+
+def unclocked(*names: str) -> dict[str, Box]:
+    """Boxes whose table clock input has nothing on it, which is the fault this catches.
+
+    The level converter's output was off AUKLET's Q from 2026-09-15 to the night of
+    2026-09-16 and the loop acquired two hundred frames through it without objecting: the
+    table executed tick 0 and stopped there, so the enable went up and stayed up, and a
+    frame whose length is the console's count of pushes counted out regardless (lab record,
+    tasks 42 and 46). The stand-in models it from the outside -- `TBLTRIG` and then silence
+    -- because nothing here runs a table and the pins never move either way.
+    """
+    boxes = make_boxes(*names)
+    for box in boxes.values():
+        box.transport.clocked = False
+    return boxes
+
+
+def witness_warnings(seen: list) -> list[str]:
+    return [event.message for event in seen
+            if isinstance(event, Warned) and "TBLCMPLT" in event.message]
+
+
+def test_every_repetition_records_when_its_table_said_it_had_finished(rig):
+    """The witness itself: a `per_repetition` table lowers the enable and then completes,
+    and the completion line is the only per-repetition evidence a run has that its gate
+    came back down. It is read off the drain that runs inside the frame wait anyway, so it
+    costs nothing and is dated to within a poll of arriving."""
+    method = make_method(accumulations=3)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = rig.acquire(method, boxes)
+    assert run.complete and len(run.frames) == 3
+    assert all(record.table_completed_s is not None for record in run.frames)
+    assert all(0.0 <= record.table_completed_s <= record.seconds
+               for record in run.frames)
+
+
+def test_a_repetition_whose_table_never_completed_warns_and_the_second_stops_the_run(rig):
+    """The two days in one test. Every frame counts out and folds and looks perfect; what
+    is missing is the box saying its table reached the end, which is the `A:0` that lowers
+    the gate. The first miss warns and the second ends the run, so a method asking for four
+    repetitions acquires two and refuses the third its start list."""
+    seen: list[acq.Event] = []
+    method = make_method(accumulations=4)
+    boxes = unclocked(BOX)
+    send_phases(method, boxes)
+    run = rig.acquire(method, boxes, progress=seen.append)
+
+    assert len(run.frames) == 2
+    assert all(record.acquired and record.ended_by == "counted" for record in run.frames)
+    assert all(record.table_completed_s is None for record in run.frames)
+    assert not run.complete and run.stopped_early is not None
+    assert "2 repetitions in a row" in run.stopped_early
+    assert BOX in run.stopped_early
+
+    missing = witness_warnings(seen)
+    assert len(missing) == 2
+    assert "frame 1.1" in missing[0] and "no clock" in missing[0]
+    # The method frame is still folded and the files still close, which is what makes this
+    # a short experiment rather than a broken one.
+    assert len(run.folds) == 1 and run.folds[0].error is None
+    assert UimfFile(run.summed_path).frame_params(1).scans == SCANS
+
+
+def test_a_run_whose_table_completes_again_is_not_ended_by_an_earlier_miss(rig):
+    """Consecutive, and the count is reset by a witness. One missed line is a `Warned` and
+    the run goes on, because what this exists to catch produces a hundred in a row."""
+    seen: list[acq.Event] = []
+    method = make_method(accumulations=3)
+    boxes = make_boxes(BOX)
+    boxes[BOX].transport.clocked = False
+    send_phases(method, boxes)
+
+    def restore(event: acq.Event) -> None:
+        seen.append(event)
+        if isinstance(event, FrameEnded):
+            boxes[BOX].transport.clocked = True
+
+    run = rig.acquire(method, boxes, progress=restore)
+    assert run.complete and len(run.frames) == 3
+    assert [record.table_completed_s is None for record in run.frames] == [
+        True, False, False]
+    assert len(witness_warnings(seen)) == 1
+
+
+def test_a_single_frame_method_is_never_asked_for_a_witness(rig):
+    """Its table completes once per method frame rather than once per repetition, and the
+    loop lowers that gate itself between frames rather than waiting for the table to."""
+    method = make_method(frames=2, accumulations=2, repetition_mode="single_frame")
+    assert acq.enable_witness(method) is None
+    seen: list[acq.Event] = []
+    boxes = unclocked(BOX)
+    send_phases(method, boxes)
+    run = rig.acquire(method, boxes, progress=seen.append)
+    assert run.complete and len(run.frames) == 2
+    assert all(record.table_completed_s is None for record in run.frames)
+    assert witness_warnings(seen) == []
+
+
+def test_the_detection_response_golden_method_has_no_witness_to_give(rig):
+    """Its table raises DIOA and never lowers it, on purpose: one frame of one repetition
+    is one `acquire frame`, so there is no later frame for a gate left high to offset. A
+    completion line from it would say the table ran and nothing about the gate, so the
+    method is exempt rather than checked against something it does not claim."""
+    method = golden("detection-response", accumulations=1)
+    assert method.acquisition.repetition_mode == "per_repetition"
+    assert acq.enable_witness(method) is None
+    seen: list[acq.Event] = []
+    boxes = boxes_for(method, arb_modules=ARB_MODULES)
+    for box in boxes.values():
+        box.transport.clocked = False
+    send_phases(method, boxes)
+    run = rig.acquire(method, boxes, progress=seen.append)
+    assert run.complete
+    assert witness_warnings(seen) == []
+
+
+@pytest.mark.parametrize("kwargs, expected", [
+    ({}, BOX),
+    ({"repetition_mode": "single_frame", "frames": 1}, None),
+    ({"enable": None}, None),
+])
+def test_which_box_a_method_takes_its_witness_from(kwargs, expected):
+    """One answer in one place: the falls are read off the compiled table through the same
+    `digital_events` the consistency check uses."""
+    assert acq.enable_witness(make_method(**kwargs)) == expected
+
+
+def test_a_gate_line_on_a_box_that_loads_no_table_has_no_witness():
+    """Which table drives the line cannot be told from the strings, so nothing is claimed.
+    Built by hand because a document naming a box it does not declare is refused when it is
+    read, and this is the shape left over: a declared box with no sequencer table on it."""
+    method = make_method()
+    elsewhere = dataclasses.replace(
+        method,
+        acquisition=dataclasses.replace(
+            method.acquisition,
+            enable=method_module.Enable(box="not-the-sequencer", channel="A"),
+        ),
+    )
+    assert acq.enable_witness(elsewhere) is None
+
+
+def test_a_method_whose_table_will_not_compile_has_no_witness_rather_than_raising():
+    """It has already reached the caller as a caution, and a witness is not the place to
+    refuse one."""
+    method = make_method()
+    broken = dataclasses.replace(
+        method,
+        boxes=(dataclasses.replace(method.boxes[0], load=("STBLDAT;nonsense",)),),
+    )
+    assert cautions(broken)
+    assert acq.enable_witness(broken) is None
+
+
+def test_guard_gate_off_turns_the_witness_off_with_the_other_two_parts(rig):
+    """All three are the same guard and the same switch turns them off."""
+    seen: list[acq.Event] = []
+    method = make_method(accumulations=3)
+    boxes = unclocked(BOX)
+    send_phases(method, boxes)
+    run = rig.acquire(method, boxes, guard_gate=False, progress=seen.append)
+    assert run.complete and len(run.frames) == 3
+    assert witness_warnings(seen) == []
+
+
 def test_single_frame_with_more_than_one_frame_acquires_once_the_gate_line_is_named(rig):
     """The refusal above is lifted by the one thing the loop was missing: which output
     carries the enable. With that declared it lowers the line itself between method

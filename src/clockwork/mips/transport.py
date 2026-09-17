@@ -340,6 +340,26 @@ class FakeBox:
         about what a box would have done with it.
         """
 
+        self.clocked = True
+        """Whether this box's table clock input has a clock on it.
+
+        True is the ordinary box. False is the one failure this stand-in models from
+        the outside in: with nothing on Q the table engine executes tick 0 at `TBLSTRT`
+        and stops there, so the box prints `TBLTRIG` and never `TBLCMPLT`, never
+        re-arms, and leaves `GTBLSTA` reading `TRIGGERED` and whatever tick 0 drove
+        still driven. That is not a hypothesis: it is what AUKLET did across 442
+        `TBLSTRT` from 2026-09-15 to the night of 2026-09-16 with its level converter
+        unplugged, and every frame of it counted out, folded and verified as though
+        nothing were wrong (lab record, tasks 42 and 46).
+
+        A knob rather than the default, and added only once the cause was known --
+        task 44 declined it while it was still a guess about what a stalled table
+        looks like. What it is for is the third part of the enable-gate guard, which
+        exists to catch exactly this and can be rehearsed no other way: nothing here
+        runs a table, so a stand-in's output pins never move and the gate cannot be
+        modelled from the card's side.
+        """
+
         self.arb_modules = arb_modules
         """How many ARB modules this box answers for, and `GCHAN,ARB`.
 
@@ -914,6 +934,12 @@ class FakeBox:
         An earlier stand-in dropped to local here, which was this file having an
         opinion about a question the wire format left open, and it refused every
         `--fake` replicate with error 6 -- a failure no box produces.
+
+        **A box with `clocked` false stops after the trigger**, because the table
+        engine advances on the clock input and there is nothing on it: `TBLTRIG` and
+        then silence, no re-arm, `TRIGGERED` until something ends table mode, and the
+        next `TBLSTRT` accepted and answered exactly the same way. Whatever tick 0
+        drove stays driven, which is how an enable that never comes down happens.
         """
         if self.mode != "TBL":
             self._nak(6)
@@ -921,6 +947,8 @@ class FakeBox:
         self._ack()
         self.status = "TRIGGERED"
         self._status_line("TBLTRIG")
+        if not self.clocked:
+            return
         self._status_line("TBLCMPLT")
         if self.trigger in ("EDGE", "POS", "NEG"):
             # The inner loop re-arms in place: no timer setup, so no re-staging,

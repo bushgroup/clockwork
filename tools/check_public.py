@@ -1019,6 +1019,42 @@ def main() -> int:
                     and "before anything had been released" in ungated.frames[0].detail,
                 )
 
+                # The third part of the same guard, and the only one that looks at what
+                # happened *after* a frame. A `per_repetition` table lowers the
+                # digitizer's enable itself one batch past the last counted scan and
+                # then ends, so the `TBLCMPLT` the box prints is that repetition's
+                # evidence its gate came down; with no clock on the box's trigger input
+                # the table stops at tick 0 and the line never falls, and every frame
+                # behind it still counts out, folds and verifies exactly as though it
+                # had been gated (lab record, tasks 42 and 46).
+                fake.frame_hold_s = 0.05
+                stalled_table = mips_module.FakeBox()
+                stalled_table.clocked = False
+                unwitnessed = {"box1": mips_module.Box(transport=stalled_table,
+                                                       name="box1")}
+                acq.send_phases(recipe, unwitnessed)
+                missed: list[acq.Event] = []
+                blind = acq.run_acquisition(
+                    recipe, boxes=unwitnessed, console=console, stream=stream,
+                    directory=directory,
+                    post_trigger_samples=fake.post_trigger_samples,
+                    stem="selfcheck-loop-witness", silence=0.3, gate_dwell=dwell,
+                    progress=missed.append,
+                )
+                check_true(
+                    "a repetition whose table never said TBLCMPLT is warned about, and "
+                    "the second in a row ends the run though every frame counted out",
+                    acq.enable_witness(recipe) == "box1"
+                    and len(blind.frames) == 2
+                    and all(record.acquired and record.ended_by == "counted"
+                            and record.table_completed_s is None
+                            for record in blind.frames)
+                    and blind.stopped_early is not None
+                    and len([event for event in missed
+                             if isinstance(event, acq.Warned)
+                             and "TBLCMPLT" in event.message]) == 2,
+                )
+
                 # `single_frame` with more than one method frame, which is refused
                 # unless the method says which output carries the enable. With it named
                 # the loop lowers the line itself between method frames, in local mode,

@@ -89,6 +89,7 @@ from .fake import (
 )
 from .loop import (
     ABORT_AFTER_FAILURES,
+    ABORT_AFTER_UNWITNESSED,
     ARM_TIMEOUT_S,
     FRAME_POLL_S,
     FRAME_TIMEOUT_FLOOR_S,
@@ -120,6 +121,7 @@ from .loop import (
     Warned,
     cautions,
     declared_differences,
+    enable_witness,
     left_as_found,
     refusals,
     run_acquisition,
@@ -193,6 +195,7 @@ from .wire import (
 
 __all__ = [
     "ABORT_AFTER_FAILURES",
+    "ABORT_AFTER_UNWITNESSED",
     "ACK",
     "ACQUIRE_TIMEOUT_S",
     "ARM_TIMEOUT_S",
@@ -282,6 +285,7 @@ __all__ = [
     "decode_batch",
     "decode_tof_width",
     "decompress",
+    "enable_witness",
     "encode_batch",
     "encode_tof_width",
     "find_console",
