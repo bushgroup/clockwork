@@ -34,7 +34,7 @@ import os
 import queue
 import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import QThread, Signal
@@ -666,21 +666,33 @@ class Worker(QThread):
         # Subscribed before anything is configured, because the console binds the data
         # socket in its first `acquire` and PUB drops what has no subscriber yet.
         with DataStream(data_endpoint) as stream, Console(command_endpoint) as console:
-            info = console.info()
-            prepared = prepare_console(
-                console, job.instrument, info=info, config=self._console_config(),
-            )
-            for message in prepared.warnings:
-                self.mailbox.put(Warned(message))
-            self.said.emit(
-                f"offset {prepared.offset_v} V, "
-                f"{'inverted' if prepared.inverted else 'not inverted'}")
+            width: object | None = None
 
-            # The chain is opened once for the whole series and closed here, which is
-            # the loop's own ownership rule: whoever opens it closes it. It also keeps
-            # a series to one `acquire` -- a second one on a console already holding an
-            # acquisition is the call that kills the process (lab record, task 20).
-            width = start_chain(console, stream)
+            def prologue() -> object:
+                """Configure the card and open the chain, once for the whole series.
+
+                Handed to the first run rather than called here, because the transcript
+                is opened by `_one_run` and a command sent in front of it is a command
+                nothing writes down: see that method's docstring.
+
+                The chain is opened once and closed in the `finally` below, which is the
+                loop's own ownership rule -- whoever opens it closes it. It also keeps a
+                series to one `acquire`: a second one on a console already holding an
+                acquisition is the call that kills the process (lab record, task 20).
+                """
+                nonlocal width
+                info = console.info()
+                prepared = prepare_console(
+                    console, job.instrument, info=info, config=self._console_config(),
+                )
+                for message in prepared.warnings:
+                    self.mailbox.put(Warned(message))
+                self.said.emit(
+                    f"offset {prepared.offset_v} V, "
+                    f"{'inverted' if prepared.inverted else 'not inverted'}")
+                width = start_chain(console, stream)
+                return width
+
             try:
                 taken: list[str] = []
                 for index in range(max(1, job.replicates)):
@@ -692,6 +704,7 @@ class Worker(QThread):
                         method, job, console, stream, width, directory, stem,
                         replicate=replicate,
                         first_log=self._setup_log if not replicate else None,
+                        prologue=prologue if index == 0 else None,
                     )
                     runs.append(run)
                     self._last_run = run
@@ -724,8 +737,22 @@ class Worker(QThread):
         *,
         replicate: bool,
         first_log: tuple[str, str] | None,
+        prologue: Callable[[], object] | None = None,
     ) -> Run:
-        """One `run_acquisition` with its two log files open around it."""
+        """One `run_acquisition` with its two log files open around it.
+
+        **`prologue` is run in here and not by the caller, and that is the point.** The
+        transcript and the send log are attached to the `clockwork` logger by `_logs`,
+        and `clockwork.acq.console` builds a record only under `isEnabledFor(DEBUG)`, so
+        outside this block every command to the console is sent and none of it is
+        written down. Configuring the card and opening the chain used to happen a few
+        lines above this call: the instrument sitting's transcripts therefore carry
+        `info`, a hundred `acquire frame`s and a hundred `stop`s and nothing else, and
+        read as a run that never sent the instrument document's offset and inversion --
+        which it had sent (lab record, task 50). The settings a file was acquired under
+        belong in that file's own transcript, so the series' first run opens the log and
+        then configures the card inside it.
+        """
         header = self._header(method, job.method_path, job.instrument,
                               job.instrument_path, job.conditions)
         # A replicate re-sends neither `setup` nor `load`, so its send log carries its
@@ -737,6 +764,8 @@ class Worker(QThread):
                        f"went in {transcript.send_log_name(self._setup_log[1])} and were "
                        "not sent again")
         with self._logs(directory, stem, header, append=append):
+            if prologue is not None:
+                width = prologue()
             return run_acquisition(
                 method,
                 boxes=self.boxes,

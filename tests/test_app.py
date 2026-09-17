@@ -665,6 +665,38 @@ def test_a_whole_run_with_a_replicate_names_two_files_and_folds_both(
                    for name in written)
 
 
+def test_the_console_settings_a_run_sends_are_in_that_run_s_transcript(
+        window, tmp_path, qtbot):
+    """The prologue of an acquisition -- `init`, `horizontal`, `vertical`, `invert`,
+    `enable io port`, and the `acquire` that opens the chain -- belongs to the file it
+    configured the card for, and so belongs in that file's transcript.
+
+    It was sent before any transcript was open. `clockwork.acq.console` builds a record
+    only under `isEnabledFor(DEBUG)` and nothing raises the package's level until
+    `_logs` attaches a handler, so every command in front of the first repetition was
+    sent and never written down: the instrument sitting's transcripts carry `info`,
+    `acquire frame` and `stop` and nothing else, and read as a run that never
+    configured the card (lab record, task 50).
+    """
+    ready_to_acquire(window, qtbot, tmp_path)
+    runs: list[object] = []
+    window.worker.run_done.connect(runs.append)
+    window.replicates.setValue(1)
+    window.acquire()
+    until(qtbot, lambda: runs and idle(window), timeout=180_000)
+
+    stem = os.path.splitext(os.path.basename(runs[0].raw_path))[0]
+    written = [name for name in os.listdir(tmp_path)
+               if name.startswith(stem) and name.endswith(".transcript.log")]
+    assert written, "the run left no transcript"
+    whole = (tmp_path / written[0]).read_text(encoding="utf-8")
+    for command in ("init", "horizontal", "vertical", "invert", "enable io port"):
+        assert f"> {command}" in whole, f"{command!r} is not in the transcript"
+    # The chain's own `acquire`, which is what `acquire frame` needs to exist and what
+    # a transcript showing only `acquire frame` cannot account for.
+    assert "> acquire\n" in whole or "> acquire " in whole
+
+
 def test_the_setup_send_and_the_acquisition_share_one_send_log(window, tmp_path, qtbot):
     """The setup, load and arm strings are the ones the lab troubleshoots from, and
     they go before any file exists to name them. Send setup opens the log; an
