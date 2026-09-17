@@ -16,7 +16,7 @@ the one helper that turns those loggers into a file:
         box.send_table(table_string)
         run_acquisition(method, boxes=boxes, console=console, stream=stream, ...)
 
-Four logger names, all children of `clockwork`, so one handler catches every link
+Five logger names, all children of `clockwork`, so one handler catches every link
 and a caller who wants one of them alone attaches a handler to that name instead:
 
     clockwork.mips.wire     every byte written to and read from a box, the
@@ -28,6 +28,16 @@ and a caller who wants one of them alone attaches a handler to that name instead
                             published batch
     clockwork.acq.loop      the loop's own `Event` narrative, which is what it
                             decided rather than what the wire carried
+    clockwork.acq.console_process
+                            the console process's own stdout and stderr, line
+                            by line, and the supervisor's decisions about it --
+                            started, answered, restarted, stopped
+
+The last is not a wire. It is the only place the console's `std::cerr` reaches a
+client at all: `wrong header -- cst acq (not zero sp)` is written there and
+`std::cerr` is not one of spdlog's sinks, so before there was a supervisor to
+capture it that line was in neither the console's log nor anything a client saw
+(lab record, tasks 21 and 49).
 
 **Off costs nothing.** The package configures no handlers and sets no levels; the
 effective level of `clockwork.*` is whatever the application left it at, which by
@@ -89,8 +99,9 @@ LOGGERS = (
     "clockwork.acq.wire",
     "clockwork.acq.stream",
     "clockwork.acq.loop",
+    "clockwork.acq.console_process",
 )
-"""The four names this module documents. Public: a caller may attach to any of
+"""The five names this module documents. Public: a caller may attach to any of
 them directly, and a name that disappeared would break such a caller."""
 
 TO_BOX = ">"

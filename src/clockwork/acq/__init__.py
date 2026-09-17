@@ -13,6 +13,8 @@ blocks, so nothing in it may run on the UI thread.
     uimf.py      the files: the two-phase frame parameters and the fold
     loop.py      a whole acquisition from a method: the boxes, the frames,
                  the fold, a replicate
+    process.py   the console as a process: launch it, watch it, restart it
+                 after a `config.txt` change, stop it, and its `config.txt`
     fake.py      a console simulated in this process, for tests and the
                  hardware-free self-check
 
@@ -122,6 +124,20 @@ from .loop import (
     run_acquisition,
     send_phases,
 )
+from .process import (
+    CONSOLE_ENV,
+    KEYS,
+    STARTUP_TIMEOUT_S,
+    ConsoleConfig,
+    ConsoleProcess,
+    ConsoleProcessError,
+    ConsoleSupervisor,
+    FakeConsoleProcess,
+    Prepared,
+    find_console,
+    prepare_console,
+    read_startup_block,
+)
 from .session import EMPTY_SETTLE_S, run_frame, start_chain
 from .stream import (
     QUEUE_MESSAGES,
@@ -186,12 +202,17 @@ __all__ = [
     "BoxReady",
     "BoxSaid",
     "COMMAND_PORT",
+    "CONSOLE_ENV",
     "Console",
     "ConsoleAcquisitionError",
     "ConsoleCommandError",
+    "ConsoleConfig",
     "ConsoleInfo",
+    "ConsoleProcess",
+    "ConsoleProcessError",
     "ConsoleProtocolError",
     "ConsoleStateError",
+    "ConsoleSupervisor",
     "ConsoleTimeout",
     "DATA_PORT",
     "DEFAULT_NOTIFY_ON_SCANS_COUNT",
@@ -213,6 +234,7 @@ __all__ = [
     "FRAME_TIMEOUT_SLACK",
     "FRAME_TYPES",
     "FakeConsole",
+    "FakeConsoleProcess",
     "FoldRecord",
     "Folded",
     "FrameBegun",
@@ -223,8 +245,10 @@ __all__ = [
     "GATE_PUBLISH_ALLOWANCE_S",
     "GateChecked",
     "Geometry",
+    "KEYS",
     "PROVENANCE_KEYS",
     "PhaseSent",
+    "Prepared",
     "QUEUE_MESSAGES",
     "RAW_SUFFIX",
     "ROW_SETTLE_S",
@@ -236,10 +260,11 @@ __all__ = [
     "SECONDS_PER_SAMPLE_2GSPS",
     "SILENCE_S",
     "SILENT_COMMANDS",
+    "STARTUP_TIMEOUT_S",
     "STOP_ACQUIRE_TIMEOUT_S",
+    "SUMMED_SUFFIX",
     "Snapshot",
     "StateRead",
-    "SUMMED_SUFFIX",
     "Status",
     "StreamTimeout",
     "TOPIC_DATA",
@@ -257,9 +282,12 @@ __all__ = [
     "decompress",
     "encode_batch",
     "encode_tof_width",
+    "find_console",
     "fold_scans",
     "left_as_found",
+    "prepare_console",
     "raw_path",
+    "read_startup_block",
     "record_size_samples",
     "refusals",
     "run_acquisition",

@@ -1059,6 +1059,126 @@ def main() -> int:
                 )
                 console.stop_acquire()
 
+    section("the console process")
+    # Task 49. Nothing here launches an executable except the last check, which is
+    # skipped without one: what a clone can establish is the key table, the refusals
+    # the fork would apply at startup, and that the file-against-process comparison
+    # tells the two apart. That comparison is the whole point of the section -- the
+    # console reads `config.txt` once and reports back only its full scale, so a file
+    # that has been edited since says something the card is not doing, which is how a
+    # bench evening acquired two 64.5 s frames through a 250 ms timeout without any
+    # record of it (lab record, tasks 42 and 47).
+    from clockwork.acq import process as console_process
+
+    sample_config = (
+        "# a lab config.txt\n"
+        "PostTriggerDelay=0.00001\nNotifyOnScansCount=500\nAcquisitionTimeoutMs=100\n"
+        "TriggerLevel=0.4\nTriggerSlope=rising\nFullScaleRange=0.5\n"
+        "ZeroSuppressThreshold=-32667\nZeroSuppressHysteresis=100\nControlIoPort=2\n"
+    )
+    config = console_process.ConsoleConfig(sample_config)
+    check_true("a config.txt round-trips with its comments and spacing",
+               config.dumps() == sample_config)
+    check_true(
+        f"and reads back the settings clockwork has an opinion about (full scale "
+        f"{config.full_scale_v} V, batch {config.notify_on_scans_count}, timeout "
+        f"{config.acquisition_timeout_ms} ms, Control I/O {config.control_io_port})",
+        config.full_scale_v == 0.5 and config.notify_on_scans_count == 500
+        and config.acquisition_timeout_ms == 100 and config.control_io_port == 2,
+    )
+    check_true("a key the file omits is in force at the console's own literal, "
+               "not blank",
+               config.get("AcquisitionMaxBufferCount") is None
+               and config.in_force("AcquisitionMaxBufferCount")
+               == console_process.KEYS_BY_NAME["AcquisitionMaxBufferCount"].default)
+    check_true("a good config has nothing the fork would refuse to start on",
+               config.problems() == [])
+    bad = console_process.ConsoleConfig(
+        sample_config.replace("ZeroSuppressHysteresis=100", "ZeroSuppressHysteresis=4")
+        .replace("FullScaleRange=0.5", "FullScaleRange=1.0"))
+    check_true(
+        "and every value the fork refuses is caught before a console is launched "
+        f"({'; '.join(bad.problems())})",
+        len(bad.problems()) == 2,
+    )
+    check_true(
+        "the console's own spelling of a value is not a disagreement (std::to_string "
+        "writes 0.00001 as 0.000010)",
+        config.differences({"PostTriggerDelay": "0.000010",
+                            "TriggerLevel": "0.400000"}) == {},
+    )
+    check_true(
+        "but a file that has drifted from a running console names the key",
+        config.differences({"AcquisitionTimeoutMs": "250"})
+        == {"AcquisitionTimeoutMs": ("250", "100")},
+    )
+    rearm = console_process.ConsoleConfig(
+        sample_config + "TriggerRearmDeadTime=0.000002048\n")
+    check_true(
+        "a value the console's own log cannot print faithfully is not a drift "
+        "(std::to_string writes six decimals, so 0.000002048 is logged 0.000002)",
+        rearm.differences({"TriggerRearmDeadTime": "0.000002"}) == {},
+    )
+    check_true(
+        f"and is named as the blind spot it is ({rearm.blind_spots()})",
+        rearm.blind_spots() == {"TriggerRearmDeadTime": "0.000002"}
+        and config.blind_spots() == {},
+    )
+    started = console_process.read_startup_block([
+        "[info] Logger initialized",
+        'Config value "AcquisitionTimeoutMs" found, value set to 2000',
+        "[info] Logger initialized",
+        'Config value "AcquisitionTimeoutMs" found, value set to 100',
+        'Config value "ControlIoPort" not found, value defaulted to 2',
+        "[info] and on with the day",
+    ])
+    check_true(
+        "the startup block read back is the last start's, and holds both of the "
+        f"console's message shapes ({started})",
+        started == {"AcquisitionTimeoutMs": "100", "ControlIoPort": "2"},
+    )
+
+    # The supervisor interface, against the stand-in that needs no executable. What
+    # this shows is that a window's status bar, restart button and `--fake` have the
+    # same six calls to make whether or not there is a console on the machine.
+    with console_process.FakeConsoleProcess() as supervisor:
+        supervisor.start()
+        supervisor.wait_ready()
+        check_true(
+            f"a simulated console starts, answers and reports itself ({supervisor})",
+            supervisor.alive and supervisor.info is not None
+            and supervisor.command_endpoint.startswith("tcp://"),
+        )
+        supervisor.restart()
+        check_true("and restarts, which is the path a config.txt change takes",
+                   supervisor.alive and supervisor.info is not None)
+    check_true("and is stopped on the way out", not supervisor.alive)
+
+    found = console_process.find_console()
+    if found is None:
+        skip("a real console process starts, answers info and stops",
+             "no console executable on this machine; lab record, task 49")
+    else:
+        proc = console_process.ConsoleProcess(found)
+        try:
+            proc.start()
+            seconds = proc.wait_ready()
+            check_true(
+                f"the console at {os.path.basename(found)} starts and answers info in "
+                f"{seconds:.1f} s ({proc.info.text if proc.info else ''})",
+                proc.info is not None,
+            )
+            check_true(
+                f"and said what it read from config.txt at startup "
+                f"({len(proc.startup)} keys)",
+                bool(proc.startup),
+            )
+            check_true("and the config.txt beside it agrees with what it is holding",
+                       proc.needs_restart() == {})
+        finally:
+            proc.stop()
+        check_true("and stops when it is told to", not proc.alive)
+
     section("wire transcript")
     # Task 29. The three bench scripts and the window write one of these beside every
     # run, and it is the only record of what the boxes and the console actually said;

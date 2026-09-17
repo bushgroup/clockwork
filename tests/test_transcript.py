@@ -364,11 +364,12 @@ def test_default_name_is_the_shape_every_caller_should_use():
         == "rig-2026-09-11.transcript.log"
 
 
-def test_the_four_logger_names_are_the_ones_the_package_emits_to(collected):
+def test_the_five_logger_names_are_the_ones_the_package_emits_to(collected):
     """The names are a public contract: a caller may attach to one of them alone."""
     assert set(transcript.LOGGERS) == {
         "clockwork.mips.wire", "clockwork.acq.wire",
         "clockwork.acq.stream", "clockwork.acq.loop",
+        "clockwork.acq.console_process",
     }
     for name in transcript.LOGGERS:
         assert name.startswith(transcript.ROOT_LOGGER + "."), \

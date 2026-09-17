@@ -71,6 +71,15 @@ each of the seven ignored commands in the last row above, and `stop` sent with a
 than exactly two frames. Everything else in the table replies, and `acquire` and `tof width`
 reply twice.
 
+**Nothing in the table ends the process.** Both forms of `stop` end an acquisition and leave the
+console running, and there is no quit, exit or shutdown command to send after them. A console
+exits on its own only when it cannot start, which it does with code 1 after logging the setting
+it refused, or when the driver fails under it. So a client that starts a console owns ending it,
+and ending it means terminating the process. Nothing is lost by that: the fork flushes each log
+line as it is written and once a second besides, so a console that is killed still leaves its
+startup record and its last acquisition behind. The stock console does not, because spdlog
+flushes when its sinks are destroyed and a killed process destroys none.
+
 ## The order commands have to come in
 
 The console's own test client shows `init`, `horizontal`, `vertical`, `invert`, then `acquire`,
