@@ -499,10 +499,7 @@ class MainWindow(QMainWindow):
                     f"{name} line {line.number}: {line.text!r} is not a command and is "
                     "not sent. Tag it with `# clockwork: <phase>` if it should be.")
         reset = tuple(step for name in results for step in results[name].reset)
-        enable = None
-        if self.enable_box.currentText() and self.enable_channel.text().strip():
-            enable = Enable(box=self.enable_box.currentText(),
-                            channel=self.enable_channel.text().strip().upper())
+        enable = self._enable()
         acquisition = Acquisition(
             frames=self.frames.value(),
             scans=self.scans.value(),
@@ -977,9 +974,22 @@ class MainWindow(QMainWindow):
                 pane.describe(entry.port, entry.version, answered=True)
             else:
                 pane.describe(answered=False)
-        self.enable_box.clear()
-        self.enable_box.addItems(list(self.panes))
+        # Through `_set_enable`, not by clearing and refilling the combo: `clear()` drops
+        # the current index to the first item, and `_pane_changed()` below then reads the
+        # widget back into the method, so a scan would silently rewrite `acquisition.enable`
+        # to whichever box happened to sort first. That is the gate declaration -- the box
+        # whose DIOA the digitizer's Control I/O 2 watches, and since the gating witness the
+        # box whose `TBLCMPLT` is counted -- and a method is entitled to name a box that is
+        # off, which `_set_enable` preserves by re-adding it. Found on the instrument,
+        # 2026-09-17: a launch scan moved a method's enable from `auklet` to `cormorant`.
+        self._set_enable(self._enable())
         self._pane_changed()
+
+    def _enable(self) -> Enable | None:
+        """What the widgets currently declare, or None where they declare nothing."""
+        box = self.enable_box.currentText()
+        channel = self.enable_channel.text().strip()
+        return Enable(box=box, channel=channel.upper()) if box and channel else None
 
     def _run_done(self, run: object) -> None:
         raw = getattr(run, "raw_path", "")

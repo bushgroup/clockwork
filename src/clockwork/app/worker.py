@@ -627,6 +627,30 @@ class Worker(QThread):
 
     # -- acquiring -----------------------------------------------------------
 
+    def _console_config(self) -> ConsoleConfig | None:
+        """The `config.txt` beside the running console, for `prepare_console` to compare
+        the console's reported settings against, or None where there is nothing to read.
+
+        `ConsoleProcess.config` is a **method** -- it reads the file off disk each time,
+        because what the file says now is what the *next* start will read. Passing it
+        uncalled handed `prepare_console` a function object, and the first acquisition on
+        a real console died with `AttributeError: 'function' object has no attribute
+        'full_scale_v'` (found at the instrument, 2026-09-17; lab record, task 50).
+        Nothing caught it because `FakeConsoleProcess` subclasses `ConsoleSupervisor` and
+        not `ConsoleProcess`, so under `--fake` the branch short-circuits to None and is
+        never evaluated.
+
+        `OSError` is swallowed the way `needs_restart` swallows it: a config.txt that has
+        been moved or cannot be read is a comparison clockwork cannot make, not a reason
+        to refuse an acquisition the console is otherwise ready for.
+        """
+        if not isinstance(self.console, ConsoleProcess):
+            return None
+        try:
+            return self.console.config()
+        except OSError:
+            return None
+
     def _acquire(self, job: Acquire) -> list[Run]:
         method = _needs_method(job.method)
         self._require_boxes(method)
@@ -644,9 +668,7 @@ class Worker(QThread):
         with DataStream(data_endpoint) as stream, Console(command_endpoint) as console:
             info = console.info()
             prepared = prepare_console(
-                console, job.instrument, info=info,
-                config=self.console.config if isinstance(self.console, ConsoleProcess)
-                else None,
+                console, job.instrument, info=info, config=self._console_config(),
             )
             for message in prepared.warnings:
                 self.mailbox.put(Warned(message))
@@ -752,8 +774,10 @@ class Worker(QThread):
                 delay = float(startup["PostTriggerDelay"])
             except ValueError:
                 delay = None
-        if delay is None and isinstance(self.console, ConsoleProcess):
-            delay = self.console.config.post_trigger_delay_s
+        if delay is None:
+            config = self._console_config()
+            if config is not None:
+                delay = config.post_trigger_delay_s
         if delay is None:
             delay = float(ConsoleConfig().in_force("PostTriggerDelay"))
         return int(round(delay / seconds_per_sample))

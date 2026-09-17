@@ -33,6 +33,7 @@ from PySide6.QtCore import QSettings  # noqa: E402
 from clockwork import instrument as instrument_module  # noqa: E402
 from clockwork import method as method_module  # noqa: E402
 from clockwork.acq import FrameEnded, Warned  # noqa: E402
+from clockwork.acq.process import ConsoleConfig, ConsoleProcess  # noqa: E402
 from clockwork.acq.loop import (  # noqa: E402
     WHEN_ARMED,
     FrameRecord,
@@ -732,6 +733,59 @@ def test_no_instrument_document_greys_acquire_out_but_not_send(
     finally:
         made.worker.shutdown()
         made.worker.wait(10_000)
+
+
+def test_the_worker_hands_prepare_console_a_config_and_not_the_method_that_reads_it(
+        window, tmp_path):
+    """`ConsoleProcess.config` is a method, and the worker has to call it.
+
+    Passing it uncalled handed `prepare_console` a function object and the first
+    acquisition on a real console died with `AttributeError: 'function' object has no
+    attribute 'full_scale_v'` -- at the instrument, on the first run of the day (lab
+    record, task 50). `--fake` cannot reach the branch at all, because
+    `FakeConsoleProcess` subclasses `ConsoleSupervisor` rather than `ConsoleProcess`, so
+    the `isinstance` short-circuits and nothing evaluates it. This test builds a real
+    `ConsoleProcess` -- constructing one starts no process, and `config()` only reads the
+    directory -- so the branch is exercised without a console.
+    """
+    directory = tmp_path / "console"
+    directory.mkdir()
+    (directory / "AqMD3_console.exe").write_text("", encoding="utf-8")
+    (directory / "config.txt").write_text("FullScaleRange=0.5\nTriggerLevel=0.4\n",
+                                          encoding="utf-8")
+    window.worker.console = ConsoleProcess(str(directory / "AqMD3_console.exe"))
+
+    config = window.worker._console_config()
+    assert isinstance(config, ConsoleConfig), "prepare_console was handed a method"
+    assert config.full_scale_v == 0.5
+
+    # A config.txt that has gone is a comparison clockwork cannot make, not a refusal.
+    (directory / "config.txt").unlink()
+    assert window.worker._console_config() is None
+
+
+def test_a_scan_does_not_move_the_methods_enable_declaration(window, tmp_path, qtbot):
+    """A scan finding boxes the method does not name must leave `acquisition.enable` alone.
+
+    The instrument found this on 2026-09-17 (lab record, task 50): `_discovered` cleared the
+    combo and refilled it, `clear()` dropped the current index to the first item, and the
+    rebuild read that back into the method -- so a launch scan moved the enable from the box
+    the method declared to whichever box sorted first. It is the gate declaration: the box
+    whose DIOA the digitizer watches, and the box whose `TBLCMPLT` is the gating witness.
+    """
+    load_into(window, tmp_path, make_method())
+    until(qtbot, lambda: BOX in window.panes and idle(window))
+    assert window.build_method().acquisition.enable.box == BOX
+
+    found = type("Found", (), {"name": "", "port": "", "version": "", "box": None})
+    other = found()
+    other.name, other.port, other.version = "aaa_sorts_first", "COM9", "1.263"
+    window._discovered(type("Scan", (), {"found": (other,)})())
+
+    assert "aaa_sorts_first" in window.panes
+    enable = window.build_method().acquisition.enable
+    assert enable.box == BOX, "the scan moved the enable off the box the method declared"
+    assert enable.channel == "A"
 
 
 def test_a_box_the_method_names_that_nothing_answered_for_is_still_editable(
