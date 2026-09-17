@@ -1,8 +1,9 @@
 # packaging/
 
-The build and install chain for `clockwork.exe`, adapted from mainspring's (lab record, task 32)
-around today's placeholder window rather than the real one -- task 08's successors build that,
-and task 52 adapts this chain to carry the acquisition console alongside it.
+The build and install chain for `clockwork.exe`, adapted from mainspring's (lab record, task 32).
+It was built and first measured around a placeholder window, and rebuilt around the real one on
+2026-09-17: same excludes, still no hidden imports, 0.15 s more cold start. Task 52 adapts this
+chain to carry the acquisition console alongside it.
 
 ## Building
 
@@ -35,9 +36,9 @@ it to `PATH` yourself, until something does that for every clone.
 
 - **No file association.** mainspring is the only UIMF viewer (`CLAUDE.md`'s decisions of
   record), so `clockwork.iss` carries no `[Registry]` section and no `associate` task.
-- **`console=True`**, not mainspring's windowed build: `--self-check` is the placeholder's whole
-  reason to exist, and a windowed build redirects stdout/stderr to nowhere, which would swallow
-  its report. Task 50's real window can turn this off once nothing needs the console.
+- **`console=True`**, not mainspring's windowed build: a windowed build redirects stdout/stderr to
+  nowhere, which would swallow `--self-check`'s report. The real window kept it on for that
+  reason; turning it off costs nothing the day nothing needs the console.
 - **`pyserial`'s non-Windows `list_ports` backends are excluded** (`list_ports_linux`,
   `list_ports_osx`) -- dead code on the only OS this ships for.
 - **The icon is placeholder art** (`packaging/icon/clockwork.svg`, one plain clock face, one
@@ -77,12 +78,13 @@ name, so the exclusion list in `clockwork.spec` is doing real work, not standing
 
 ## Open
 
-- **Which machine validates the installer** (task 32 step 5, *bench: Matt*): deferred rather than
-  named; `notes/acquisition-pc.md` still flags the freed i5 rackmount as the candidate. The
+- **Where the installer is validated** (task 32 step 5): still open in the lab record. The
   installer itself compiles clean on MASSTRO (`clockwork-0.1.0-setup.exe`, 92 MB) -- what remains
-  is running it on a machine that never had the dev toolchain.
+  is running it on a Windows install that never had the dev toolchain on it, since developing on
+  the deployment machine is what hides a missing dependency until someone else runs the build.
 - **The console subsystem is on** (`console=True`) so `--self-check` has somewhere to print;
   `tools/build_exe.ps1`'s launch check waits past the console's own default-titled window before
-  reading the title, which a windowed (`console=False`) build never needed to. Revisit when task
-  50's real window decides whether it still wants a console.
+  reading the title, which a windowed (`console=False`) build never needed to. The real window
+  left it on, so a trainee launching the installed build sees a console window beside the Qt one;
+  whether that is worth keeping for `--self-check`'s sake is the open half.
 
