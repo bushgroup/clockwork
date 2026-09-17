@@ -1476,6 +1476,76 @@ def main() -> int:
              "no serial ports on this machine; port presence is not evidence of a box "
              "either way (lab record, task 37)")
 
+    section("the box state panel")
+    # Task 51. `clockwork.app.boxstate` is the panel's whole judgement and imports no
+    # Qt, so which rows are marked left as found, which disagree with the method, and
+    # the two things it refuses to print all run on a clone with no display. The widget
+    # that draws them is `tests/test_app.py`.
+    from clockwork.app.boxstate import AGREES, DIFFERS, FOUND, Reading, state_table
+
+    panel_box = Box(transport=FakeBox(name="MIPS-A", version="1.243t", dcb_channels=4,
+                                      rf_channels=1, arb_modules=2), name="auklet")
+    panel_box.transport.dc_bias = [12.0, -70.0, 0.0, 5.0]
+    panel_box.transport.dc_bias_error = -0.03
+    panel_box.transport.arb[2]["SWFDIR"] = "REV"
+    local_state = mips_module.read_state(panel_box)
+    panel_method = method_module.BoxMethod(
+        name="auklet", port="COM3", setup=("SWFDIR,1,FWD",),
+        dc_bias=((1, 12.0), (2, -60.0)))
+    table = state_table(Reading(state=local_state, when="on demand"), panel_method)
+    marks = {row.label: row for part in table.sections for row in part.rows}
+    check_true(
+        "a module setting the method does not name is marked left as found, which is "
+        "what told two indistinguishable files apart (lab record, task 40)",
+        marks["module 2 direction"].mark == FOUND
+        and marks["module 2 direction"].value == "REV"
+        and marks["module 1 direction"].mark == AGREES,
+    )
+    check_true(
+        "a declared DC bias the box disagrees with is marked, and agrees with the run "
+        "log's own warning about it: the tolerances are the loop's",
+        marks["channel 2"].mark == DIFFERS and marks["channel 1"].mark == AGREES
+        and any("DC bias 2 was declared" in line
+                for line in acq.declared_differences(panel_method, local_state)),
+    )
+    check_true(
+        "a monitor reading is shown beside its setpoint while the box is local",
+        "monitors" in marks["channel 1"].note,
+    )
+    # The 100 ms service task that maintains the monitor array does not run in table
+    # mode, so from `SMOD,TBL` the array is frozen where it was: neither the output nor
+    # the last true reading (section 8.2, lab record, task 43).
+    panel_box.transport.mode, panel_box.transport.status = "TBL", "READY"
+    armed = state_table(
+        Reading(state=mips_module.read_state(panel_box), when="armed"), panel_method)
+    frozen = {row.label: row for part in armed.sections for row in part.rows}
+    check_true(
+        "a monitor read in table mode is named as not converting rather than printed",
+        frozen["channel 1"].note == "not converting in table mode",
+    )
+    external = state_table(
+        Reading(state=local_state),
+        method_module.BoxMethod(name="auklet", port="COM3", setup=("STBLCLK,EXT",)))
+    clock = {row.label: row for part in external.sections for row in part.rows}
+    check_true(
+        "GTBLFRQ is not shown as a frequency under an external clock, where the "
+        "firmware prints an uninitialised local (wire format section 4)",
+        clock["clock"].value == "external, EXT",
+    )
+    sequencer = state_table(Reading(
+        state=local_state, when="after setup, before load",
+        sequencer=mips_module.read_sequencer(panel_box), sequencer_when="armed"))
+    check_true(
+        "a two-getter sequencer reading updates the table engine and leaves the rest "
+        "of the panel saying when it was read",
+        "two getters" in sequencer.caption
+        and "after setup, before load" in sequencer.caption,
+    )
+    check_true(
+        "a box nothing has been read off says so instead of showing empty rows",
+        state_table(Reading()).empty,
+    )
+
     section("hardware")
     skip("a MIPS box answers GVER", "no serial hardware in a self-check; lab record, task 04")
     skip("the acquisition console answers info", "no console in a self-check; lab record, task 03")

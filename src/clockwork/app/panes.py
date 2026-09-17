@@ -36,7 +36,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..method import BoxMethod
 from ..method.text import PaneResult, parse_pane
+from .boxstate import Reading
+from .statepanel import StatePanel
 
 __all__ = ["BoxPane", "PaneEditor"]
 
@@ -201,7 +204,7 @@ class PaneEditor(QPlainTextEdit):
 
 
 class BoxPane(QWidget):
-    """One box: its identity above, its strings below.
+    """One box: its identity above, its strings in the middle, its state below.
 
     The header is the box as the *rack* reports it, not as the method describes it --
     the `GNAME` it answered to, the port it answered on and its firmware -- because a
@@ -209,10 +212,17 @@ class BoxPane(QWidget):
     that nothing answered for still gets a pane, marked "off or absent"; its text is
     still editable and still saves, because a trainee editing a method for tomorrow
     should not need the instrument switched on.
+
+    Under the editor is the state panel (task 51): what the box last answered, marked
+    against what this pane's strings declare. Shut by default, so a pane is an editor
+    until a trainee asks it to be more.
     """
 
     parsed = Signal(str, object)
     """`(box name, PaneResult)` after each re-read."""
+
+    read_state_requested = Signal(str)
+    """The box's name, when its state panel asks for a fresh reading."""
 
     def __init__(self, box: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -231,6 +241,9 @@ class BoxPane(QWidget):
         self.editor = PaneEditor(box, self)
         self.editor.parsed.connect(lambda result: self.parsed.emit(self.box, result))
 
+        self.state = StatePanel(box, self)
+        self.state.refresh_requested.connect(self.read_state_requested)
+
         heading = QHBoxLayout()
         heading.setContentsMargins(0, 0, 0, 0)
         heading.addWidget(self.title)
@@ -240,7 +253,8 @@ class BoxPane(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
         layout.addLayout(heading)
-        layout.addWidget(self.editor)
+        layout.addWidget(self.editor, 1)
+        layout.addWidget(self.state)
 
     # -- what the window sets ------------------------------------------------
 
@@ -273,3 +287,13 @@ class BoxPane(QWidget):
 
     def reparse(self) -> PaneResult:
         return self.editor.reparse()
+
+    # -- the state panel -----------------------------------------------------
+
+    def show_state(self, reading: Reading, method: BoxMethod | None = None) -> None:
+        """Hand the panel a new reading of this box."""
+        self.state.show_state(reading, method)
+
+    def show_method(self, method: BoxMethod | None) -> None:
+        """Re-mark the panel's rows against the method as the pane now reads."""
+        self.state.show_method(method)

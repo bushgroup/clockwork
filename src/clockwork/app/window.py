@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import time
 from dataclasses import replace
 
 from PySide6.QtCore import Qt, QTimer
@@ -56,8 +57,8 @@ import clockwork
 
 from .. import instrument as instrument_module
 from .. import method as method_module
-from ..acq import ConsoleProcess, find_console
-from ..acq.loop import cautions, refusals
+from ..acq import ConsoleProcess, StateRead, find_console
+from ..acq.loop import WHEN_ARMED, cautions, refusals
 from ..instrument import UNCALIBRATED, Instrument
 from ..method import (
     REPETITION_MODES,
@@ -69,6 +70,7 @@ from ..method import (
     RfChannel,
 )
 from ..method.text import render_pane, split_trainee_file, start_order
+from .boxstate import Reading
 from .console_panel import ConsoleBar, ConsoleSettings
 from .launch import open_data_file, open_path
 from .naming import clean_initials, next_stem
@@ -127,6 +129,13 @@ class MainWindow(QMainWindow):
         here across an edit and written back out unchanged (`method-file-format.md`)."""
 
         self.panes: dict[str, BoxPane] = {}
+        self.readings: dict[str, Reading] = {}
+        """The last state reading of each box, kept here rather than in the pane.
+
+        A pane is rebuilt whenever the rack's box list changes, and what a box last
+        answered does not belong to a widget: a rediscovery that finds the same three
+        boxes should not lose three readings that cost fifteen seconds."""
+
         self._job: Job | None = None
         self._armed: tuple = ()
         """What the last successful send put on the boxes (`wire_fingerprint`).
@@ -408,6 +417,7 @@ class MainWindow(QMainWindow):
         self.worker.discovered.connect(self._discovered)
         self.worker.console_state.connect(self.console_bar.show_status)
         self.worker.run_done.connect(self._run_done)
+        self.worker.state_read.connect(self._state_read)
         self.worker.said.connect(self.run_panel.say)
 
         self.find_button.clicked.connect(lambda: self.find_boxes())
@@ -514,6 +524,12 @@ class MainWindow(QMainWindow):
     def _pane_changed(self, *_: object) -> None:
         self._refresh_start_order()
         self._refresh_actions()
+        # A trainee who types the `SWFDIR` line a panel said was missing should watch
+        # the row stop saying "left as found" as they type it, rather than wait five
+        # seconds for a readback to confirm what the pane in front of them decides.
+        method = self.build_method()
+        for name, pane in self.panes.items():
+            pane.show_method(self._box_method(name, method))
 
     def _refresh_start_order(self) -> None:
         method = self.build_method()
@@ -567,6 +583,8 @@ class MainWindow(QMainWindow):
         self.mainspring_button.setEnabled(any(self._last_run_paths[:2]))
         self.log_button.setEnabled(bool(self._last_run_paths[2]))
         self.action_read_state.setEnabled(not busy and bool(self.worker.boxes))
+        for pane in self.panes.values():
+            pane.state.set_busy(busy or not self.worker.boxes)
         self.action_console.setEnabled(not busy and not have_console)
 
         text: list[str] = []
@@ -766,8 +784,16 @@ class MainWindow(QMainWindow):
     def find_boxes(self) -> None:
         self.worker.submit(Discover(method=self.build_method()))
 
-    def read_state(self) -> None:
-        self.worker.submit(ReadState())
+    def read_state(self, box: str = "") -> None:
+        """A whole-state reading of one box, or of every box the rack answered for.
+
+        A panel's own button names its box; the Run menu's entry does not and reads the
+        whole rack. Queued rather than called: forty round trips on the UI thread would
+        freeze the window for the seconds they cost.
+        """
+        self.worker.submit(ReadState(
+            label=f"reading {box}" if box else "reading the boxes",
+            names=(box,) if box else ()))
 
     def send(self, *, setup: bool) -> None:
         method = self.build_method()
@@ -864,6 +890,16 @@ class MainWindow(QMainWindow):
                                "filling faster than it could be drawn", warn=True)
         for event in events:
             self.run_panel.show(event)
+            if isinstance(event, StateRead):
+                # The panels are fed from the send's own readings rather than by
+                # queuing a second `read_state` after every send. The reading
+                # `send_phases` takes between `setup` and `load` is both free and
+                # better than a fresh one: the box is still local there and its DC bias
+                # monitors are still converting, where a reading taken after the send
+                # would spend five seconds producing the one number nobody should
+                # believe (task 43).
+                self._show_state(event.box, event.state, event.when,
+                                 sequencer=event.when == WHEN_ARMED)
 
     def _job_started(self, job: Job) -> None:
         self._job = job
@@ -893,6 +929,40 @@ class MainWindow(QMainWindow):
         self.run_panel.idle(f"{job.label}: failed")
         self.statusBar().showMessage(f"{job.label}: failed")
         self._refresh_actions()
+
+    def _state_read(self, name: str, state: object) -> None:
+        """A whole-state reading off a `ReadState` job, for the panel that asked."""
+        self._show_state(name, state, "on demand")
+
+    def _show_state(self, name: str, state: object, when: str,
+                    sequencer: bool = False) -> None:
+        """Fold one reading into a box's panel, keeping what it does not supersede.
+
+        A two-getter `read_sequencer` updates the table engine and leaves the rest of
+        the panel saying when *it* was read, because two commands were sent and sixty
+        rows were not (task 43). Every other reading replaces the whole thing and drops
+        the sequencer overlay, which is part of it again.
+        """
+        stamp = f"{when}, at {time.strftime('%H:%M:%S')}"
+        held = self.readings.get(name, Reading())
+        if sequencer:
+            reading = replace(held, sequencer=state, sequencer_when=stamp)
+        else:
+            reading = Reading(state=state, when=stamp)
+        self.readings[name] = reading
+        pane = self.panes.get(name)
+        if pane is not None:
+            pane.show_state(reading, self._box_method(name))
+
+    def _box_method(self, name: str, method: Method | None = None) -> BoxMethod | None:
+        """This box's entry in the method the panes currently make, if it has one."""
+        method = method if method is not None else self.build_method()
+        if method is None:
+            return None
+        try:
+            return method.box(name)
+        except KeyError:
+            return None
 
     def _discovered(self, found: object) -> None:
         entries = list(getattr(found, "found", ()))
@@ -937,13 +1007,28 @@ class MainWindow(QMainWindow):
             widget.setParent(None)
             widget.deleteLater()
         self.panes = {}
+        opened = self.settings.open_state_panels
         for name in wanted:
             pane = BoxPane(name)
             pane.parsed.connect(self._pane_changed)
+            pane.read_state_requested.connect(self.read_state)
+            pane.state.toggled.connect(self._state_panel_toggled)
+            pane.state.set_open(name in opened)
+            pane.state.set_busy(self._job is not None or not self.worker.boxes)
             if name in kept:
                 pane.set_text(kept[name])
+            if name in self.readings:
+                pane.show_state(self.readings[name], self._box_method(name))
             self.panes[name] = pane
             self.pane_box.addWidget(pane)
+
+    def _state_panel_toggled(self, box: str, opened: bool) -> None:
+        names = set(self.settings.open_state_panels)
+        if opened:
+            names.add(box)
+        else:
+            names.discard(box)
+        self.settings.open_state_panels = names
 
     def _set_enable(self, enable: Enable | None) -> None:
         self.enable_box.clear()

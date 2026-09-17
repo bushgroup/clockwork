@@ -114,6 +114,22 @@ class Settings:
     def conditions(self, value: str) -> None:
         self._settings.setValue("conditions", value)
 
+    @property
+    def open_state_panels(self) -> frozenset[str]:
+        """Which boxes' state panels were left open, by box name.
+
+        Per pane rather than one flag for the window: a trainee watching one box's ARB
+        modules through a tuning session has no use for the other two rack boxes' rows
+        taking up the same screen, and which box that is, is the thing worth
+        remembering (task 51).
+        """
+        raw = str(self._settings.value("open_state_panels", "") or "")
+        return frozenset(name for name in raw.split(",") if name)
+
+    @open_state_panels.setter
+    def open_state_panels(self, value: object) -> None:
+        self._settings.setValue("open_state_panels", ",".join(sorted(value)))
+
     # -- the window itself ---------------------------------------------------
 
     @property

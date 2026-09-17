@@ -105,17 +105,18 @@ from ..mips import (
     BoxState,
     Compiled,
     MipsError,
+    RfReading,
     Table,
     TableEvent,
     TableSyntaxError,
     compile_table,
     compression_passes,
+    declared_settings,
     digital_events,
     dio_command,
     read_sequencer,
     read_state,
 )
-from ..mips import RfReading
 from ..transcript import DECIDED as _DECIDED
 from ..transcript import RUN as _RUN
 from ..transcript import note_block as _note_block
@@ -1307,19 +1308,13 @@ def left_as_found(box: BoxMethod, state: BoxState) -> list[str]:
     modules = state.modules
     if not modules:
         return []
-    covered: dict[str, set[int]] = {}
-    for command in tuple(box.setup) + declared_commands(box):
-        if is_comment(command):
-            continue
-        head, _, rest = command.partition(",")
-        head = head.strip().upper()
-        target = rest.partition(",")[0].strip()
-        if head.startswith("S") and target.isdigit():
-            covered.setdefault("G" + head[1:], set()).add(int(target))
+    covered = declared_settings(
+        command for command in tuple(box.setup) + declared_commands(box)
+        if not is_comment(command))
     lines: list[str] = []
     for getter in ARB_MODULE_GETTERS:
         loose = [module for module in modules
-                 if module not in covered.get(getter, set())
+                 if module not in covered.get(getter, {})
                  and getter in state.module(module)]
         if not loose:
             continue

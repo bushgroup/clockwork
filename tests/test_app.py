@@ -33,15 +33,32 @@ from PySide6.QtCore import QSettings  # noqa: E402
 from clockwork import instrument as instrument_module  # noqa: E402
 from clockwork import method as method_module  # noqa: E402
 from clockwork.acq import FrameEnded, Warned  # noqa: E402
-from clockwork.acq.loop import FrameRecord  # noqa: E402
+from clockwork.acq.loop import (  # noqa: E402
+    WHEN_ARMED,
+    FrameRecord,
+    declared_differences,
+)
 from clockwork.app import naming  # noqa: E402
+from clockwork.app.boxstate import (  # noqa: E402
+    AGREES,
+    DIFFERS,
+    FOUND,
+    Reading,
+    state_table,
+)
 from clockwork.app.launch import open_data_file, open_with  # noqa: E402
 from clockwork.app.panes import MARGIN_TAGS, BoxPane  # noqa: E402
 from clockwork.app.runlog import RunPanel, is_left_as_found  # noqa: E402
 from clockwork.app.settings import Settings  # noqa: E402
 from clockwork.app.window import MainWindow  # noqa: E402
 from clockwork.method.text import render_pane  # noqa: E402
-from clockwork.mips import Box, FakeBox, discover  # noqa: E402
+from clockwork.mips import (  # noqa: E402
+    Box,
+    FakeBox,
+    discover,
+    read_sequencer,
+    read_state,
+)
 
 SCANS = 32
 """Two of the fake console's 16-scan spectrum periods, so a fold has something to
@@ -317,6 +334,195 @@ def test_a_frame_that_ended_on_silence_is_surfaced_and_one_that_counted_out_is_n
     assert "silence" in panel.log.topLevelItem(0).text(1)
 
 
+# --- the state panel ------------------------------------------------------------------
+
+
+def rack_box() -> Box:
+    """A stand-in with a small DC bias bank, one head and two ARB modules.
+
+    Two modules rather than four so a section is short enough to read in an assertion,
+    and a monitor error so the setpoint and the monitor stay two different numbers
+    (`clockwork.mips.transport`). Module 2 is left at `REV`, which is the setting the
+    CLOCK method left behind and the detection-response method could not see
+    (lab record, task 40).
+    """
+    fake = FakeBox(name="MIPS-A", version="1.243t", dcb_channels=4, rf_channels=1,
+                   arb_modules=2)
+    fake.dc_bias = [12.0, -70.0, 0.0, 5.0]
+    fake.dc_bias_error = -0.03
+    fake.rf[1].update({"SRFFRQ": "943000", "SRFDRV": "50.00"})
+    fake.arb[2]["SWFDIR"] = "REV"
+    return Box(transport=fake, name=BOX)
+
+
+def in_table_mode(box: Box) -> Box:
+    """Put the stand-in in table mode without loading a table into it.
+
+    `SMOD,TBL` is refused with no table loaded, and what these tests need is the
+    consequence rather than the command: the 100 ms service task stops, so the monitor
+    array freezes wherever it was and `GTBLSTA` stops answering `IDLE` (§8.2).
+    """
+    box.transport.mode = "TBL"
+    box.transport.status = "READY"
+    return box
+
+
+def declaring(**kwargs) -> method_module.BoxMethod:
+    """A method entry for `BOX`, with whatever setup and declarations a test needs."""
+    return method_module.BoxMethod(name=BOX, port="COM3", **kwargs)
+
+
+def rows_of(table, title: str) -> dict:
+    section = next(part for part in table.sections if part.title == title)
+    return {row.label: row for row in section.rows}
+
+
+def test_a_setting_the_method_does_not_name_is_marked_left_as_found():
+    """The mark the panel exists for: `SWFDIR` REV on module 2, named by nothing.
+
+    The run log already says *that* something was left as found; the panel is where a
+    trainee sees *what*, which is the difference the instrument day of 2026-09-15 could
+    not tell between two files.
+    """
+    state = read_state(rack_box())
+    table = state_table(Reading(state=state, when="on demand"),
+                        declaring(setup=("SWFDIR,1,FWD",)))
+    arb = rows_of(table, "ARB")
+    assert arb["module 1 direction"].mark == AGREES
+    assert arb["module 2 direction"].value == "REV"
+    assert arb["module 2 direction"].mark == FOUND
+
+
+def test_a_declared_setting_the_box_disagrees_with_is_marked_and_counted():
+    state = read_state(rack_box())
+    table = state_table(Reading(state=state, when="on demand"),
+                        declaring(setup=("SWFDIR,2,FWD",)))
+    row = rows_of(table, "ARB")["module 2 direction"]
+    assert row.mark == DIFFERS and row.declared == "FWD" and row.value == "REV"
+    assert table.differing == (row,)
+
+
+def test_the_panel_marks_a_dc_bias_row_exactly_where_the_loop_would_warn():
+    """The assertion that keeps the panel and the run log from contradicting.
+
+    `declared_differences` emits the `Warned` lines a trainee reads in the log; the
+    panel's marks are the same judgement against the same tolerances, and a window that
+    marked a row as declared while warning about it in the log would be worse than one
+    that showed neither.
+    """
+    state = read_state(rack_box())
+    entry = declaring(dc_bias=((1, 12.0), (2, -60.0)))
+    rows = rows_of(state_table(Reading(state=state), entry), "DC bias")
+    warned = declared_differences(entry, state)
+    assert rows["channel 1"].mark == AGREES
+    assert rows["channel 2"].mark == DIFFERS
+    assert any("DC bias 2 was declared -60.00 V" in line for line in warned)
+    assert not any("DC bias 1 was declared" in line for line in warned)
+
+
+def test_a_monitor_read_in_table_mode_is_not_shown_as_a_number():
+    """Task 43: the monitors stop converting in table mode and the array freezes.
+
+    What the panel must not do is print the frozen number beside the setpoint, where it
+    reads as a measurement of the output.
+    """
+    box = rack_box()
+    local = read_state(box)
+    assert "monitors" in rows_of(state_table(Reading(state=local)),
+                                 "DC bias")["channel 1"].note
+    table = state_table(Reading(state=read_state(in_table_mode(box)), when="on demand"))
+    section = next(part for part in table.sections if part.title == "DC bias")
+    assert rows_of(table, "DC bias")["channel 1"].note == "not converting in table mode"
+    assert "does not run in table mode" in section.note
+
+
+def test_gtblfrq_is_not_shown_as_a_frequency_under_an_external_clock():
+    """Wire format §4: `TableFreq()` prints an uninitialised local under `EXT`.
+
+    No getter reports the clock source, so the method's own `STBLCLK` is the only thing
+    that says which of the two a number is.
+    """
+    state = read_state(rack_box())
+    external = state_table(Reading(state=state), declaring(setup=("STBLCLK,EXT",)))
+    engine = next(part for part in external.sections if part.title == "Table engine")
+    assert rows_of(external, "Table engine")["clock"].value == "external, EXT"
+    assert "uninitialised local" in engine.note
+    internal = state_table(Reading(state=state), declaring(setup=("STBLCLK,42000000",)))
+    assert "Hz internal" in rows_of(internal, "Table engine")["clock"].value
+
+
+def test_a_sequencer_reading_updates_the_table_engine_and_claims_nothing_else():
+    """Step 4 of task 51: the armed reading is two getters and must not look like forty.
+
+    `read_sequencer` is what the loop takes once a box is armed, because a whole-state
+    reading there reports monitors that have stopped converting. The panel keeps the
+    earlier reading's rows and says how old they are.
+    """
+    box = rack_box()
+    whole = read_state(box)
+    reading = Reading(state=whole, when="after setup, before load",
+                      sequencer=read_sequencer(in_table_mode(box)),
+                      sequencer_when="armed")
+    table = state_table(reading)
+    assert "two getters" in table.caption and "after setup, before load" in table.caption
+    assert rows_of(table, "Table engine")["status"].value == "READY"
+    # The DC bias rows are the earlier reading's, and still carry its monitors.
+    assert "monitors" in rows_of(table, "DC bias")["channel 1"].note
+
+
+def test_a_box_nothing_has_been_read_off_has_a_caption_and_no_rows():
+    table = state_table(Reading())
+    assert table.empty and table.sections == () and table.caption == "not read yet"
+
+
+def test_the_panel_starts_shut_and_opens_the_section_that_disagrees(qtbot):
+    pane = BoxPane(BOX)
+    qtbot.addWidget(pane)
+    assert not pane.state.opened
+    pane.show_state(Reading(state=read_state(rack_box()), when="on demand"),
+                    declaring(setup=("SWFDIR,2,FWD",)))
+    assert "1 setting disagrees" in pane.state.summary.text()
+    sections = {pane.state.tree.topLevelItem(index).text(0):
+                pane.state.tree.topLevelItem(index)
+                for index in range(pane.state.tree.topLevelItemCount())}
+    assert sections["ARB"].isExpanded()
+    assert not sections["DC bias"].isExpanded()
+
+
+def test_a_section_opened_by_hand_survives_the_next_re_mark(qtbot):
+    """Every keystroke in the pane re-marks the rows, which rebuilds the tree.
+
+    A trainee typing the line a row asked for must not watch the section they opened to
+    read it shut itself under them.
+    """
+    pane = BoxPane(BOX)
+    qtbot.addWidget(pane)
+    pane.show_state(Reading(state=read_state(rack_box()), when="on demand"), declaring())
+    opened = next(pane.state.tree.topLevelItem(index)
+                  for index in range(pane.state.tree.topLevelItemCount())
+                  if pane.state.tree.topLevelItem(index).text(0) == "RF")
+    assert not opened.isExpanded()
+    opened.setExpanded(True)
+    pane.show_method(declaring(setup=("SWFDIR,2,REV",)))
+    again = next(pane.state.tree.topLevelItem(index)
+                 for index in range(pane.state.tree.topLevelItemCount())
+                 if pane.state.tree.topLevelItem(index).text(0) == "RF")
+    assert again.isExpanded()
+
+
+def test_editing_a_pane_remarks_the_panel_without_a_new_reading(qtbot):
+    """A trainee who types the line the panel said was missing should watch the mark
+    change, not wait five seconds for a readback to confirm what the pane decides."""
+    pane = BoxPane(BOX)
+    qtbot.addWidget(pane)
+    pane.show_state(Reading(state=read_state(rack_box()), when="on demand"), declaring())
+    before = state_table(pane.state.reading, pane.state.method)
+    assert rows_of(before, "ARB")["module 2 direction"].mark == FOUND
+    pane.show_method(declaring(setup=("SWFDIR,2,REV",)))
+    after = state_table(pane.state.reading, pane.state.method)
+    assert rows_of(after, "ARB")["module 2 direction"].mark == AGREES
+
+
 # --- discovery ------------------------------------------------------------------------
 
 
@@ -387,6 +593,49 @@ def test_acquire_is_greyed_out_until_the_boxes_are_armed_with_this_method(
     window._refresh_actions()
     assert not window.acquire_button.isEnabled()
     assert "changed since the boxes were armed" in window.problems.text()
+
+
+def test_a_send_fills_the_state_panels_without_a_second_readback(
+        window, tmp_path, qtbot):
+    """Decision 6's "refreshed after every send", done out of the send's own readings.
+
+    `send_phases` already reads every box between `setup` and `load`, where the box is
+    local and its DC bias monitors are still converting. Queuing a `read_state` after
+    the send would cost five seconds to produce a worse reading -- the box is armed by
+    then, and the monitor half of it is a frozen array (task 43). So the panel is fed
+    from the `StateRead` events the send reports, and the two-getter armed reading
+    lands as an overlay that says so.
+    """
+    load_into(window, tmp_path, make_method())
+    until(qtbot, lambda: window.worker.boxes and idle(window))
+    assert window.panes[BOX].state.reading.state is None
+
+    window.send(setup=True)
+    until(qtbot, lambda: idle(window) and window._armed)
+    window._drain()
+
+    reading = window.panes[BOX].state.reading
+    assert reading.state is not None and reading.state.dc_bias_setpoints
+    assert "after setup, before load" in reading.when
+    assert reading.sequencer is not None and WHEN_ARMED in reading.sequencer_when
+    # Two getters and not forty: the armed reading knows the table engine and nothing
+    # else, and the caption has to say so beside rows it did not take.
+    assert not reading.sequencer.dc_bias_setpoints
+    assert "two getters" in window.panes[BOX].state.caption.text()
+
+
+def test_the_panel_button_reads_only_its_own_box(window, tmp_path, qtbot):
+    """One box's reading costs about forty round trips, so the button reads one box.
+
+    The Run menu's entry reads the rack; this is the per-pane refresh of step 1, and
+    a trainee who has just changed one box's front panel should not pay for three.
+    """
+    load_into(window, tmp_path, make_method())
+    until(qtbot, lambda: window.worker.boxes and idle(window))
+    window.panes[BOX].state.refresh.click()
+    until(qtbot, lambda: idle(window) and window.panes[BOX].state.reading.state)
+    assert "on demand" in window.panes[BOX].state.reading.when
+    assert window.readings[BOX].state.identity
 
 
 def test_a_whole_run_with_a_replicate_names_two_files_and_folds_both(

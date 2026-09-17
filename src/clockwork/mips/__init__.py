@@ -65,6 +65,18 @@ from .discovery import (
     discover,
     mips_ports,
 )
+from .state import (
+    ARB_MODULE_GETTERS,
+    COMPRESSOR_GETTERS,
+    MAX_ARB_MODULES,
+    SEQUENCER_GETTERS,
+    BoxState,
+    RfReading,
+    declared_settings,
+    describe,
+    read_sequencer,
+    read_state,
+)
 from .table import (
     UNNAMED,
     Compiled,
@@ -80,15 +92,6 @@ from .table import (
     digital_events,
     encode,
     parse_report,
-)
-from .state import (
-    ARB_MODULE_GETTERS,
-    MAX_ARB_MODULES,
-    BoxState,
-    RfReading,
-    describe,
-    read_sequencer,
-    read_state,
 )
 from .transport import FakeBox, SerialTransport, Transport, open_serial
 from .wire import (
@@ -111,6 +114,7 @@ __all__ = [
     "ACK",
     "ARB_MODULE_GETTERS",
     "COMPRESSION_COMMAND",
+    "COMPRESSOR_GETTERS",
     "DEFAULT_CHUNK_BYTES",
     "DEFAULT_CHUNK_GAP_S",
     "DEFAULT_TIMEOUT_S",
@@ -121,6 +125,7 @@ __all__ = [
     "MAX_ARB_MODULES",
     "NAK",
     "RING_BUFFER_BYTES",
+    "SEQUENCER_GETTERS",
     "TOKEN_TIMEOUT_S",
     "Box",
     "BoxRejected",
@@ -152,6 +157,7 @@ __all__ = [
     "compression_passes",
     "compression_table",
     "decode",
+    "declared_settings",
     "describe",
     "dio_command",
     "differences",

@@ -34,7 +34,7 @@ Nothing here is a setter and nothing here is Qt. Every call blocks.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from .box import Box, MipsError
@@ -47,6 +47,7 @@ __all__ = [
     "RESYNC_AFTER_NAK_S",
     "SEQUENCER_GETTERS",
     "RfReading",
+    "declared_settings",
     "describe",
     "read_sequencer",
     "read_state",
@@ -540,6 +541,40 @@ def _volts(value: float | None) -> str:
     if value is None:
         return "?"
     return f"{value:.2f} V"
+
+
+def declared_settings(commands: Iterable[str]) -> dict[str, dict[int, str]]:
+    """Which indexed settings a sequence of strings sets, keyed by the getter that
+    reads each one back.
+
+    `SWFDIR,2,FWD` is read back by `GWFDIR,2` and `SDCB,3,-12.50` by the third field
+    of `GDCBALL`, so a host that wants to say which of a box's settings its method
+    named -- and which it left as it found -- needs the same mapping twice: once to
+    build the warning list (`clockwork.acq.loop.left_as_found`) and once to mark a
+    row of a state table. It is one mapping and it lives here, beside the getters it
+    names.
+
+    The rule is the firmware's own naming and nothing cleverer: a command whose word
+    starts with `S` and whose first argument is a number sets the thing `G` + the rest
+    of the word reads at that index. Returns `{getter: {index: value}}`, the value
+    being the rest of the string with nothing parsed out of it, since what a value
+    means is the caller's business and `FWD` and `-12.50` are both just what was
+    written.
+
+    A command with no numeric first argument -- `SDCBALL`, `SMOD,TBL`, a table load --
+    is not an indexed setting and is left out. Comments are the caller's to filter:
+    what counts as one is a method-document fact and not a wire fact.
+    """
+    settings: dict[str, dict[int, str]] = {}
+    for command in commands:
+        head, _, rest = command.partition(",")
+        head = head.strip().upper()
+        target, _, value = rest.partition(",")
+        target = target.strip()
+        if not head.startswith("S") or not target.isdigit():
+            continue
+        settings.setdefault("G" + head[1:], {})[int(target)] = value.strip()
+    return settings
 
 
 def describe(states: Sequence[BoxState]) -> str:
