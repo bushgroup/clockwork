@@ -36,9 +36,13 @@ dependencies = [
     "protobuf~=7.36",
     "python-snappy~=0.7.3",
     "PySide6~=6.11.2",
-    "pyqtgraph~=0.14.0",
     "tomli-w~=1.2.0",
 ]
+# pyqtgraph was a direct dependency here for a plotting pane clockwork never grew:
+# mainspring is the only viewer (Matt, 2026-09-10) and clockwork.app draws nothing.
+# Dropped as a direct dependency (task 32); it is still installed, transitively, through
+# mainspring's own viewer, and packaging/clockwork.spec's exclude list is what actually
+# keeps it out of the build -- confirmed clean (0 files) with the direct dependency gone.
 
 [project.scripts]
 clockwork = "clockwork.app:main"
@@ -64,6 +68,8 @@ dev = [
     "pytest~=9.1",
     "pytest-qt~=4.5",
     "ruff~=0.16",
+    "pyinstaller~=6.22",
+    "pyinstaller-hooks-contrib~=2026.7",
 ]
 
 [tool.pytest.ini_options]

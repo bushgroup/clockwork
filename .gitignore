@@ -18,3 +18,9 @@ build/
 # Vendor manuals (GAA Custom Electronics PDFs) are proprietary and live in the
 # lab repo's vendor/. Only facts derived from them are committed here, in docs/.
 *.pdf
+# tools/write_commit.py's build-time output: the commit a frozen .exe was built from,
+# written before every build and never tracked. A checkout has none and answers None.
+src/clockwork/_commit.py
+# tools/warm_numba_cache.py's build-time output, bundled into the .exe by
+# packaging/clockwork.spec; regenerated before every build, never tracked.
+packaging/numba_cache_seed/

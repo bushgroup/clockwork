@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 
 __version__ = "0.1.0"
 
@@ -70,4 +71,43 @@ def lab_dir(name: str | None = None) -> str | None:
     return None
 
 
-__all__ = ["ROOT", "__version__", "lab_dir"]
+def commit_of(repo: str) -> str | None:
+    """The short HEAD commit of the git repository rooted at exactly `repo`, else None.
+
+    Git searches parent directories, so asking it for a commit inside an installed
+    package would otherwise answer for whatever checkout happens to enclose it; the
+    toplevel is read in the same call and the commit kept only when that toplevel is
+    `repo` itself. Never raises: a wheel install, the packaged `.exe`, a directory
+    inside an unrelated repository, or a machine with no `git` all get None.
+    """
+    try:
+        done = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "--show-toplevel", "--short", "HEAD"],
+            capture_output=True, text=True, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    lines = done.stdout.splitlines()
+    if len(lines) != 2:
+        return None
+    toplevel, commit = lines[0].strip(), lines[1].strip()
+    if not toplevel or not commit:
+        return None
+    if os.path.normcase(os.path.realpath(toplevel)) != os.path.normcase(os.path.realpath(repo)):
+        return None
+    return commit
+
+
+def built_commit() -> str | None:
+    """The commit clockwork is running from: the live checkout, else the commit a
+    frozen `.exe` or wheel was built from (`tools/write_commit.py`'s generated
+    `_commit.py`, gitignored and absent in a checkout), else None.
+    """
+    try:
+        from ._commit import COMMIT as _built  # generated at build time
+    except ImportError:
+        _built = None
+    return commit_of(ROOT) or _built
+
+
+__all__ = ["ROOT", "__version__", "built_commit", "commit_of", "lab_dir"]

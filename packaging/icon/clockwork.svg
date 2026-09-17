@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Placeholder icon art for the packaging chain built in task 32: a plain clock face,
+  the package's own name, nothing borrowed from mainspring's spiral, so the build has
+  something real to rasterise. Task 08's successors (notes/gui-execution-plan.md) own
+  the window's actual identity and may replace this file outright.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <circle cx="128" cy="128" r="118" fill="#1b2733" stroke="#8fa6bd" stroke-width="8"/>
+  <circle cx="128" cy="128" r="6" fill="#e7edf3"/>
+  <!-- hour hand -->
+  <line x1="128" y1="128" x2="128" y2="68" stroke="#e7edf3" stroke-width="12" stroke-linecap="round"/>
+  <!-- minute hand -->
+  <line x1="128" y1="128" x2="176" y2="150" stroke="#e7edf3" stroke-width="10" stroke-linecap="round"/>
+  <!-- twelve tick marks -->
+  <g stroke="#8fa6bd" stroke-width="6" stroke-linecap="round">
+    <line x1="128" y1="20" x2="128" y2="40"/>
+    <line x1="236" y1="128" x2="216" y2="128"/>
+    <line x1="128" y1="236" x2="128" y2="216"/>
+    <line x1="20" y1="128" x2="40" y2="128"/>
+  </g>
+</svg>

@@ -1,7 +1,88 @@
 # packaging/
 
-Empty until the window exists. The plan of record is mainspring's chain: a PyInstaller onedir
-build behind a per-user Inno Setup installer, built by a PowerShell script that cuts `PATH` down
-for the build and asserts the window title on launch. The spec, the `.iss` and the build script
-are copied from `../mainspring/packaging/` and `../mainspring/tools/build_exe.ps1` and adapted
-when the application is packaged (lab record, task 08).
+The build and install chain for `clockwork.exe`, adapted from mainspring's (lab record, task 32)
+around today's placeholder window rather than the real one -- task 08's successors build that,
+and task 52 adapts this chain to carry the acquisition console alongside it.
+
+## Building
+
+```
+uv run tools/warm_numba_cache.py   # writes packaging/numba_cache_seed/
+uv run tools/write_commit.py       # writes src/clockwork/_commit.py
+uv run tools/make_icon.py          # writes src/clockwork/app/resources/clockwork.ico (only after packaging/icon/clockwork.svg changes)
+powershell -ExecutionPolicy Bypass -File tools/build_exe.ps1
+```
+
+`build_exe.ps1` runs the first two steps itself, cuts `PATH` down to the Windows directories and
+`uv`'s own before invoking PyInstaller (a wider `PATH` risks a foreign DLL substitution the way
+mainspring's task 07 found once, and `clockwork.spec`'s provenance guard fails the build rather
+than ship one), then runs `clockwork.exe --self-check` and times a cold and a warm launch. It
+needs Windows PowerShell's script execution allowed for that one invocation
+(`-ExecutionPolicy Bypass`, or `Set-ExecutionPolicy` once per machine) -- unset on a fresh clone.
+
+Compile the installer separately, with Inno Setup 6's `ISCC.exe`:
+
+```
+iscc packaging\clockwork.iss
+```
+
+The installer lands in `dist\installer\`. Installed via `winget install --id JRSoftware.InnoSetup`
+on MASSTRO (2026-09-16), which put `ISCC.exe` under the current user's
+`AppData\Local\Programs\Inno Setup 6\` rather than on `PATH` -- call it by that full path, or add
+it to `PATH` yourself, until something does that for every clone.
+
+## What differs from mainspring's chain
+
+- **No file association.** mainspring is the only UIMF viewer (`CLAUDE.md`'s decisions of
+  record), so `clockwork.iss` carries no `[Registry]` section and no `associate` task.
+- **`console=True`**, not mainspring's windowed build: `--self-check` is the placeholder's whole
+  reason to exist, and a windowed build redirects stdout/stderr to nowhere, which would swallow
+  its report. Task 50's real window can turn this off once nothing needs the console.
+- **`pyserial`'s non-Windows `list_ports` backends are excluded** (`list_ports_linux`,
+  `list_ports_osx`) -- dead code on the only OS this ships for.
+- **The icon is placeholder art** (`packaging/icon/clockwork.svg`, one plain clock face, one
+  source drawing unlike mainspring's two-tier scheme): nothing borrowed from mainspring's spiral,
+  free for task 08's successors to replace outright.
+
+## The four new dependencies, and what building for them took
+
+mainspring never packaged `pyzmq` (`clockwork.acq`'s ZeroMQ client, a bundled `libzmq`),
+`protobuf` (the console's wire schema; `wire.py` builds `FileDescriptorProto` at runtime rather
+than importing `protoc` output), `python-snappy` (the console's compression) or `pyserial`
+(`clockwork.mips`'s COM port link). **None of the four needed a hidden-import fix**:
+`pyinstaller-hooks-contrib`'s `hook-zmq.py` and PyInstaller's own `hook-sqlite3.py` (protobuf's
+upb extension and snappy's native library both follow as ordinary binary dependencies once
+something imports them) covered pyzmq and protobuf, and `--self-check` -- which exercises
+`clockwork.mips` (pyserial), `clockwork.acq` (pyzmq, protobuf, snappy) and the fold (numba,
+llvmlite) end to end -- passed against the frozen build on the first `pyinstaller` run that got
+past the provenance guard. Two warnings appeared and neither is a real problem:
+
+- `WARNING: Hidden import "scipy.special._cdflib" not found!` -- a stock PyInstaller hook naming
+  a private scipy module that this scipy version does not have; nothing here imports it either.
+- `WARNING: Library not found: could not resolve 'tbb12.dll'` -- numba's optional Intel TBB
+  threading backend; not installed, and numba falls back to its default backend, which
+  `--self-check`'s fold already exercises successfully.
+
+The numba/llvmlite seed problem mainspring already solved end to end is copied wholesale rather
+than rediscovered: `tools/warm_numba_cache.py` and `clockwork.app._seed_numba_cache`, both against
+`mainspring.uimf.decode` (the same kernels mainspring's own build warms, since `clockwork` and
+`mainspring` share that module).
+
+## `pyqtgraph`
+
+Comes in transitively through mainspring's own viewer dependency; nothing in clockwork imports it
+(`clockwork.app` draws nothing; mainspring is the only viewer, Matt, 2026-09-10). Dropped as a
+direct dependency (`pyproject.toml`); confirmed excluded from the build with 0 files under that
+name, so the exclusion list in `clockwork.spec` is doing real work, not standing in for one.
+
+## Open
+
+- **Which machine validates the installer** (task 32 step 5, *bench: Matt*): deferred rather than
+  named; `notes/acquisition-pc.md` still flags the freed i5 rackmount as the candidate. The
+  installer itself compiles clean on MASSTRO (`clockwork-0.1.0-setup.exe`, 92 MB) -- what remains
+  is running it on a machine that never had the dev toolchain.
+- **The console subsystem is on** (`console=True`) so `--self-check` has somewhere to print;
+  `tools/build_exe.ps1`'s launch check waits past the console's own default-titled window before
+  reading the title, which a windowed (`console=False`) build never needed to. Revisit when task
+  50's real window decides whether it still wants a console.
+
