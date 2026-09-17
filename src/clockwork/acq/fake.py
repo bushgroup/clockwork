@@ -70,6 +70,7 @@ import zmq
 from mainspring.uimf import Calibration, encode_intensities
 from mainspring.uimf.writer import FRAME_KEYS, GLOBAL_KEYS
 
+from ..method import NOTIFY_ON_SCANS_COUNT
 from .wire import (
     ACK,
     ERROR_PREFIX,
@@ -96,8 +97,20 @@ nothing. Pass the real figures when the size is the point.
 
 DEFAULT_POST_TRIGGER_SAMPLES = 1024
 DEFAULT_REARM_SAMPLES = 256
-DEFAULT_NOTIFY_ON_SCANS_COUNT = 100
-"""The console's own default is 500; this keeps a short frame to a few batches."""
+DEFAULT_NOTIFY_ON_SCANS_COUNT = NOTIFY_ON_SCANS_COUNT
+"""The console's batch size, which is the console's `NotifyOnScansCount` and not
+this stand-in's to choose.
+
+500, from `clockwork.method`, which is the one place the number is written down.
+This was 100 until the lab record's task 44, to keep a short frame to a few
+batches, and the cost of that convenience was that no rehearsed frame had a real
+one's batch count: a 20000-scan frame published 200 batches where the instrument
+publishes 40, so every rehearsed number that counts batches -- `wait_seconds`,
+`settle_seconds`, the per-repetition cost -- was measuring a loop nobody runs.
+
+A test that wants a frame in a handful of batches passes `notify_on_scans_count`
+itself rather than leaning on the default, and says why.
+"""
 
 DEFAULT_SCAN_PERIOD = 16
 """How often the invented per-push spectrum repeats, in scans.

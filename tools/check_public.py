@@ -872,6 +872,13 @@ def main() -> int:
             # which is the console's ordering and the reason the loop waits for a frame
             # to count out rather than taking `finished` for the end (lab record,
             # task 34). A one-batch frame would exercise none of it.
+            #
+            # The batch size above is the one deliberate untruth in this section. The
+            # stand-in's default is the console's own `NotifyOnScansCount` of 500, and
+            # four real batches would be a 2000-scan frame acquired several times over,
+            # which is where this section's runtime was before task 34 cut it. What the
+            # ordering costs to exercise does not depend on the size, so the size gives
+            # way; nothing here reads a batch count as a measurement.
             fake.trailing_batches = 2
             with acq.DataStream(fake.data_endpoint) as stream, \
                     acq.Console(fake.command_endpoint) as console:

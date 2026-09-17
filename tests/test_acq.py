@@ -538,7 +538,7 @@ def test_one_frame_from_configure_to_finished(
     assert width.num_samples == fake.num_samples
     assert fake.chain
 
-    request = FrameRequest(frame_length=250,
+    request = FrameRequest(frame_length=1250,
                            file_name=empty_uimf(tmp_path / "frame.uimf"),
                            frame_number=4,
                            nbr_accumulations=100, offset_bins=20000)
@@ -547,9 +547,10 @@ def test_one_frame_from_configure_to_finished(
     assert fake.frames == [request]
     assert end.is_finished
     assert end.topic == "status"
-    # Every scan of the frame appeared, in batches of NotifyOnScansCount.
-    assert sum(batch.scans for batch in batches) == 250
-    assert [batch.scans for batch in batches] == [100, 100, 50]
+    # Every scan of the frame appeared, in batches of NotifyOnScansCount -- 500,
+    # the console's own, which is what makes three batches worth asking for.
+    assert sum(batch.scans for batch in batches) == 1250
+    assert [batch.scans for batch in batches] == [500, 500, 250]
     assert all(batch.mz.size == fake.num_samples for batch in batches)
     assert fake.ignored_frames == 0
 
@@ -656,10 +657,10 @@ def test_messages_reach_a_caller_in_the_order_they_were_published(
     client.configure(offset_v=0.251)
     start_chain(client, stream, timeout=5.0, settle=2.0)
     seen: list[object] = []
-    run_frame(client, stream, FrameRequest(frame_length=250), timeout=10.0,
+    run_frame(client, stream, FrameRequest(frame_length=1250), timeout=10.0,
               on_batch=seen.append)
     assert [type(event).__name__ for event in seen] == ["Batch"] * 3
-    assert sum(event.scans for event in seen if isinstance(event, Batch)) == 250
+    assert sum(event.scans for event in seen if isinstance(event, Batch)) == 1250
 
 
 def test_stopping_a_frame_keeps_the_chain(
@@ -736,10 +737,10 @@ def test_a_frame_shorter_than_it_asked_for_is_not_treated_as_a_failure(
     opened(client, stream)
     fake.frame_batches = 1
     batches: list[Batch] = []
-    end = run_frame(client, stream, FrameRequest(frame_length=250), timeout=5.0,
+    end = run_frame(client, stream, FrameRequest(frame_length=1250), timeout=5.0,
                     on_batch=batches.append)
     assert end.is_finished
-    assert sum(batch.scans for batch in batches) == 100
+    assert sum(batch.scans for batch in batches) == 500
 
 
 def test_an_error_the_console_publishes_reaches_the_caller(
