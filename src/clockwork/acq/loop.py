@@ -82,8 +82,10 @@ from ..method import (
     Step,
     declared_commands,
     enable_fall_tick,
+    is_comment,
     table_period,
 )
+from ..method.text import head as _head
 from ..mips import (
     ARB_MODULE_GETTERS,
     UNNAMED,
@@ -869,19 +871,14 @@ def _consistency(method: Method) -> tuple[list[str], list[str]]:
     """
     acquisition = method.acquisition
     tables = [(box.name, command) for box in method.boxes for command in box.load
-              if _head(command) == "STBLDAT"]
+              if not is_comment(command) and _head(command) == "STBLDAT"]
     compressions = [(box.name, command) for box in method.boxes for command in box.load
-                    if _head(command) == "SARBCTBL"]
+                    if not is_comment(command) and _head(command) == "SARBCTBL"]
     problems: list[str] = []
     unreadable: list[str] = []
     _check_compression(acquisition, compressions, problems, unreadable)
     _check_sequencer(acquisition, tables, problems, unreadable)
     return problems, unreadable
-
-
-def _head(command: str) -> str:
-    """The command word of a method string, however its arguments are punctuated."""
-    return command.split(",", 1)[0].split(";", 1)[0].strip().upper()
 
 
 def _expected_passes(acquisition: Acquisition) -> int:
@@ -1184,6 +1181,8 @@ def left_as_found(box: BoxMethod, state: BoxState) -> list[str]:
         return []
     covered: dict[str, set[int]] = {}
     for command in tuple(box.setup) + declared_commands(box):
+        if is_comment(command):
+            continue
         head, _, rest = command.partition(",")
         head = head.strip().upper()
         target = rest.partition(",")[0].strip()
@@ -1514,7 +1513,12 @@ def _guarded(
     for phase, commands in phases:
         written: list[str] = []
         for command in commands:
-            head = command.split(",", 1)[0].split(";", 1)[0].strip().upper()
+            if is_comment(command):
+                # Dropped here rather than skipped at the point of sending, so that
+                # nothing downstream of this function has to know comments exist: a
+                # phase reaches `_walk_phases` as the strings that go on the wire.
+                continue
+            head = _head(command)
             if head in LOC_ONLY and not local:
                 written.append("SMOD,LOC")
                 local = True
@@ -1555,7 +1559,7 @@ def _send(
 
 
 def _deliver(box: Box, command: str, *, arm_timeout: float, verify_tables: bool) -> str:
-    head = command.split(",", 1)[0].split(";", 1)[0].strip().upper()
+    head = _head(command)
     if head == "STBLDAT":
         # Paced chunks, not one write: the box has no flow control and drops what
         # overruns its 4 KB input buffer without saying so (wire format, section 1).
@@ -1693,7 +1697,7 @@ def run_acquisition(
     for message in _vertical_warnings(console, instrument, info):
         report(Warned(message))
     missing = [entry.box for entry in method.start + method.reset
-               if entry.box not in boxes]
+               if not is_comment(entry.command) and entry.box not in boxes]
     if missing:
         raise KeyError(
             "the method's start or reset sequence names a box with no open port: "
@@ -2365,9 +2369,13 @@ class _Loop:
         apart at all, and the box that has to be waiting needs a real interval
         (`START_STEP_GAP_S`).
         """
-        for index, step in enumerate(steps):
-            if index and gap:
+        sent = 0
+        for step in steps:
+            if is_comment(step.command):
+                continue
+            if sent and gap:
                 time.sleep(gap)
+            sent += 1
             _send(self.boxes[step.box], step.box, phase, step.command, self.report,
                   arm_timeout=self.arm_timeout)
 

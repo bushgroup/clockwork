@@ -1517,3 +1517,84 @@ def test_the_inversion_is_checked_against_what_the_client_sent() -> None:
     assert len(warnings) == 1
     assert "inversion" in warnings[0]
     assert "document's value" in warnings[0]
+
+
+# --- comments are strings the sender skips (lab record, task 48) ----------------------
+
+
+def commented(**phases) -> method_module.Method:
+    """`make_method`'s method with the phases it names rewritten."""
+    document = method_module.to_dict(make_method())
+    for key, value in phases.items():
+        if key in ("start", "reset"):
+            document[key] = value
+        else:
+            document["boxes"][0][key] = value
+    return method_module.from_dict(document)
+
+
+def test_a_comment_in_a_phase_never_reaches_a_box():
+    method = commented(
+        setup=["# the clock source", "STBLCLK,EXT", "STBLTRG,POS"],
+        load=["# the pulse sequence", per_repetition_table(SCANS)],
+        arm=["# and go", "SMOD,TBL"],
+    )
+    boxes = make_boxes(BOX)
+    seen: list[acq.Event] = []
+    send_phases(method, boxes, progress=seen.append)
+    assert not any(b"#" in written for written in boxes[BOX].transport.written)
+    assert [(event.phase, event.command) for event in seen if isinstance(event, PhaseSent)]         == [("setup", "SMOD,LOC"), ("setup", "STBLCLK,EXT"), ("setup", "STBLTRG,POS"),
+            ("load", per_repetition_table(SCANS)), ("arm", "SMOD,TBL")]
+
+
+def test_a_comment_does_not_move_the_guard_that_drops_a_box_to_local():
+    """The guard tracks the last `SMOD` it saw, and a comment is not one. A phase whose
+    first line is a comment must still be guarded, and guarded once."""
+    boxes = make_boxes(BOX)
+    send_phases(commented(setup=["# the clock source", "STBLCLK,EXT", "STBLTRG,POS"]),
+                boxes, progress=None)
+    written = boxes[BOX].transport.written
+    assert written.count(b"SMOD,LOC\n") == 1
+    assert written.index(b"SMOD,LOC\n") < written.index(b"STBLCLK,EXT\n")
+
+
+def test_a_comment_in_the_start_and_reset_lists_is_not_a_step(rig):
+    """The whole run, because `_walk` is where a start step becomes a write. The
+    comment steps are kept in the method -- they are the trainee's record and the
+    stamp hashes them -- and are not sent, and the gap between start steps is the
+    gap between the steps that were sent."""
+    method = commented(
+        start=[[BOX, "# what releases the frame"], [BOX, "TBLSTRT"]],
+        reset=[[BOX, "# between replicates"], [BOX, "SMOD,LOC"], [BOX, "SMOD,TBL"]],
+    )
+    assert [step.command for step in method.start] ==         ["# what releases the frame", "TBLSTRT"]
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes, progress=None)
+    run = rig.acquire(method, boxes, replicate=True)
+    assert run.complete
+    assert not any(b"#" in written for written in boxes[BOX].transport.written)
+
+
+def test_a_comment_step_does_not_need_a_port_open_for_the_box_it_names(rig):
+    """A `Step` has to name a box, so a comment in a start list names one too, and the
+    method's validation holds it to a box the method declares. What it must not do is
+    make that box's port a requirement of the run: a pane whose note survived the
+    deletion of the command under it would otherwise refuse every acquisition."""
+    document = method_module.to_dict(make_method())
+    document["boxes"].append({"name": "quiet", "port": "COM9", "setup": [], "load": [],
+                              "arm": []})
+    document["start"] = [["quiet", "# nothing to start on this box any more"],
+                         [BOX, "TBLSTRT"]]
+    method = method_module.from_dict(document)
+    boxes = make_boxes(BOX)
+    send_phases(method, {**boxes, "quiet": make_boxes("quiet")["quiet"]}, progress=None)
+    assert rig.acquire(method, boxes).complete
+
+
+def test_a_comment_is_not_a_table_the_counts_are_checked_against():
+    """`_consistency` reads the counts out of the `load` phase's strings. A comment
+    whose text happens to begin `STBLDAT` is still a comment."""
+    method = commented(load=["# STBLDAT;0:A:1[A:9999,0:B:1,9999:];",
+                             per_repetition_table(SCANS)])
+    assert refusals(method) == []
+    assert cautions(method) == []

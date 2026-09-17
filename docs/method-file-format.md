@@ -102,6 +102,75 @@ Each phase is an array of strings sent in the order written, and any of the thre
 box that only ever needs its persistent block, as `box3` does above, carries a `setup` and nothing
 else. At least one box in a method has something to `load`.
 
+## Comments
+
+A method carries the trainee's own comments as ordinary strings. A string whose first non-blank
+character is `#` is a comment: it is stored in the phase array it precedes, clockwork never sends
+it to a box, and the provenance stamp hashes it with everything else.
+
+```toml
+setup = [
+    "# the travelling-wave frequency, all four channels at once",
+    "SWFREQ,1,15000",
+    "SWFREQ,2,15000",
+]
+```
+
+A comment's position is what carries its meaning, since what it labels is the block of strings
+under it, so it is stored where it was written rather than in a table of its own.
+`clockwork.method.is_comment` is the one predicate that decides, and every part of clockwork that
+puts a string on a wire skips through it. Whitespace around a comment is stripped without a
+warning, whereas whitespace around a command is stripped and reported, because only the command's
+reaches a box.
+
+Two consequences follow from a comment being a string. A method whose `load` phase holds nothing
+but comments has nothing to load and is rejected, as is one whose `start` list holds nothing but
+comments. And two methods that differ only in a comment stamp to different hashes, which is the
+right answer: the comment is the trainee's record of what they meant the experiment to be.
+
+## Panes
+
+To write a method, a trainee fills one plain-text pane per box, one string per line, which is what
+used to be pasted into the controller's terminal window. `clockwork.method.text` turns a pane into
+the phases above and turns the phases back into the same text, so that nobody edits TOML by hand.
+
+Classification decides when a string is sent, not what it means. `classify()` reads the command
+word and nothing else: `STBLDAT` and `SARBCTBL` are `load`, `SMOD` is `arm` unless its argument is
+`LOC`, `TARBTRG` and `TBLSTRT` are `start`, and everything else is `setup`, including a word
+clockwork has never seen. What `setup` does with a string is send it once, in the order written,
+so a word this package does not know costs a trainee nothing, whereas guessing it into `load` or
+`start` would re-send it once per acquisition or once per frame. Nothing here reads a table's
+ticks, a channel number or a compression table's operations. Those belong to the check above and
+to the compiler planned for version 2.
+
+Blank lines separate groups and are not kept. A comment labels the strings under it in its own
+group, which is how the paste files have always been punctuated.
+
+The cross-box start order is derived rather than typed. `start_order()` puts every `TARBTRG` ahead
+of every `TBLSTRT` and keeps the method's box order within each, for the reason the section on
+starting gives. Clockwork displays that order and a trainee never writes it.
+
+### The two lines the command word cannot place
+
+A `reset` is the complete list a replicate sends, and no command word says which `SMOD,LOC` is
+part of one. So a comment written `# clockwork: reset` tags the group of lines that follows it,
+and the same directive naming any other phase overrides the classification for that group.
+Clockwork writes the directive itself when it renders a pane, and consumes it when it reads one
+back, so a directive is never one of the method's strings. Where a pane carries no directive, a
+group that begins `SMOD,LOC` and sits after the last start line is the reset, and clockwork
+appends the box's `arm` phase where that group does not already end in it. Note that the appended
+string is the only one clockwork supplies that a trainee did not write, and it is there because
+the paste files state their reset as prose rather than as strings. A pane that clockwork rendered
+carries both the directive and every string, so a method saved from the window says what its reset
+is in as many words.
+
+A line that is not a command at all is placed in no phase. Both experiments this format was
+written against end in a sentence of prose, and one of them records the settings of the software
+clockwork replaces in lines such as `Ion Mobility Scans = 5000`. A line whose first token is not a
+bare alphanumeric word comes back as unplaced, for a trainee to tag by hand or to leave where it
+is. The alternative is worse than useless: the rule that an unrecognized word is `setup` would
+otherwise send a sentence of English to a box.
+
 ## The analog state a method may declare
 
 The strings above are the experiment's timing. They say nothing about the DC biases that hold the

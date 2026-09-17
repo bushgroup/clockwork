@@ -74,6 +74,31 @@ assumes has to be written down somewhere. A run that meets a console configured
 differently passes its own value to `enable_fall_tick`.
 """
 
+COMMENT_PREFIX = "#"
+"""What marks a method string as a trainee's note rather than a command.
+
+A trainee's pane is the method (lab record, task 48), and a pane that could not
+carry the comments their paste files have always carried would be a worse place
+to keep an experiment than the text file it replaces. So a comment is stored as
+an ordinary string in the phase array it precedes, and every consumer that puts
+a string on a wire skips it through `is_comment` -- one predicate, so that the
+rule cannot drift between the sender, the checks and the log.
+"""
+
+
+def is_comment(command: str) -> bool:
+    """True where a method string is a comment: first non-blank character `#`.
+
+    Chosen over a separate `comments` key because the comment's *position* is
+    what carries its meaning -- it labels the strings under it -- and a parallel
+    array would have to carry that position as an index that every edit
+    invalidates. It is also what the trainees' own paste files look like.
+
+    A comment is hashed into `stamp()` like any other string, because it is part
+    of the record of what the trainee meant the experiment to be.
+    """
+    return command.lstrip().startswith(COMMENT_PREFIX)
+
 
 class MethodError(ValueError):
     """A method document failed to parse or validate.
@@ -298,11 +323,17 @@ def _command(value: object, path: str, problems: list[str], warnings: list[str])
     had, and a stray tab on the end of a command is invisible in an editor and
     real on the wire. Stripping is the repair; the warning is what makes it
     visible.
+
+    A comment is stripped and **not** warned about. The warning exists because
+    whitespace a trainee cannot see goes on the wire; a comment never does, so
+    its indentation is presentation and repairing it silently is the whole of
+    what is owed. Warning about it would put a line in the send log for every
+    indented note in a method.
     """
     if not isinstance(value, str) or not value.strip():
         problems.append(f"{path}: expected a non-empty string")
         return None
-    if value != value.strip():
+    if value != value.strip() and not is_comment(value):
         warnings.append(f"{path}: stripped surrounding whitespace from {value!r}")
     return value.strip()
 
@@ -651,7 +682,7 @@ def from_dict(data: dict) -> Method:
                 if name in seen_names:
                     problems.append(f"{path}.name: duplicate box name {name!r}")
                 seen_names.add(name)
-            if phases["load"]:
+            if any(not is_comment(command) for command in phases["load"] or ()):
                 any_load = True
             if (name is not None and port is not None
                     and None not in phases.values()
@@ -670,7 +701,7 @@ def from_dict(data: dict) -> Method:
         if not any_load:
             problems.append(
                 "boxes: no box has anything to load; every acquisition sends at least one "
-                "load string"
+                "load string (a comment is not one)"
             )
 
     if acquisition is not None and acquisition.enable is not None:
@@ -681,10 +712,10 @@ def from_dict(data: dict) -> Method:
             )
 
     start = _sequence(data, "start", seen_names, problems, warnings)
-    if start is not None and not start:
+    if start is not None and not any(not is_comment(step.command) for step in start):
         problems.append(
             "start: expected a non-empty array of [box, command] pairs; the start sequence is "
-            "what releases an acquisition"
+            "what releases an acquisition, and a comment starts nothing"
         )
         start = None
     reset = _sequence(data, "reset", seen_names, problems, warnings)
@@ -853,6 +884,7 @@ def stamp(method: Method, *, console_version: str | None = None) -> dict[str, ob
 
 
 __all__ = [
+    "COMMENT_PREFIX",
     "DEFAULT_KEEP_RAW",
     "DEFAULT_REPETITION_MODE",
     "NOTIFY_ON_SCANS_COUNT",
@@ -868,6 +900,7 @@ __all__ = [
     "Step",
     "declared_commands",
     "from_dict",
+    "is_comment",
     "to_dict",
     "loads",
     "load",

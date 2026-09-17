@@ -194,6 +194,49 @@ def main() -> int:
             "not supported" in str(exc),
         )
 
+    section("pane text")
+    from clockwork.method import text as pane_text
+
+    check_true(
+        "the command table classifies a load, an arm, a start and an unknown word",
+        [pane_text.classify(command) for command in
+         ("STBLDAT;0:[A:1,100:];", "SARBCTBL,J10[HRr]1", "SMOD,TBL", "SMOD,LOC",
+          "TARBTRG", "TBLSTRT", "SWFREQ,1,15000", "SNEVERHEARDOFIT,1", "# a note")]
+        == ["load", "load", "arm", "setup", "start", "start", "setup", "setup",
+            "comment"],
+    )
+    check_true(
+        "prose in a pane is unplaced rather than sent as setup",
+        [line.text for line in
+         pane_text.parse_pane("SWFREQ,1,1\nIon Mobility Scans = 5000", "box1").unplaced]
+        == ["Ion Mobility Scans = 5000"],
+    )
+    panes = {box.name: pane_text.parse_pane(
+        pane_text.render_pane(box, m.start, m.reset), box.name) for box in m.boxes}
+    check_true(
+        "every box's phases survive a trip out to pane text and back",
+        all(panes[box.name].setup == box.setup and panes[box.name].load == box.load
+            and panes[box.name].arm == box.arm for box in m.boxes),
+    )
+    check_true(
+        "and the start order derived from the panes is the method's own",
+        pane_text.start_order(panes) == m.start,
+    )
+    check_true(
+        "a reset written as a trainee states it comes back as the list a replicate sends",
+        [step.command for step in pane_text.parse_pane(
+            "STBLDAT;0:[A:1,100:];\n\nSMOD,TBL\n\nTBLSTRT\n\nSMOD,LOC",
+            "box1").reset] == ["SMOD,LOC", "SMOD,TBL"],
+    )
+    commented = method.loads(sample.replace(
+        'setup = ["STBLCLK,EXT"]', 'setup = ["# the clock source", "STBLCLK,EXT"]'))
+    check_true(
+        "a comment loads as a string, warns about nothing, and changes the stamp",
+        commented.boxes[0].setup == ("# the clock source", "STBLCLK,EXT")
+        and commented.warnings == ()
+        and method.stamp(commented)["method_hash"] != stamp["method_hash"],
+    )
+
     section("MIPS serial")
     from clockwork import mips
 

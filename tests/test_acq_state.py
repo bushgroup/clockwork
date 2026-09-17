@@ -323,6 +323,16 @@ def test_a_box_with_no_modules_has_nothing_left_as_found() -> None:
     assert left_as_found(method.boxes[0], read_state(auklet_box())) == []
 
 
+def test_a_comment_in_the_setup_phase_names_no_module() -> None:
+    """`left_as_found` reads which modules the setup phase covers off its strings, and
+    a comment that mentions one covers nothing."""
+    method = method_module.from_dict(document(
+        setup=["# SWFDIR,1,FWD and the rest are left as found", "SWFREQ,1,15000"]))
+    arb = read_state(Box(transport=FakeBox(arb_modules=4), name="bufflehead"))
+    loose = left_as_found(method.boxes[0], arb)
+    assert any("WFDIR is left as found on modules 1: FWD" in line for line in loose)
+
+
 # --- what lands in the file and in the log ---------------------------------------------
 
 
