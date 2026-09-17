@@ -225,7 +225,7 @@ RF_FREQUENCY_TOLERANCE = 0.01
 
 Fractional rather than absolute because the quantisation these boxes do is
 fractional: `SWFREQ` came back 0.57% below the 15000 asked for
-(`notes/slimphony-map.md`), and a head driven near 1 MHz has no business being
+(lab record, task 13), and a head driven near 1 MHz has no business being
 compared to the hertz. 1% is wide enough for a quantised setting and far too
 narrow to hide a head left on the wrong band.
 """
@@ -978,10 +978,10 @@ def _consistency(method: Method) -> tuple[list[str], list[str]]:
     """The counts `[acquisition]` states against the counts its strings embed.
 
     Returns (contradictions, cautions). Closes the lab record's task 31, which is the
-    `slimphony-map.md` FLAG "the accumulation count is written in three places": for the
-    CLOCK method the sequencer's table loops `A:100`, both compression tables end `]100`
-    and `accumulations` is 100, the loop's period is 5000 ticks and `scans` is 5000, and
-    until this nothing compared any of them. A trainee editing `A:100` to `A:50` for a
+    instrument map's FLAG (task 13) "the accumulation count is written in three places":
+    for the CLOCK method the sequencer's table loops `A:100`, both compression tables end
+    `]100` and `accumulations` is 100, the loop's period is 5000 ticks and `scans` is
+    5000, and until this nothing compared any of them. A trainee editing `A:100` to `A:50` for a
     quicker run and leaving `accumulations` alone is the ordinary way they part company.
 
     **What each disagreement costs is the reason this is v1 work and not the deferred

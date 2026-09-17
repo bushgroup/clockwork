@@ -2,12 +2,12 @@
 
 clockwork depends on `mainspring[fast]` for the fold's decode (lab record, task 34): a
 fresh process pays 2.5-4.7 s compiling the four decode kernels when no on-disk numba
-cache exists yet, against 0.9-1.4 s once one does (`../mainspring-lab/notes/reader-layer.md`,
-task 04). Unlike mainspring's own build, that cost lands inside clockwork's first fold
-rather than at window-open, because the decode kernels are first touched on the folding
-thread, not at launch -- but it is the same fix, moved here from `tools/write_commit.py`'s
-sibling in mainspring (task 20, task 07): pay it once, at build time, rather than during
-the first acquisition.
+cache exists yet, against 0.9-1.4 s once one does (mainspring's task 04). Unlike
+mainspring's own build, that cost lands inside clockwork's first fold rather than at
+window-open, because the decode kernels are first touched on the folding thread, not at
+launch -- but it is the same fix, moved here from `tools/write_commit.py`'s sibling in
+mainspring (task 20, task 07): pay it once, at build time, rather than during the first
+acquisition.
 
 Writes compiled kernels for every intensity dtype the format uses (ADC int32, TDC int16,
 FOLDED float32; `mainspring.uimf.decode.INTENSITY_DTYPES`) to

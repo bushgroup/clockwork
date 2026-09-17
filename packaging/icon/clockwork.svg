@@ -2,7 +2,7 @@
 <!--
   Placeholder icon art for the packaging chain built in task 32: a plain clock face,
   the package's own name, nothing borrowed from mainspring's spiral, so the build has
-  something real to rasterise. Task 08's successors (notes/gui-execution-plan.md) own
+  something real to rasterise. Task 08's successors in the lab record own
   the window's actual identity and may replace this file outright.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">

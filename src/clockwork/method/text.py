@@ -1,6 +1,6 @@
 """A trainee's pane of strings, to a method's phases and back.
 
-The window's panes *are* the method (lab record, task 48, `window.md` decision 2):
+The window's panes *are* the method (lab record, task 48, and task 50's decision 2):
 each box has one plain-text pane, one string per line, exactly what used to be
 pasted into the MIPS host app's terminal, and Save writes schema-2 TOML. So one
 module has to turn that text into `BoxMethod` phases and `Step` sequences and
@@ -66,11 +66,11 @@ TAG_PATTERN = re.compile(r"#\s*clockwork\s*:\s*([A-Za-z]+)\s*\Z", re.IGNORECASE)
 It tags the group of lines that follows, and is the answer to the one thing the
 golden trainee file states as prose rather than as strings: "to reset for a
 technical replicate, send `SMOD,LOC` to MIPS A, then start again". A `reset` is
-the *complete* list a replicate sends (`method-file.md`), and no command word
+the *complete* list a replicate sends (lab record, task 14), and no command word
 says "this one is a reset" -- `SMOD,LOC` is an ordinary setter in every other
 context. The same directive overrides the classifier anywhere else, which is
-what `window.md` decision 8 means by "a line the classifier cannot place gets a
-manual tag, never a refusal".
+what decision 8 of the window design (lab record, task 50) means by "a line the
+classifier cannot place gets a manual tag, never a refusal".
 
 A directive line is consumed by `parse_pane` and re-emitted by `render_pane`, so
 it never becomes a string in a phase. It is the one line in a pane that is
@@ -229,7 +229,7 @@ class _Entry:
 def parse_pane(text: str, box: str) -> PaneResult:
     """One box's pane text as phases, start steps and reset steps.
 
-    Blank lines separate groups and are not kept (`window.md` decision 11): they
+    Blank lines separate groups and are not kept (lab record, task 50, decision 11): they
     are how a trainee's paste file has always been punctuated, and what they
     punctuate is which strings belong to which comment. Surrounding whitespace on
     a command is stripped and reported, as `clockwork.method._command` does, and
@@ -239,8 +239,8 @@ def parse_pane(text: str, box: str) -> PaneResult:
     `classify`:
 
     - A leading `# clockwork: <phase>` directive forces the whole group. That is
-      how a `reset` is written, and how `window.md` decision 8's manual tag is
-      expressed.
+      how a `reset` is written, and how decision 8's manual tag (lab record,
+      task 50) is expressed.
     - Without a directive, a group that sits after the last `start` line and
       begins with `SMOD,LOC` is the reset group. That is the one place this
       module reads a trainee's *layout* rather than their words, and it exists
@@ -460,8 +460,8 @@ def start_order(panes: Mapping[str, PaneResult]) -> tuple[Step, ...]:
 
     This is what the window displays above the panes and what a trainee never
     types: the cross-box order is the experiment's, derived here from the
-    classification, and `window.md` decision 2 keeps it out of the panes for the
-    same reason `send_phases` is the only sender.
+    classification, and decision 2 of the window design (lab record, task 50) keeps
+    it out of the panes for the same reason `send_phases` is the only sender.
 
     Each command carries the comments written above it in its own pane, so a
     trainee's note about which box a step goes to survives the reordering. A

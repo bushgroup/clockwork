@@ -1,9 +1,8 @@
 ; Inno Setup script for the clockwork installer (task 32's placeholder build).
 ;
 ; Packages the onedir build (dist/clockwork/, from `tools/build_exe.ps1`) -- onedir over
-; onefile for the reason mainspring measured it (../mainspring-lab/notes/packaging.md,
-; task 07): onefile extracts to a temp directory on every launch. Compile with Inno
-; Setup 6's ISCC.exe:
+; onefile for the reason mainspring measured it (mainspring's task 07): onefile extracts
+; to a temp directory on every launch. Compile with Inno Setup 6's ISCC.exe:
 ;
 ;   iscc packaging\clockwork.iss
 ;

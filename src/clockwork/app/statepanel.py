@@ -1,9 +1,9 @@
 """The collapsible state table under a box pane, and the button that refreshes it.
 
-Decision 6 of `notes/window.md`, and the one thing trainees still opened MIPS_QT6 for:
-seeing what a box is actually holding. `clockwork.app.boxstate` decides what the rows
-say; this draws them, remembers which sections were open, and asks the worker for a new
-reading. It holds no `Box` and sends nothing.
+Decision 6 of the window design (lab record, task 50), and the one thing trainees still
+opened MIPS_QT6 for: seeing what a box is actually holding. `clockwork.app.boxstate`
+decides what the rows say; this draws them, remembers which sections were open, and asks
+the worker for a new reading. It holds no `Box` and sends nothing.
 
 **Collapsed by default, and the header still says what matters.** A whole reading is
 sixty-odd rows against a pane that is mostly editor, so the panel starts shut and the

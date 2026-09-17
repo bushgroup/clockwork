@@ -8,9 +8,8 @@
     are both on record. The build is onedir only: a clockwork/ folder holding
     clockwork.exe beside its dependencies, no extraction, packaged by Inno Setup
     (packaging/clockwork.iss) -- mainspring measured the alternative, a single .exe that
-    extracts to a temp directory on every launch, unacceptably slow (../mainspring-lab/
-    notes/packaging.md, task 07), and clockwork inherits that chain rather than
-    remeasuring it.
+    extracts to a temp directory on every launch, unacceptably slow (mainspring's
+    task 07), and clockwork inherits that chain rather than remeasuring it.
 .PARAMETER SkipBuild
     Measure startup against whatever is already in dist/ without rebuilding.
 #>

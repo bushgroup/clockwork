@@ -40,7 +40,7 @@ because the post-trigger delay is inside the bin index rather than outside it: `
 record plus the delay and `FrameRequest.offset_bins` puts exactly those samples into every
 scan's leading zero run (`clockwork.acq.uimf.Geometry`), so bin 0 is the trigger edge and not
 the first digitized sample. That is why `TimeOffset` is declared in the file and then not
-applied (`docs/instrument-file-format.md`, `../mainspring-lab/notes/uimf-format.md`): applying
+applied (`docs/instrument-file-format.md`, mainspring's lab record, task 01): applying
 it would count the delay twice. Two consequences, both of which matter when a pair is carried
 from one chain to another:
 

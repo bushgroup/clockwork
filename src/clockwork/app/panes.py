@@ -1,10 +1,10 @@
 """One box's pane: the strings a trainee used to paste, with the phase in the margin.
 
-This is decision 2 of `notes/window.md` made into a widget. The pane is plain text, one
-string per line, exactly what went into MIPS_QT6's terminal -- and beside every line,
-in a margin the trainee cannot type in, the phase clockwork read it as. Nothing is
-rewritten as they type: the margin is a reading of the text, and the text is the
-document.
+This is decision 2 of the window design (lab record, task 50) made into a widget. The
+pane is plain text, one string per line, exactly what went into MIPS_QT6's terminal --
+and beside every line, in a margin the trainee cannot type in, the phase clockwork read
+it as. Nothing is rewritten as they type: the margin is a reading of the text, and the
+text is the document.
 
 **The margin is the whole of the interpretation clockwork admits to.** `classify` puts a
 line in one of five phases from its command word, `parse_pane` settles the groups, and

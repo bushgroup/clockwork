@@ -4,7 +4,8 @@
 `260825_BK_025.uimf` and `260904_BK_094.uimf` are two of the golden experiments. The
 window names every file this way without asking, because the alternative -- a trainee
 typing a stem per acquisition, in the middle of an acquisition day, with a replicate
-due every ninety seconds -- is exactly what decision 5 of `notes/window.md` removes.
+due every ninety seconds -- is exactly what the window design's decision 5 removes
+(lab record, task 50).
 
 Three choices are worth stating, because none of them is the obvious one.
 
@@ -21,10 +22,10 @@ not the day's. Scanning ignores the date part for that reason, and matches on th
 initials alone.
 
 **The middle field is whatever the trainee put in the setting.** FALKOR's files use the
-ion's code there (`BK` for bradykinin) and `notes/window.md` calls it the operator's
-initials; both are two or three characters that identify who or what the day is about,
-and this module takes no view. It is remembered per machine and is editable, as is the
-whole stem, before Acquire.
+ion's code there (`BK` for bradykinin) and the window design calls it the operator's
+initials (lab record, task 50); both are two or three characters that identify who or
+what the day is about, and this module takes no view. It is remembered per machine and
+is editable, as is the whole stem, before Acquire.
 
 Qt-free and tested: a window is not needed to ask what a run will be called, and the
 one thing that must never happen -- two acquisitions of an afternoon given one name --

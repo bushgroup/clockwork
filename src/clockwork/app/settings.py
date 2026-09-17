@@ -7,10 +7,10 @@ runs, asks for a method and a directory, and acquires. Nothing that decides what
 experiment *is* is stored here -- that is the method document and the instrument
 document, and this remembers only where they were.
 
-The six are `notes/window.md`'s: initials, output directory, last method, the instrument
-document, the console executable and mainspring. The window's geometry is kept too,
-because a window that opens off-screen on a second monitor is the one remembered
-setting a trainee cannot fix from inside it -- `reset_geometry` is why.
+The six are the window design's (lab record, task 50): initials, output directory, last
+method, the instrument document, the console executable and mainspring. The window's
+geometry is kept too, because a window that opens off-screen on a second monitor is the
+one remembered setting a trainee cannot fix from inside it -- `reset_geometry` is why.
 """
 
 from __future__ import annotations

@@ -5,7 +5,8 @@ not ship -- a serial port with a box on it, a running acquisition console, the l
 repository -- are reported as SKIPPED when it is absent, never as FAIL.
 
 What it covers today: the package imports, the version declarations agree, the three lower
-layers stay free of Qt, the module layout is complete, lab-directory resolution behaves, a
+layers stay free of Qt, the module layout is complete, lab-directory resolution behaves,
+nothing shipped cites the development record by a path only a lab checkout resolves, a
 method document round-trips through its phases, start sequence and repetition modes, the
 MIPS sender drives a simulated box through a table load, a TBLRPT round trip, arming and a
 rejection, the console client drives a simulated console from `info` through a whole
@@ -74,6 +75,103 @@ LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method",
                 "clockwork.instrument", "clockwork.transcript")
 QT_PREFIXES = ("PySide6", "PyQt", "pyqtgraph", "shiboken")
 
+# --- opaque lab references ------------------------------------------------------------
+#
+# A reader of a public clone must never meet a citation they cannot follow. Everything
+# shipped here -- code, documents, packaging, tools, tests -- cites the development
+# record by task number ("lab record, task 32") and never by a path that resolves only
+# in the lab repository. This is scanned rather than remembered, because it is the kind
+# of rule a task lands twenty violations of in one afternoon without noticing.
+#
+# `CLAUDE.md` is deliberately not scanned: it is the file that states this rule, and
+# saying which repository the record lives in is its job.
+
+SHIPPED_ROOTS = ("src", "docs", "tools", "tests", "packaging", "README.md")
+SHIPPED_SUFFIXES = (".py", ".md", ".ps1", ".iss", ".spec", ".svg", ".toml", ".txt", ".cfg")
+SHIPPED_SKIP = ("__pycache__", ".venv", ".git", "dist", "build")
+
+LAB_DIRECTORIES = ("notes", "tasks", "explorations", "golden", "literature", "vendor",
+                   "falkor")
+"""Top-level directories that exist only in the lab repository.
+
+Assembled into a pattern rather than written out as one so that this file does not
+match its own source: a checker that flags itself is a checker nobody keeps.
+"""
+
+LAB_DIRECTORY_PATH = re.compile(r"(?<![\w./-])(?:" + "|".join(LAB_DIRECTORIES) + r")/")
+SIBLING_LAB_PATH = re.compile(r"\.\./[A-Za-z0-9_]+-lab/")
+"""A path reaching into a sibling lab checkout.
+
+The trailing separator is the whole point. `clockwork.lab_dir` documents its own
+resolution order and has to name the sibling repository to do it; what the rule
+forbids is naming *material inside* one.
+"""
+
+DOCUMENT_CITATION = re.compile(r"(?<![\w:/.-])([A-Za-z0-9][\w./-]*\.md)\b")
+"""A citation of a Markdown document, wherever in a line it appears.
+
+The lookbehind is what keeps a URL out of it: in `https://host/a/b.md` every place
+a match could otherwise start is preceded by a dot or by a separator.
+"""
+
+
+def shipped_files() -> list[str]:
+    """Every text file a public clone ships, as paths relative to the root."""
+    out = []
+    for entry in SHIPPED_ROOTS:
+        start = os.path.join(ROOT, entry)
+        if os.path.isfile(start):
+            out.append(entry)
+            continue
+        for here, dirs, names in os.walk(start):
+            dirs[:] = [d for d in dirs if d not in SHIPPED_SKIP]
+            for name in names:
+                if name.endswith(SHIPPED_SUFFIXES):
+                    out.append(os.path.relpath(os.path.join(here, name), ROOT))
+    return sorted(path.replace(os.sep, "/") for path in out)
+
+
+def documents_here() -> tuple[set[str], set[str]]:
+    """Every Markdown document in this clone, by path and by bare name."""
+    paths, names = set(), set()
+    for here, dirs, found in os.walk(ROOT):
+        dirs[:] = [d for d in dirs if d not in SHIPPED_SKIP]
+        for name in found:
+            if name.endswith(".md"):
+                rel = os.path.relpath(os.path.join(here, name), ROOT)
+                paths.add(rel.replace(os.sep, "/"))
+                names.add(name)
+    return paths, names
+
+
+def lab_side_references() -> list[str]:
+    """Every citation in the shipped files that a public clone cannot follow.
+
+    Two kinds. A path under one of the lab repository's own directories, or into a
+    sibling `*-lab` checkout, is one outright. A document citation that resolves to no
+    file in this clone is the other, and is what catches a lab note cited by its bare
+    name, with the directory dropped on the way past.
+    """
+    paths, names = documents_here()
+    out = []
+    for rel in shipped_files():
+        with open(os.path.join(ROOT, rel), encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+        here = os.path.dirname(rel)
+        for number, line in enumerate(text.splitlines(), 1):
+            for pattern in (LAB_DIRECTORY_PATH, SIBLING_LAB_PATH):
+                found = pattern.search(line)
+                if found:
+                    out.append(f"{rel}:{number} {found.group(0)!r}")
+            for cited in DOCUMENT_CITATION.findall(line):
+                if cited in paths or os.path.normpath(
+                        os.path.join(here, cited)).replace(os.sep, "/") in paths:
+                    continue
+                if "/" not in cited and cited in names:
+                    continue
+                out.append(f"{rel}:{number} {cited!r}")
+    return out
+
 
 def main() -> int:
     for stream in (sys.stdout, sys.stderr):
@@ -125,6 +223,16 @@ def main() -> int:
         check_true("lab_dir rejects an unknown directory name", lab is None)
     except ValueError:
         check_true("lab_dir rejects an unknown directory name", True)
+
+    section("opaque lab references")
+    shipped = shipped_files()
+    check_true(f"there are shipped files to scan ({len(shipped)})", len(shipped) > 20)
+    found = lab_side_references()
+    check_true(
+        "nothing shipped cites the lab record by a path only a lab checkout resolves"
+        + ("\n     " + "\n     ".join(found) if found else ""),
+        not found,
+    )
 
     section("method file")
     from clockwork import method

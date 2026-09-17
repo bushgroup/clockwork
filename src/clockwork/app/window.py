@@ -3,8 +3,8 @@
 One pane per box holding the strings that used to be pasted into MIPS_QT6's terminal,
 the `[acquisition]` settings as a form, and six buttons: find the boxes, send the setup,
 load and arm, acquire N replicates, one more replicate, stop. No FALKOR, no MIPS_QT6, no
-terminal. `notes/window.md` is the design and its twelve decisions; this module is the
-part of it that has widgets.
+terminal. The lab record's task 50 is the design and its twelve decisions; this module
+is the part of it that has widgets.
 
 **It holds no copy of the acquisition sequence and no interpretation of a string.**
 `send_phases` and `run_acquisition` are the whole of what an acquisition is, and
@@ -469,7 +469,7 @@ class MainWindow(QMainWindow):
             self._load_method(self.method_path)
         self._refresh_stem()
         if not self.fake:
-            # On launch as well as on demand (`notes/window.md`): a trainee arriving at
+            # On launch as well as on demand (lab record, task 50): a trainee arriving at
             # the instrument should find the panes already named for the boxes that are
             # on, not have to press a button to be told. Under `--fake` the rack comes
             # from the method instead, so `_load_method` above has already done it.

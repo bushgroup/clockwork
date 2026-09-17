@@ -60,7 +60,7 @@ So on Windows the console is launched through `cmd.exe /c` with `1>` and `2>`:
 `cmd` gets the new console under `CREATE_NO_WINDOW`, the child inherits its stdin,
 and the shell's redirection touches only the other two. That is the one arrangement
 that both starts and gives up its output -- and it is what the trainee decision
-needs, since `CREATE_NO_WINDOW` means no window is ever drawn (`notes/window.md`
+needs, since `CREATE_NO_WINDOW` means no window is ever drawn (lab record, task 50,
 decision 4). On anything else the streams are redirected directly, because nothing
 else has `disable_quick_edit()` to satisfy.
 
@@ -115,8 +115,9 @@ CONFIG_NAME = "config.txt"
 
 `Config("config.txt")` is a relative path, so the file the console reads is the
 one beside wherever it was started from. That is why `ConsoleProcess` sets the
-working directory to the executable's own, which is where the build puts a copy
-(`console/README.md`), rather than inheriting the caller's.
+working directory to the executable's own, which is where the console's own
+post-build step puts a copy (lab record, task 17), rather than inheriting the
+caller's.
 """
 
 EXECUTABLE_NAME = "AqMD3_console.exe" if os.name == "nt" else "AqMD3_console"
@@ -152,7 +153,7 @@ nothing: the tail is two `read()` calls at the end of two files.
 CREATE_NO_WINDOW = 0x08000000
 """`CREATE_NO_WINDOW`. The child gets a console -- which is what
 `disable_quick_edit()` requires -- with no window drawn for it, which is what a
-trainee never seeing a console window requires (`notes/window.md` decision 4).
+trainee never seeing a console window requires (lab record, task 50, decision 4).
 Measured, not assumed: `CREATE_NEW_CONSOLE` with `SW_HIDE` also works and this is
 the one that never draws anything at all.
 """
@@ -308,7 +309,7 @@ def _as_console_prints(key: Key, value: float | str) -> str:
 class ConsoleConfig:
     """The console's `config.txt`, read and written with its own formatting kept.
 
-    A trainee never edits this file (`notes/window.md` decision 4), so something
+    A trainee never edits this file (lab record, task 50, decision 4), so something
     has to edit it for them, and that something must not reformat the lab's copy
     on the way past: a run that changed one number and left every line of the file
     looking modified is a run whose diff says nothing. Comments, blank lines, key
@@ -1238,7 +1239,7 @@ def find_console(extra: str | None = None) -> str | None:
     """Where this machine's console executable is, or None.
 
     In order: `extra` if given, `$CLOCKWORK_CONSOLE`, a `console/` directory beside
-    the installation (which is the shape the installer ships, `notes/window.md`
+    the installation (which is the shape the installer ships, lab record, task 50,
     decision 9), and last a lab checkout if one resolves, searched rather than
     assumed so that no build-tree layout is written down here.
 

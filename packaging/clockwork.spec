@@ -13,7 +13,7 @@
 #
 # Builds onedir only, for the same reason mainspring does: an Inno Setup installer
 # wants a folder to copy, not a single .exe that extracts on every start
-# (`../mainspring-lab/notes/packaging.md`, task 07).
+# (mainspring's task 07).
 
 import os
 

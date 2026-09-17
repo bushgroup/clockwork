@@ -40,8 +40,8 @@ STARTUP = "\n".join(_STAMP + line for line in (
 ))
 """The block `print_config` writes, with both of its message shapes in it.
 
-Copied in shape, not in content: the numbers are the instrument's as
-`console/README.md` tabulates them and the formatting is `std::to_string`'s, which
+Copied in shape, not in content: the numbers are the instrument's as the lab
+record tabulates them (task 17) and the formatting is `std::to_string`'s, which
 is the reason `ConsoleConfig.differences` compares numerically.
 """
 

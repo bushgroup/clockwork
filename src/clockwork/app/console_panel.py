@@ -1,8 +1,8 @@
 """The acquisition console in the status bar, and the six settings the window exposes.
 
 A trainee never sees a console window: clockwork starts the process, waits the ~5.4 s a
-card open costs, watches it, restarts it and stops it on exit (decision 4 of
-`notes/window.md`, landed as `clockwork.acq.process`). What is left for the window is to
+card open costs, watches it, restarts it and stops it on exit (lab record, task 50,
+decision 4, landed as `clockwork.acq.process`). What is left for the window is to
 say which of those is happening and to offer the settings that change what the data is.
 
 **Six keys get widgets** (Matt, 2026-09-17): the five the fork moves out of the source

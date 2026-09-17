@@ -96,8 +96,8 @@ COMPRESSOR_GETTERS: tuple[str, ...] = ("GARBCTBL", "GARBCTD")
 One compressor per box, not one per module. `GARBCTBL` is the compression table
 currently loaded, which is volatile and is the one way to tell a box that has
 had a compression method run on it from one that has not; `GARBCTD` is the
-saved ARB trigger delay, which `notes/sync-design.md` reads the start list's
-step gap against.
+saved ARB trigger delay, which the sync design (lab record, task 05) reads the
+start list's step gap against.
 """
 
 SEQUENCER_GETTERS: tuple[str, ...] = ("GTBLFRQ", "GTBLSTA")

@@ -271,8 +271,8 @@ def test_the_tag_is_written_the_way_a_trainee_would_write_it(written):
 
 
 def test_a_tag_naming_no_phase_stays_an_ordinary_comment():
-    """A note, not an error: `window.md` decision 8 says a line the classifier
-    cannot place gets a manual tag and never a refusal."""
+    """A note, not an error: the window design's decision 8 (lab record, task 50)
+    says a line the classifier cannot place gets a manual tag and never a refusal."""
     result = pane_text.parse_pane("# clockwork: someday\nSWFREQ,1,15000", "box1")
     assert result.setup == ("# clockwork: someday", "SWFREQ,1,15000")
 

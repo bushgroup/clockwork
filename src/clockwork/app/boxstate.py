@@ -1,7 +1,7 @@
 """A box's last state reading as a table, with what the method declared beside it.
 
-The Qt-free half of the state panel (`clockwork.app.statepanel`, decision 6 of
-`notes/window.md`). `read_state` hands back what a box answered; this turns that into
+The Qt-free half of the state panel (`clockwork.app.statepanel`, lab record,
+task 50, decision 6). `read_state` hands back what a box answered; this turns that into
 rows a trainee reads down, and against every row that a method *could* have named it
 puts one of three marks: the method declared this and the box agrees, the method
 declared this and the box disagrees, or the method did not name it and the box is

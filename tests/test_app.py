@@ -655,7 +655,7 @@ def test_a_whole_run_with_a_replicate_names_two_files_and_folds_both(
     for run in runs:
         assert run.complete, run.text
         assert os.path.isfile(run.summed_path)
-    # Both log files, named for the stem, beside the data (`notes/architecture.md`).
+    # Both log files, named for the stem, beside the data (lab record, tasks 29 and 39).
     written = set(os.listdir(tmp_path))
     for run in runs:
         stem = os.path.splitext(os.path.basename(run.raw_path))[0]
