@@ -416,6 +416,14 @@ class FakeBox:
 
         self.mode = "LOC"
         self.status = "IDLE"
+        self.passes_left = 0
+        """Passes still to run before the box drops back to local, 0 for forever.
+
+        `TableN` in `ProcessTables()`, set by `SMOD`: 0 for `TBL`, 1 for `ONCE`,
+        n for `SMOD,<n>`. Decremented by the outer loop, which is the `SW` path
+        (§1), so a count only bites under a software trigger.
+        """
+
         self.error = 0
         self.dio_image: dict[str, bool] = dict.fromkeys(_DIO_OUTPUTS, False)
         """What the box believes its digital outputs are, and what `GDIO` answers."""
@@ -425,8 +433,10 @@ class FakeBox:
 
         The two differ whenever an `SDIO` arrives in table mode, where the image
         changes and the latch that would apply it belongs to the table timer
-        (§4). Nothing here runs a table, so a staged write stays staged; what
-        this models is that the host cannot see the difference."""
+        (§4), and from `SMOD,TBL` onwards, where arming stages the table's first
+        time point into the image with the same latch pending (`_arm`). Nothing
+        here runs a table, so a staged write stays staged; what this models is
+        that the host cannot see the difference."""
 
         self.table_buffer = 1
         """`STBLNUM`/`GTBLNUM`, the active table buffer. Stored, never acted on:
@@ -859,12 +869,52 @@ class FakeBox:
         if self.loaded is None:
             self._nak(5)
             return
+        # `TableN`: forever for `TBL`, one pass for `ONCE`, n for a bare count.
+        self.passes_left = 0 if mode == "TBL" else (1 if mode == "ONCE" else int(mode))
         self.mode, self.status = "TBL", "READY"
         self._ack()
+        self._arm()
+
+    def _arm(self) -> None:
+        """`SetupTimer()`: stage the table's first time point, then say `TBLRDY`.
+
+        Called by `SMOD` and again by every re-arm that goes round the outer
+        loop, which is the `SW` path (§3 step 5). What is worth modelling is the
+        staging: `SetupNextEntry()` writes the first time point's digital
+        outputs into the image and leaves the latch pending, so from the
+        `TBLRDY` onwards `GDIO` answers the value the table is about to drive
+        while the pin still holds the old one (§3 step 2, §4).
+
+        Measured on AUKLET at 1.211t: `GDIO,A` and `GDIO,B` both 0 with the
+        table loaded and the box local, both 1 after `SMOD,TBL`, before any
+        trigger (lab record, task 42).
+        """
+        tables = self.loaded.tables if self.loaded is not None else ()
+        first = tables[0].points[0].entries if tables and tables[0].points else ()
+        for entry in first:
+            if ord("A") <= entry.chan <= ord("P") and entry.value is not None:
+                self.dio_image[chr(entry.chan)] = entry.value == ord("1")
         self._status_line("TBLRDY")
 
     def _do_tblstrt(self, _: str) -> None:
-        """Software trigger, then a whole pass, because the fake has no clock."""
+        """Software trigger, then a whole pass, because the fake has no clock.
+
+        The pass is the part this cannot model: nothing here runs a table, so
+        `TBLCMPLT` follows `TBLTRIG` in the same handler. What it does model is
+        the state the box is left in, which is what a sequencer depends on.
+
+        **The box re-arms, under `SW` as much as under an edge** (§1). Both of
+        `ProcessTables()`'s loops re-arm; only `SMOD,ONCE` or `SMOD,<n>` with
+        its passes spent leaves table mode. So a caller that sends `TBLSTRT` per
+        repetition gets what the instrument gives it: 100 consecutive `TBLSTRT`
+        on one load, no `SMOD` round trip between them, firmware 1.211t on two
+        separate days, and `TRIGGERED, COMPLETE, READY` twice on one load at
+        1.163t (lab record, tasks 28 and 44).
+
+        An earlier stand-in dropped to local here, which was this file having an
+        opinion about a question the wire format left open, and it refused every
+        `--fake` replicate with error 6 -- a failure no box produces.
+        """
         if self.mode != "TBL":
             self._nak(6)
             return
@@ -873,12 +923,20 @@ class FakeBox:
         self._status_line("TBLTRIG")
         self._status_line("TBLCMPLT")
         if self.trigger in ("EDGE", "POS", "NEG"):
-            # §1: under an external trigger the box re-arms itself.
+            # The inner loop re-arms in place: no timer setup, so no re-staging,
+            # and the pass count is never reached and never spent.
             self.status = "READY"
             self._status_line("TBLRDY")
-        else:
-            self.status = "IDLE"
-            self.mode = "LOC"
+            return
+        if self.passes_left:
+            self.passes_left -= 1
+            if self.passes_left == 0:
+                # `SMOD,ONCE`, or a count that has run out: out of the outer
+                # loop and back to local, the only way table mode ends by itself.
+                self.mode, self.status = "LOC", "IDLE"
+                return
+        self.status = "READY"
+        self._arm()
 
     def _do_tblstop(self, _: str) -> None:
         if self.mode != "TBL":

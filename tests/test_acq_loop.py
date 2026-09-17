@@ -922,26 +922,57 @@ def test_a_replicate_that_reuses_a_stem_collides_rather_than_overwriting(rig):
 def software_triggered(**kwargs):
     """A method whose box is configured the way the instrument's sequencer is.
 
-    `STBLTRG,SW` rather than the suite's usual `POS`, which is the whole of the
-    difference: `FakeBox` re-arms a table after an *external* trigger, as section 3 of the
-    wire format documents, and drops to local mode after a software one, which section 3
-    does not document either way. The stand-in's choice is the pessimistic reading of the
-    open question, and it is the reading `rearm_with_reset` exists for.
+    `STBLTRG,SW` rather than the suite's usual `POS`. Both re-arm -- section 1 of the
+    wire format, and the `FakeBox` that follows it -- but by different paths in the
+    firmware's two loops, so the sequencer's own trigger source is worth exercising
+    rather than assuming the `POS` tests cover it.
     """
     document = method_module.to_dict(make_method(**kwargs))
     document["boxes"][0]["setup"] = ["STBLCLK,EXT", "STBLTRG,SW"]
     return method_module.from_dict(document)
 
 
-def test_a_box_whose_table_does_not_re_arm_fails_its_frames_rather_than_hanging(rig):
-    """The shape of the "no" the bench is looking for (lab record, tasks 05 and 28).
+def test_a_software_triggered_box_takes_the_start_list_alone_every_repetition(rig):
+    """What tasks 28 and 44 settled, and what this loop was written not to assume.
 
-    A refused start step is the frame's failure and not the run's, so the run goes on and
-    says per frame what happened, rather than stopping on a traceback that names one
-    command.
+    A `SW` box stays in table mode across `TBLCMPLT` (wire format section 1, measured on
+    two boxes), so the start list alone carries every repetition after the first and the
+    reset list is never walked.
     """
     method = software_triggered()
     boxes = boxes_for(method)
+    send_phases(method, boxes)
+    seen: list[acq.Event] = []
+    run = rig.acquire(method, boxes, abort_after=None, progress=seen.append)
+    assert run.complete
+    assert all(record.acquired for record in run.frames)
+    assert boxes[BOX].transport.mode == "TBL"
+    assert not [event for event in seen
+                if isinstance(event, PhaseSent) and event.phase == "reset"]
+
+
+def test_a_box_whose_table_does_not_re_arm_fails_its_frames_rather_than_hanging(rig):
+    """The shape of the "no" the bench was looking for (lab record, tasks 05 and 28).
+
+    Answered since: a MIPS box does re-arm under `SW`, so no stand-in of one produces
+    this any more and the refusal has to be built on purpose. The loop's handling of it
+    is still worth holding: a refused start step is the frame's failure and not the
+    run's, so the run goes on and says per frame what happened, rather than stopping on
+    a traceback that names one command.
+    """
+
+    class OneShotBox(FakeBox):
+        """A box that leaves table mode after one pass, as this suite used to assume.
+
+        Which is `SMOD,ONCE`'s behaviour on a real box, reached here without the method
+        having to send `ONCE`; the second `TBLSTRT` NAKs error 6, *not in table mode*.
+        """
+
+        def _do_smod(self, argument: str) -> None:
+            super()._do_smod("ONCE" if argument.upper() == "TBL" else argument)
+
+    method = software_triggered()
+    boxes = {BOX: Box(transport=OneShotBox(), name=BOX)}
     send_phases(method, boxes)
     run = rig.acquire(method, boxes, abort_after=None)
     assert run.frames[0].acquired

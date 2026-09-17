@@ -209,10 +209,22 @@ set the status to `ABORTED` and write the bare word with a single `\n`.
 A parser keyed on the exact string `ABORTED` misses the button abort, so
 match on the prefix.
 
-**Re-arming is automatic under an external trigger.** With `STBLTRG` set
-to `EDGE`, `POS` or `NEG`, the loop emits `TBLCMPLT` and then `TBLRDY`
-again without any host command, and stays in table mode for the next
-edge. Only under `SW` does it fall out of the inner loop after each pass.
+**Re-arming is automatic under every trigger source, `SW` included.**
+`ProcessTables()` is two nested loops and both of them re-arm. Under
+`EDGE`, `POS` or `NEG` the inner loop prints `TBLCMPLT`, sets the status
+back to `READY` and prints `TBLRDY` in place, without touching the
+timer. Under `SW` it prints `TBLCMPLT` and breaks, and the outer
+`while(1)` goes straight round again: `TBLRDY`, status `READY`,
+`SetupTimer()`. The two paths differ in what they re-stage, not in
+whether the box stays armed. `SMOD,TBL` leaves it armed either way, and
+only `SMOD,ONCE` or `SMOD,<n>` running out of passes (§3) drops it back
+to LOC.
+
+So a `SW` sequencer sends `TBLSTRT` per frame and nothing else. Measured:
+100 consecutive `TBLSTRT` on one load with no `SMOD` round trip between
+them, firmware 1.211t, on two separate days, and `TRIGGERED`, `COMPLETE`,
+`READY` twice on one load at 1.163t (lab record, tasks 28 and 44).
+
 A sequencer that re-arms per frame must therefore expect `TBLRDY` it did
 not ask for, and must not treat a second `TBLRDY` as a protocol error.
 
@@ -476,8 +488,14 @@ by host software and not even primarily by firmware software:
    streams the next DAC frames over SPI, stages DIO image registers,
    writes the next RA/RC, all before the next compare. The RC match
    handles loop wrap / table advance / stop.
-5. `TBLCMPLT` on completion; depending on mode/trigger the box re-arms
-   (`TBLRDY` again) or drops back to LOC.
+5. `TBLCMPLT` on completion, then `TBLRDY` again: the box re-arms under
+   every trigger source (§1). Under `SW` the re-arm goes back through
+   step 2, calling `StopTimer()`, `AdvanceTableNumber()` and
+   `SetupTimer()`, so the first time point is staged again; under an
+   external trigger
+   the inner loop re-arms without re-running the timer setup, and the
+   staging is the RA-match ISR's. Only `SMOD,ONCE` or `SMOD,<n>` with
+   its passes spent drops back to LOC.
 
 The host's only real-time obligation is *none*: it compiles, uploads,
 configures, arms, and (optionally) sends the software trigger. During
@@ -564,10 +582,15 @@ timer's external-event trigger so release latency is hardware-level.
 
 Re-trigger behavior:
 
-- Default: with an external trigger source, after `TBLCMPLT` the table
-  re-arms and every subsequent trigger edge replays it (status returns
-  to `READY`, `TBLRDY` emitted). `SMOD,ONCE` runs once and exits to
-  LOC; `SMOD,<n>` runs n times.
+- Default: after `TBLCMPLT` the table re-arms and the next trigger,
+  an edge or another `TBLSTRT`, replays it (status returns to `READY`,
+  `TBLRDY` emitted). This holds for `SW` as well as for the
+  external sources; see §1 for the two code paths and what was measured.
+  `SMOD,ONCE` runs once and exits to LOC; `SMOD,<n>` runs n times. The
+  pass counter is decremented in the *outer* loop, which only the `SW`
+  path reaches, so on a firmware reading alone `SMOD,ONCE` under an
+  external trigger never counts down and replays on every edge. Nothing
+  in v1 sends `ONCE`, so that reading is untested on a box.
 - `STBLRETRIG,FALSE` makes an armed table one-shot (trigger detaches
   after release).
 - `STBLEVY,TRUE` + retrigger + an `a` channel event: the table stops at
@@ -791,8 +814,11 @@ and in table mode the next latch is the start of the table's next pass
 event). A host that sends one and reads the ACK as "done" has
 scheduled an output change for a time it did not choose. **To move a
 line by command, put the box in LOC first**: `SMOD,LOC`, `SDIO`,
-`SMOD,TBL`, which is the round trip a re-arm already costs and which
-leaves the loaded table loaded.
+`SMOD,TBL`, which leaves the loaded table loaded. It is not free: the
+box re-arms on its own after every pass (§1), so this round trip is
+three commands and a `TBLRDY` a sequencer would not otherwise spend,
+and the `SMOD,TBL` re-stages the table's first time point over the
+`SDIO` that was the point of it, on any channel that time point drives.
 
 Measured with the digitizer as the detector, against a table looping on
 DIOB that never drives DIOA: an `SDIO,A,1` sent in table mode raises
@@ -837,6 +863,15 @@ what that `SDIO` changed. There is no host-visible way to tell a latched
 output from a pending one; a scope is the only witness. Note that the
 aliasing hazard below is `SDIO`'s alone: `GDIO` routes `Q`-`X` to the
 inputs properly.
+
+The same image is what `SMOD,TBL` writes when it stages the table's
+first time point (§3 step 2), so **arming alone changes what `GDIO`
+answers**. Measured on 1.211t with the table
+`0:[A:1,0:A:1:B:1,500:B:0,4999:A:0,5000:]`: `GDIO,A` and `GDIO,B` both
+read 0 with the table loaded and the box local, and both read 1 after
+`SMOD,TBL` and its `TBLRDY`, before any trigger (lab record, task 42).
+A host that reads `GDIO` to decide whether a line is safe must read it
+before it arms the box, not after.
 
 **`SDIO`'s channel validation admits `Q`-`X` and aliases them onto
 outputs `I`-`P`.** `SDIO_Serial()` accepts any `CH[0]` in `'A'..'X'`,

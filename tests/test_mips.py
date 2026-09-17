@@ -669,12 +669,83 @@ def test_a_pass_reports_trigger_completion_and_the_automatic_re_arm() -> None:
     assert box.wait_for(TableEvent.READY, timeout=0.5) is TableEvent.READY
 
 
-def test_a_software_triggered_box_does_not_re_arm_itself() -> None:
-    box = Box(transport=FakeBox(trigger="SW"))
+def test_a_software_triggered_box_re_arms_itself_too() -> None:
+    """Section 1: both of `ProcessTables()`'s loops re-arm, `SW` included.
+
+    Measured as `TBLTRIG`, `TBLCMPLT`, `TBLRDY` on one `TBLSTRT` at 1.211t, and as
+    `TRIGGERED`, `COMPLETE`, `READY` at 1.163t (lab record, tasks 28 and 44). This
+    stand-in used to drop to local here, which was the pessimistic reading of a
+    question the wire format left open, and it made every software-triggered
+    rehearsal red for a reason no box supplies.
+    """
+    fake = FakeBox(trigger="SW")
+    box = Box(transport=fake)
     box.send_table(EXAMPLE)
     box.arm()
     box.trigger()
+    assert box.drain(0.02) == [
+        TableEvent.TRIGGERED, TableEvent.COMPLETE, TableEvent.READY]
+    assert (fake.mode, fake.status) == ("TBL", "READY")
+
+
+def test_a_software_triggered_box_takes_repeat_starts_with_no_round_trip() -> None:
+    """100 consecutive `TBLSTRT` on one load, no `SMOD` between them, is what AUKLET
+    took on two separate days; ten is enough to pin the state machine."""
+    fake = FakeBox(trigger="SW")
+    box = Box(transport=fake)
+    box.send_table(EXAMPLE)
+    box.arm()
+    for _ in range(10):
+        box.trigger()
+        assert box.drain(0.02) == [
+            TableEvent.TRIGGERED, TableEvent.COMPLETE, TableEvent.READY]
+    assert box.table_status() == "READY"
+
+
+def test_once_runs_one_pass_and_leaves_table_mode() -> None:
+    """`TableN`, which the outer loop decrements and only the `SW` path reaches."""
+    fake = FakeBox(trigger="SW")
+    box = Box(transport=fake)
+    box.send_table(EXAMPLE)
+    box.arm("ONCE")
+    box.trigger()
     assert box.drain(0.02) == [TableEvent.TRIGGERED, TableEvent.COMPLETE]
+    assert (fake.mode, fake.status) == ("LOC", "IDLE")
+    with pytest.raises(BoxRejected) as refused:
+        box.trigger()
+    assert refused.value.code == 6
+
+
+def test_a_bare_pass_count_runs_that_many_passes() -> None:
+    fake = FakeBox(trigger="SW")
+    box = Box(transport=fake)
+    box.send_table(EXAMPLE)
+    box.arm("3")
+    for _ in range(2):
+        box.trigger()
+        assert box.drain(0.02)[-1] is TableEvent.READY
+    box.trigger()
+    assert box.drain(0.02) == [TableEvent.TRIGGERED, TableEvent.COMPLETE]
+    assert fake.mode == "LOC"
+
+
+def test_arming_stages_the_tables_first_time_point_into_the_digital_image() -> None:
+    """Section 3 step 2: `SetupTimer()` calls `SetupNextEntry()`, which writes the
+    first time point's digital outputs into the image and leaves the latch pending.
+
+    So `GDIO` answers what the table is about to drive while the pin still holds the
+    old value -- measured on AUKLET at 1.211t as `GDIO,A` and `GDIO,B` both 0 with the
+    table loaded and the box local, both 1 after `SMOD,TBL` (lab record, task 42).
+    """
+    fake = FakeBox(trigger="SW")
+    box = Box(transport=fake)
+    box.send_table("STBLDAT;0:[A:1,0:A:1:B:1,500:B:0,4999:A:0,5000:];")
+    assert (box.command("GDIO,A", value=True), box.command("GDIO,B", value=True)) == (
+        "0", "0")
+    box.arm()
+    assert (box.command("GDIO,A", value=True), box.command("GDIO,B", value=True)) == (
+        "1", "1")
+    assert not any(fake.dio_pins.values()), "no latch has fired, so no pin has moved"
 
 
 def test_aborting_leaves_table_mode() -> None:
