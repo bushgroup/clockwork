@@ -98,7 +98,13 @@ from ..transcript import CONSOLE as _CONSOLE
 from ..transcript import DECIDED as _DECIDED
 from ..transcript import sent as _sent
 from .console import DEFAULT_TIMEOUT_S, Console, ConsoleTimeout
-from .wire import COMMAND_PORT, DATA_PORT, AcqError, ConsoleInfo
+from .wire import (
+    COMMAND_PORT,
+    DATA_PORT,
+    SECONDS_PER_SAMPLE_2GSPS,
+    AcqError,
+    ConsoleInfo,
+)
 
 _LOG = logging.getLogger("clockwork.acq.console_process")
 """The transcript's name for the console process: its stdout, its stderr, and
@@ -1032,6 +1038,10 @@ class FakeConsoleProcess(ConsoleSupervisor):
     refuses a setting, one that dies mid-frame, and the five seconds a card open
     takes. Those need an executable, and `ConsoleProcess` against the stand-in
     executable in the tests is where the launch path itself is exercised.
+
+    `startup` is filled from the stand-in's own numbers rather than left empty,
+    because it is the answer to "what is the *running* console holding", and that
+    question has an answer here too (lab record, task 50).
     """
 
     def __init__(self, **console: object) -> None:
@@ -1043,6 +1053,9 @@ class FakeConsoleProcess(ConsoleSupervisor):
         self.data_endpoint = ""
         self.info: ConsoleInfo | None = None
         self.startup: dict[str, str] = {}
+        """What the stand-in is running with, in the three keys a caller reads off a
+        real console's startup block. Filled by `start()`; see the note there."""
+
         self.started_seconds: float | None = None
 
     @property
@@ -1059,6 +1072,19 @@ class FakeConsoleProcess(ConsoleSupervisor):
         self._fake = fake
         self.command_endpoint = fake.command_endpoint
         self.data_endpoint = fake.data_endpoint
+        # The stand-in reads no `config.txt`, but a caller reading `PostTriggerDelay`
+        # off `startup` is reading what the *running* console holds, and that is as
+        # true here as it is of a process: the stand-in binds its own numbers, so a
+        # caller that fell back to the compiled-in default would build every scan's
+        # leading zero run at a delay the stand-in is not using. Written in the form
+        # the console prints, seconds, so the two supervisors answer alike.
+        self.startup = {
+            "PostTriggerDelay": repr(fake.post_trigger_samples
+                                     * SECONDS_PER_SAMPLE_2GSPS),
+            "TriggerRearmDeadTime": repr(fake.rearm_samples
+                                         * SECONDS_PER_SAMPLE_2GSPS),
+            "NotifyOnScansCount": str(fake.notify_on_scans_count),
+        }
         return self
 
     def wait_ready(self, timeout: float = STARTUP_TIMEOUT_S) -> float:

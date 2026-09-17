@@ -427,6 +427,32 @@ class BoxReady(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class ReadingBack(Event):
+    """A box's whole-state readback has started. The reading itself is `StateRead`.
+
+    Reported because the readback is the one part of a send that takes long enough for
+    a window to look stalled: three boxes cost about five seconds, almost all of it the
+    `GCMDS` listings, and nothing else says which box is being asked. A caller that
+    shows this replaces it with the `StateRead` that follows rather than keeping both
+    (lab record, task 50).
+
+    **Only for the whole-state reading.** The two-getter reading taken once a box is
+    armed costs two round trips and is over before a line about it could be read.
+    """
+
+    box: str
+    when: str
+    listing: bool = False
+    """Whether this reading has to fetch the box's `GCMDS` listing first, which is the
+    expensive half and the reason the cache exists (`send_phases(listings=)`)."""
+
+    @property
+    def text(self) -> str:
+        return (f"reading back {self.box} {self.when}"
+                + (" (asking what commands it has)" if self.listing else ""))
+
+
+@dataclass(frozen=True, slots=True)
 class StateRead(Event):
     """A box's persistent state was read back at one of the send's three moments.
 
@@ -1317,6 +1343,8 @@ def _read_one(
     `sequencer_only` is the two-getter reading `read_sequencer` takes, which is
     what the `armed` snapshot costs; everything else reads the whole state.
     """
+    if not sequencer_only:
+        report(ReadingBack(name, when, listing=name not in listings))
     if name not in listings:
         try:
             with box.summarised():
@@ -1349,6 +1377,7 @@ def send_phases(
     arm_timeout: float = ARM_TIMEOUT_S,
     snapshot: bool = True,
     conditions: str = "",
+    listings: dict[str, frozenset[str]] | None = None,
 ) -> Snapshot:
     """Send every box its `setup`, `load` and `arm` phases, in the method's order.
 
@@ -1402,6 +1431,15 @@ def send_phases(
     the send log's header, not here, so that a replicate's log carries it too
     (`clockwork.transcript.run_header`).
 
+    `listings` is the `GCMDS` cache, passed in by a caller that sends more than once.
+    The listing is the expensive half of the readback -- three boxes cost about five
+    seconds of it, against the 0.3 s the getters themselves take -- and a box's command
+    set does not change between two acquisitions of an afternoon. A caller that keeps
+    one dictionary for the session pays for it on the first send and never again; a
+    caller that passes none gets a fresh cache per call, which is what a bench script
+    that runs once wants. It is read *and written*: what a send learns about a box
+    stays in the caller's dictionary.
+
     Raises whatever the box raised, after reporting it, so a refused string stops the
     send rather than leaving a half-loaded instrument that looks armed.
     """
@@ -1417,7 +1455,8 @@ def send_phases(
             f"the method names {len(missing)} box(es) with no open port: "
             + ", ".join(sorted(missing))
         )
-    listings: dict[str, frozenset[str]] = {}
+    if listings is None:
+        listings = {}
     before = _snapshot(method, boxes, listings, WHEN_BEFORE, report) if snapshot else ()
 
     after: list[BoxState] = []
@@ -1617,6 +1656,7 @@ def run_acquisition(
     adc_name: str = "",
     snapshot: Snapshot | None = None,
     overwrite: bool = False,
+    stop: Callable[[], str | None] | None = None,
     clock: Callable[[], float] = time.perf_counter,
 ) -> Run:
     """Acquire everything one method asks for, into one pair of files.
@@ -1680,6 +1720,17 @@ def run_acquisition(
     again would be recording the same measurement twice under two names. A run given
     none stamps none, which is every `Recording` driven by hand.
 
+    `stop` is asked, between one repetition and the next, whether to end the run; a
+    string is the reason and ends it, `None` carries on. **This is the whole of a
+    window's Stop button**, and it is a question asked between repetitions rather than
+    a flag checked inside one because the alternatives are all worse: a frame abandoned
+    mid-flight leaves the console holding an acquisition, the box holding a table and
+    the file holding a provisional frame, and one more repetition costs about a second.
+    A run stopped this way still folds the method frame it was in and still closes its
+    files, so what it leaves on disk is a short experiment rather than a broken one
+    (`Run.stopped_early` carries the reason). It is called on the acquisition thread,
+    so it must not block.
+
     Returns a `Run` describing what happened, including the frames that did not work: an
     empty frame, a console error and a frame that never ended are outcomes recorded
     against their frame, which is left provisional in the file, and the run goes on to
@@ -1740,7 +1791,7 @@ def run_acquisition(
             gate_dwell=(gate_dwell if gate_dwell is not None
                         else _gate_dwell(recording.geometry)),
             rearm_with_reset=rearm_with_reset, abort_after=abort_after,
-            clock=clock, started=started,
+            stop=stop, clock=clock, started=started,
             frame_timeout=(frame_timeout if frame_timeout is not None
                            else _frame_timeout(method, recording.geometry)),
         )
@@ -1841,12 +1892,15 @@ def _gate_dwell(geometry: Geometry) -> float:
 def _sent_line(event: Event) -> tuple[str, str] | None:
     """One `Event` as a send log's line, or `None` for one that does not belong there.
 
-    Two are dropped. `BatchSeen` is one line per five hundred pushes and a frame
+    Three are dropped. `BatchSeen` is one line per five hundred pushes and a frame
     publishes a hundred and twenty of them, which would bury the strings the file
     exists for; the count that matters survives in `FrameEnded`. `BoxSaid` is the
     loop noticing a status line `clockwork.mips.wire` has already written with an
     `!` where it arrived, and the earlier line is the truer one -- the loop's is
-    dated when the port was next drained.
+    dated when the port was next drained. `ReadingBack` says a readback has started,
+    which is a thing a window says while a trainee waits rather than a thing a file
+    records: the reading itself is written below it under the box's own name, and a
+    log that announced each one as well would say everything twice.
 
     `PhaseSent` is the one that is rewritten rather than passed through. Its string
     is on the `>` line above it, so the ordinary line here says only which phase the
@@ -1855,7 +1909,7 @@ def _sent_line(event: Event) -> tuple[str, str] | None:
     that reading it apart from the string it refused is how a bench hour is lost
     (`GERR` 6 says "not in table mode" for a command that needs local mode).
     """
-    if isinstance(event, (BatchSeen, BoxSaid)):
+    if isinstance(event, (BatchSeen, BoxSaid, ReadingBack)):
         return None
     if isinstance(event, PhaseSent):
         if event.error is not None:
@@ -1911,6 +1965,7 @@ class _Loop:
     clock: Callable[[], float]
     started: float
     gate_dwell: float
+    stop: Callable[[], str | None] | None = None
     start_step_gap: float = START_STEP_GAP_S
     row_settle: float = ROW_SETTLE_S
     frame_poll: float = FRAME_POLL_S
@@ -1946,6 +2001,7 @@ class _Loop:
             for method_frame in range(1, acquisition.frames + 1):
                 for repetition in range(1, acquisition.console_frames + 1):
                     self._one_frame(method_frame, repetition)
+                    self._asked_to_stop()
                     if self.stopped_early is not None:
                         break
                 if any(record.method_frame == method_frame and record.acquired
@@ -1992,6 +2048,26 @@ class _Loop:
             replicate=replicate,
             stopped_early=self.stopped_early,
         )
+
+    def _asked_to_stop(self) -> None:
+        """Ask the caller's `stop` whether this repetition was the last one.
+
+        Between repetitions, and only here: the method frame it was in is still
+        folded and the files are still closed properly, so the run ends short rather
+        than broken (`run_acquisition`'s `stop`). A `stop` that raises is reported and
+        ignored -- a window whose Stop button is broken should not also take the
+        acquisition down with it.
+        """
+        if self.stop is None or self.stopped_early is not None:
+            return
+        try:
+            reason = self.stop()
+        except Exception as exc:  # noqa: BLE001 -- a caller's predicate, not ours
+            self.report(Warned(f"the stop check raised ({exc!r}); carrying on"))
+            return
+        if reason:
+            self.stopped_early = reason
+            self.report(Warned(f"stopping after this repetition: {reason}"))
 
     def _submit_deferred_fold(self) -> None:
         """Start the fold a previous method frame is owed, now that nothing waits on it.

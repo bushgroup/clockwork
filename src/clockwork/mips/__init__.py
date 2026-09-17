@@ -11,6 +11,7 @@ in it may run on the UI thread.
     table.py       the compiled table layout, predicted and read back
     compressor.py  an ARB compression table, read as far as its loop counts
     state.py       what a box is holding, read back with getters only
+    discovery.py   which ports have a box behind them, asked with `GNAME`
     transport.py   a COM port, or a box simulated in this process
     wire.py        framing, error codes, the asynchronous status lines
 
@@ -53,6 +54,16 @@ from .compressor import (
     COMPRESSION_COMMAND,
     compression_passes,
     compression_table,
+)
+from .discovery import (
+    DISCOVERY_TIMEOUT_S,
+    MIPS_PRODUCT,
+    MIPS_VENDOR_ID,
+    Discovery,
+    Found,
+    PortInfo,
+    discover,
+    mips_ports,
 )
 from .table import (
     UNNAMED,
@@ -103,7 +114,10 @@ __all__ = [
     "DEFAULT_CHUNK_BYTES",
     "DEFAULT_CHUNK_GAP_S",
     "DEFAULT_TIMEOUT_S",
+    "DISCOVERY_TIMEOUT_S",
     "ERR_ALREADY_LOCAL",
+    "MIPS_PRODUCT",
+    "MIPS_VENDOR_ID",
     "MAX_ARB_MODULES",
     "NAK",
     "RING_BUFFER_BYTES",
@@ -113,10 +127,13 @@ __all__ = [
     "BoxState",
     "BoxTimeout",
     "Compiled",
+    "Discovery",
     "Entry",
     "FakeBox",
+    "Found",
     "Kind",
     "MipsError",
+    "PortInfo",
     "Report",
     "ResponseReader",
     "RfReading",
@@ -139,8 +156,10 @@ __all__ = [
     "dio_command",
     "differences",
     "digital_events",
+    "discover",
     "encode",
     "error_text",
+    "mips_ports",
     "open_serial",
     "parse_report",
     "read_sequencer",

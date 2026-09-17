@@ -1,9 +1,25 @@
-"""The PySide6 window: one pane per box, Send all, Acquire, Replicate.
+"""The PySide6 window: one pane per box, Send setup, Acquire, Replicate, Stop.
 
-The only package in `clockwork` that imports Qt. Today `main` is the placeholder task
-32 asked for -- one label naming the build, and a `--self-check` that proves the three
-lower layers and `mainspring.uimf` work inside a frozen build without opening it -- and
-task 08's successors (`notes/gui-execution-plan.md`) fill it in.
+The only package in `clockwork` that imports Qt, and it imports it late -- `main` builds
+the window, and importing this package does not pull PySide6 in, so `--self-check` and
+the tests that assert the seam cost nothing for it.
+
+    window.py         the window itself; holds no acquisition sequence of its own
+    worker.py         the one thread that talks to the boxes and the console
+    panes.py          a box's pane, with the phase clockwork read each line as
+    runlog.py         the progress bar and the warnings worth reading
+    console_panel.py  the console in the status bar, and its six editable settings
+    settings.py       what is remembered between launches
+    naming.py         `YYMMDD_INITIALS_NNN`, scanned off the output directory
+    launch.py         handing a file to mainspring, and the logs to an editor
+
+`naming.py` and `launch.py` import no Qt: what a run is called and how a file is opened
+are questions a test can ask without a window.
+
+Three arguments. `--fake` builds the whole window over `FakeBox` and `FakeConsole`, so
+every path above the wire runs with no instrument on the bench; `--self-check` is the
+installer's proof that the lower layers work inside a frozen build, with no window
+shown; and no argument at all is the trainee's launch.
 """
 
 from __future__ import annotations
@@ -128,6 +144,12 @@ def main(argv: list[str] | None = None) -> int:
         "--self-check", action="store_true",
         help="run a hardware-free stand-in acquisition and exit, no window shown",
     )
+    parser.add_argument(
+        "--fake", action="store_true",
+        help="drive simulated boxes and a simulated console, for a desk with no "
+             "instrument on it. Nothing a --fake run reports is evidence about a MIPS "
+             "box or a digitizer.",
+    )
     args = parser.parse_args(argv)
 
     # Before anything imports numba, lazily or otherwise: `_self_check` folds, and the
@@ -155,14 +177,18 @@ def main(argv: list[str] | None = None) -> int:
         return _self_check()
 
     from PySide6.QtGui import QIcon
-    from PySide6.QtWidgets import QApplication, QLabel
+    from PySide6.QtWidgets import QApplication
+
+    from .window import MainWindow
 
     app = QApplication(sys.argv[:1])
+    app.setApplicationName("clockwork")
+    app.setApplicationVersion(clockwork.__version__)
     if os.path.isfile(_ICON):
         app.setWindowIcon(QIcon(_ICON))
-    commit = clockwork.built_commit() or "unknown commit"
-    label = QLabel(f"clockwork {clockwork.__version__}\n{commit}")
-    label.setWindowTitle(f"clockwork {clockwork.__version__}")
-    label.setMargin(24)
-    label.show()
+    # The title carries the version, which is what `tools/build_exe.ps1`'s launch check
+    # reads to tell a build that reached working code from one that died on the way
+    # (mainspring's `packaging/entrypoint.py` does the same, task 32).
+    window = MainWindow(fake=args.fake)
+    window.show()
     return app.exec()

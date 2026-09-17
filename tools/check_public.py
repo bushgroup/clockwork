@@ -1369,6 +1369,77 @@ def main() -> int:
             b"\r\n" not in open(path, "rb").read(),
         )
 
+    section("the window")
+    # Task 50. Nothing here opens a window: what a clone can establish without a
+    # display is the two halves of `clockwork.app` that import no Qt -- what a run is
+    # called, and how a file is handed to mainspring -- plus the box discovery the
+    # window opens with, driven against a stand-in rack. The window itself is
+    # `tests/test_app.py`, which needs pytest-qt and an offscreen platform.
+    import datetime as _dt
+    import tempfile
+
+    from clockwork.app import naming
+    from clockwork.app.launch import open_with
+    from clockwork.mips import Box, FakeBox, discover, mips_ports
+
+    with tempfile.TemporaryDirectory() as scratch:
+        for name in ("260825_BK_025.uimf", "260825_BK_037.summed.uimf",
+                     "260904_BK_094.uimf", "260904_BK_094.sent.txt",
+                     "260917_QQ_400.uimf"):
+            open(os.path.join(scratch, name), "w").close()
+        stem = naming.next_stem(scratch, "BK", _dt.date(2026, 9, 17))
+        check_true(
+            f"the file counter is one past the highest these initials already use "
+            f"({stem}), across dates and ignoring other initials",
+            stem == "260917_BK_095",
+        )
+        check_true(
+            "a stem reserved this session moves it before the file exists",
+            naming.next_stem(scratch, "BK", _dt.date(2026, 9, 17),
+                             taken=[stem]) == "260917_BK_096",
+        )
+    check_true(
+        "a name in another shape is not a stem, so a trainee's own file is left alone",
+        naming.parse_stem("Tables_BradykininCLOCK.txt") is None
+        and naming.parse_stem("260904_BK_094.summed.uimf") == ("260904", "BK", 94),
+    )
+    check_true(
+        "initials are cleaned to what a stem can be parsed back out of",
+        naming.clean_initials("m_b 2!") == "MB2",
+    )
+    check_true(
+        "handing a file to a program that is not there reports rather than raises",
+        not open_with("no-such-program.exe", __file__),
+    )
+
+    found = discover(ports=["COM-A", "COM-B"], opener=lambda port, **_: Box(
+        transport=FakeBox(), name=port))
+    check_true(
+        "two boxes answering one GNAME are reported and neither is addressable, "
+        "because a method cannot say which of them it means",
+        found.boxes == {} and len(found.unusable) == 2,
+    )
+    found.close()
+    def refuses(port: str, **_: object) -> Box:
+        raise OSError(f"could not open {port}")
+
+    silent = discover(ports=["COM-GONE"], opener=refuses)
+    check_true(
+        "a port that will not open is a row in the scan and not the end of it",
+        silent.found == () and len(silent.silent) == 1,
+    )
+    ports = mips_ports(strict=False)
+    if ports:
+        check_true(
+            f"this machine enumerates {len(ports)} serial port(s), "
+            f"{sum(1 for info in ports if info.mips_class)} of them MIPS-class",
+            True,
+        )
+    else:
+        skip("MIPS-class ports are found by their USB identity",
+             "no serial ports on this machine; port presence is not evidence of a box "
+             "either way (lab record, task 37)")
+
     section("hardware")
     skip("a MIPS box answers GVER", "no serial hardware in a self-check; lab record, task 04")
     skip("the acquisition console answers info", "no console in a self-check; lab record, task 03")
