@@ -792,7 +792,10 @@ def test_an_arb_setup_block_reads_back() -> None:
     box = Box(transport=FakeBox(arb_modules=4))
     for command in ("SWFREQ,3,15000", "SWFVRNG,3,15", "SWFDIR,1,REV", "SALTWFM,1,REV"):
         box.command(command)
-    assert box.command("GWFREQ,3", value=True) == "15000"
+    # 14914 and not 15000: the module's waveform clock is an integer divider and
+    # `GWFREQ` answers what it could make of the request, which is what both ARB boxes
+    # answer on the instrument (wire format 6.2, lab record, task 56).
+    assert box.command("GWFREQ,3", value=True) == "14914"
     assert box.command("GWFVRNG,3", value=True) == "15"
     assert box.command("GWFDIR,1", value=True) == "REV"
     assert box.command("GALTWFM,1", value=True) == "REV"

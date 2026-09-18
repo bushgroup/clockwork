@@ -33,7 +33,14 @@ from PySide6.QtWidgets import QDialog  # noqa: E402
 
 from clockwork import instrument as instrument_module  # noqa: E402
 from clockwork import method as method_module  # noqa: E402
-from clockwork.acq import FrameEnded, Warned  # noqa: E402
+from clockwork.acq import (  # noqa: E402
+    BatchSeen,
+    Folding,
+    FrameBegun,
+    FrameEnded,
+    RunBegun,
+    Warned,
+)
 from clockwork.acq.loop import (  # noqa: E402
     WHEN_ARMED,
     FoldRecord,
@@ -59,10 +66,15 @@ from clockwork.app.librarypanel import (  # noqa: E402
 from clockwork.app.methodlib import method_diff  # noqa: E402
 from clockwork.app.panes import MARGIN_TAGS, BoxPane  # noqa: E402
 from clockwork.app.queuepanel import QueuePanel  # noqa: E402
-from clockwork.app.runlog import RunPanel, is_left_as_found  # noqa: E402
+from clockwork.app.runlog import (  # noqa: E402
+    RunPanel,
+    is_left_as_found,
+    names_it_elsewhere,
+)
 from clockwork.app.settings import Settings  # noqa: E402
 from clockwork.app.statepanel import StatePanel  # noqa: E402
 from clockwork.app.window import MainWindow  # noqa: E402
+from clockwork.app.worker import matches_wire  # noqa: E402
 from clockwork.method.text import render_pane  # noqa: E402
 from clockwork.mips import (  # noqa: E402
     Box,
@@ -320,6 +332,38 @@ def test_ten_left_as_found_lines_collapse_to_one_row_per_box(qtbot):
     assert "auklet: 5 settings left as found" in panel.log.topLevelItem(0).text(1)
 
 
+def test_a_setting_the_method_names_elsewhere_gets_its_own_open_group(qtbot):
+    """Matt's call of 2026-09-18, and the run it was made on the strength of.
+
+    A method with an opinion about module 1's direction and none about module 2's has a
+    gap in it; a method that names no direction anywhere is simply not about direction.
+    Folding the two together hid the eleventh line among the ten on 2026-09-15, and
+    `SWFDIR`/`SALTWFM` left `REV` cost a run that showed no ions at all (task 56).
+    """
+    panel = RunPanel()
+    qtbot.addWidget(panel)
+    for index in range(5):
+        panel.show(Warned(f"auklet SETTING{index} is left as found on module 1: x"))
+    panel.show(Warned("auklet WFDIR is left as found on modules 2: FWD, 3: FWD, "
+                      "and the method declares it on module 1"))
+
+    assert panel.log.topLevelItemCount() == 2
+    plain, gap = (panel.log.topLevelItem(0), panel.log.topLevelItem(1))
+    assert "auklet: 5 settings left as found (click to expand)" in plain.text(1)
+    assert not plain.isExpanded()
+    assert "names on other modules" in gap.text(1)
+    assert gap.isExpanded(), "the group that matters opened itself"
+
+
+def test_the_two_kinds_of_left_as_found_line_are_told_apart_by_their_wording():
+    plain = "auklet ARBMODE is left as found on modules 1: TWAVE, 2: TWAVE"
+    gap = ("auklet WFDIR is left as found on modules 2: FWD, "
+           "and the method declares it on module 1")
+    assert is_left_as_found(plain) and is_left_as_found(gap)
+    assert not names_it_elsewhere(plain)
+    assert names_it_elsewhere(gap)
+
+
 def test_a_declared_versus_read_line_is_never_grouped_away(qtbot):
     panel = RunPanel()
     qtbot.addWidget(panel)
@@ -328,6 +372,76 @@ def test_a_declared_versus_read_line_is_never_grouped_away(qtbot):
     panel.show(Warned("auklet DC bias monitors were not compared: the readback was "
                       "taken with the table TBLRDY, where they do not convert"))
     assert panel.log.topLevelItemCount() == 3
+
+
+def test_the_bar_moves_through_a_single_frame_method_s_one_frame(qtbot):
+    """The defect that cost the 2026-09-17 sitting a misdiagnosis (task 56).
+
+    A `single_frame` method asks the console for **one** frame of half a million scans,
+    so a bar ranged over frames was filled by `FrameBegun` and sat at 100 % with a
+    frozen caption for the whole 65 s of a healthy run. Ranged over scans, the same run
+    moves on every `BatchSeen` -- about fifteen a second -- and the caption still counts
+    repetitions.
+    """
+    panel = RunPanel()
+    qtbot.addWidget(panel)
+    panel.show(RunBegun("raw.uimf", "summed.uimf", frames=1, console_frames=1,
+                        frame_length=500_000, frame_timeout=90.0))
+    assert panel.bar.maximum() == 500_000
+
+    panel.show(FrameBegun(method_frame=1, repetition=1, frame_number=1, of=1))
+    assert panel.bar.value() == 0, "a frame that has begun has published nothing"
+    assert panel.progress.text == "repetition 1 of 1"
+
+    panel.show(BatchSeen(1, 1, _batch(1000), scans_so_far=1000))
+    assert panel.bar.value() == 1000
+    panel.show(BatchSeen(1, 1, _batch(1000), scans_so_far=250_000))
+    assert panel.bar.value() == 250_000
+    # No line per batch: fifteen a second would bury everything worth reading.
+    assert panel.log.topLevelItemCount() == 1
+
+
+def test_the_bar_counts_scans_across_a_whole_per_repetition_run(qtbot):
+    """The other method shape, which the fix must not break: a hundred console frames
+    of twenty thousand scans is one bar of two million, and a frame that has begun puts
+    it at its own start before its first batch arrives."""
+    panel = RunPanel()
+    qtbot.addWidget(panel)
+    panel.show(RunBegun("raw.uimf", "summed.uimf", frames=1, console_frames=100,
+                        frame_length=20_000, frame_timeout=60.0))
+    assert panel.bar.maximum() == 2_000_000
+
+    panel.show(FrameBegun(method_frame=1, repetition=3, frame_number=3, of=100))
+    assert panel.bar.value() == 40_000
+    panel.show(BatchSeen(1, 3, _batch(500), scans_so_far=500))
+    assert panel.bar.value() == 40_500
+    assert panel.progress.text == "repetition 3 of 100"
+
+    # Scans keep arriving after a frame's own `finished` -- 500 on every frame of the
+    # 2026-09-17 series -- and a bar past its maximum is one Qt draws full while the
+    # run is not.
+    panel.show(FrameBegun(method_frame=1, repetition=100, frame_number=100, of=100))
+    panel.show(BatchSeen(1, 100, _batch(500), scans_so_far=20_500))
+    assert panel.bar.value() == 2_000_000
+
+
+def test_a_fold_that_has_started_says_so_instead_of_going_quiet(qtbot):
+    """624 s of silence on 2026-09-17, read as a dead process by the session watching
+    and a force-quit away from losing a 1.3 GB raw file (task 56)."""
+    panel = RunPanel()
+    qtbot.addWidget(panel)
+    panel.show(Folding(1, tuple(range(1, 101)), megabytes=1310.5, seconds=624.0))
+    assert panel.log.topLevelItemCount() == 1
+    line = panel.log.topLevelItem(0).text(1)
+    assert "100 repetitions" in line and "about 10 minutes" in line
+
+
+def _batch(scans: int):
+    """A `Batch` of `scans` scans, which is all these assertions read off one."""
+    import numpy as np
+
+    from clockwork.acq.wire import Batch
+    return Batch(mz=np.zeros(4), tic=np.zeros(scans), time_stamps=np.zeros(scans))
 
 
 def test_a_frame_that_ended_on_silence_is_surfaced_and_one_that_counted_out_is_not(qtbot):
@@ -412,6 +526,84 @@ def test_a_declared_setting_the_box_disagrees_with_is_marked_and_counted():
     row = rows_of(table, "ARB")["module 2 direction"]
     assert row.mark == DIFFERS and row.declared == "FWD" and row.value == "REV"
     assert table.differing == (row,)
+
+
+def test_a_declared_arb_frequency_agrees_with_the_one_the_divider_can_make():
+    """The standing false alarm, and the reason decision 6 of the window design existed.
+
+    `SWFREQ,n,15000` is acknowledged and read back as 14914, because the module's
+    waveform clock is an integer divider (wire format 6.2). The panel compared the two
+    strings and marked every module of both ARB boxes as disagreeing on every run -- a
+    warning that fires every time being a warning nobody reads (task 56).
+    """
+    box = rack_box()
+    box.command("SWFREQ,1,15000")
+    state = read_state(box)
+    assert state.module(1)["GWFREQ"] == "14914", "the stand-in did not quantise it"
+    table = state_table(Reading(state=state, when="on demand"),
+                        declaring(setup=("SWFREQ,1,15000",)))
+    row = rows_of(table, "ARB")["module 1 frequency"]
+    assert row.mark == AGREES, row.note
+    assert "nearest it can" in row.note
+    assert table.differing == ()
+
+
+def test_an_arb_module_holding_a_frequency_nobody_asked_for_still_differs():
+    """The mark has to keep working: quantisation explains 14914 against 15000 and
+    explains nothing about a module left at some other method's setting."""
+    box = rack_box()
+    box.command("SWFREQ,1,5000")
+    table = state_table(Reading(state=read_state(box), when="on demand"),
+                        declaring(setup=("SWFREQ,1,15000",)))
+    row = rows_of(table, "ARB")["module 1 frequency"]
+    assert row.mark == DIFFERS and row.declared == "15000"
+
+
+def test_an_arb_setting_that_reads_back_with_decimals_is_compared_as_a_number():
+    """The other four of the eight. `SWFVRNG,n,15` is a voltage and the box answers one,
+    and a panel comparing the two as text marked a row that agrees exactly."""
+    box = rack_box()
+    box.transport.arb[1]["SWFVRNG"] = "15.00"
+    table = state_table(Reading(state=read_state(box), when="on demand"),
+                        declaring(setup=("SWFVRNG,1,15",)))
+    row = rows_of(table, "ARB")["module 1 range"]
+    assert row.mark == AGREES and row.value == "15.00"
+
+
+def test_a_refresh_with_the_box_armed_keeps_the_monitors_that_were_live():
+    """Task 51 step 4, answered at the instrument and answered against the step.
+
+    The mark compares a declaration with the box's *setpoint*, which agrees in either
+    mode; the monitor is only a note on the row, and in table mode it is a frozen array
+    (task 43). So a refresh taken with the boxes armed replaced the between-`setup`-and-
+    `load` reading -- where the monitors were live -- with one where they are not. Every
+    statement the panel then made was true and the evidence had gone (task 56).
+    """
+    box = rack_box()
+    live = Reading().with_state(read_state(box), "after setup, before load")
+    assert "monitors" in rows_of(state_table(live), "DC bias")["channel 1"].note
+
+    armed = live.with_state(read_state(in_table_mode(box)), "on demand, at 14:05:00")
+    rows = rows_of(state_table(armed), "DC bias")
+    assert "when last live" in rows["channel 1"].note
+    assert "after setup, before load" in rows["channel 1"].note
+    # The setpoints are still this reading's: a box in table mode answers them truthfully
+    # and it is only the monitor beside each that falls back.
+    assert rows["channel 1"].value == "12.00 V"
+    section = next(part for part in state_table(armed).sections
+                   if part.title == "DC bias")
+    assert "kept because a refresh" in section.note
+
+
+def test_a_reading_with_live_monitors_replaces_the_one_kept_before_it():
+    """The fallback is the *last* live reading and not the first one ever taken."""
+    box = rack_box()
+    first = Reading().with_state(read_state(box), "after setup, before load")
+    box.transport.dc_bias = [1.0, -70.0, 0.0, 5.0]
+    second = first.with_state(read_state(box), "on demand, at 15:00:00")
+    assert second.converting_when == "on demand, at 15:00:00"
+    frozen = second.with_state(read_state(in_table_mode(box)), "on demand, at 15:01:00")
+    assert "15:00:00" in rows_of(state_table(frozen), "DC bias")["channel 1"].note
 
 
 def test_the_panel_marks_a_dc_bias_row_exactly_where_the_loop_would_warn():
@@ -734,6 +926,123 @@ def test_the_setup_send_and_the_acquisition_share_one_send_log(window, tmp_path,
     whole = log.read_text(encoding="utf-8")
     assert whole.startswith(after_setup[:200])
     assert "TBLSTRT" in whole
+
+
+def test_a_second_send_continues_the_send_log_instead_of_emptying_it(
+        window, tmp_path, qtbot):
+    """A Load and arm used to destroy the Send setup log that preceded it under the
+    same stem, and the 2026-09-17 sitting then read the emptied file and reported that
+    the CLOCK `setup` had never been sent -- on the strength of which it was sent again.
+    It had gone out before every CLOCK series that afternoon (task 56).
+
+    A stem is a piece of work and its send log is that work's record: everything done
+    under one stem is added to it.
+    """
+    load_into(window, tmp_path, make_method())
+    until(qtbot, lambda: window.worker.boxes and idle(window))
+    stem = window.stem.text()
+    window.send(setup=True)
+    until(qtbot, lambda: idle(window) and window.worker.snapshot is not None)
+    log = tmp_path / f"{stem}.sent.txt"
+    after_setup = log.read_text(encoding="utf-8")
+    assert "STBLCLK,EXT" in after_setup
+
+    window.send(setup=False)
+    # On the file rather than on `_armed`, which the first send already set: the job is
+    # queued to another thread and the window is briefly idle with it still waiting.
+    until(qtbot, lambda: log.read_text(encoding="utf-8").count("SMOD,TBL") >= 2)
+    until(qtbot, lambda: idle(window))
+    whole = log.read_text(encoding="utf-8")
+    assert "STBLCLK,EXT" in whole, "the setup send's strings were emptied out"
+    assert whole.startswith(after_setup[:200])
+
+
+def test_a_queue_row_that_does_not_send_setup_keeps_its_own_send_log(
+        window, tmp_path, qtbot):
+    """The same defect down the run queue's path (task 53), which reaches it on a row
+    with `setup` unchecked: the row sends load and arm under the stem and then acquires
+    under it, and an acquisition that matched only on the last *setup* log truncated the
+    load-and-arm log it had just written."""
+    ready_to_acquire(window, qtbot, tmp_path, make_method())
+    window._refresh_stem()
+    stem = window.stem.text()
+    log = tmp_path / f"{stem}.sent.txt"
+    window.send(setup=False)
+    until(qtbot, lambda: log.is_file() and "SMOD,TBL" in log.read_text(encoding="utf-8"))
+    until(qtbot, lambda: idle(window))
+    after_arm = log.read_text(encoding="utf-8")
+
+    runs: list[object] = []
+    window.worker.run_done.connect(runs.append)
+    window.replicates.setValue(1)
+    window.acquire()
+    until(qtbot, lambda: runs and idle(window), timeout=180_000)
+    whole = log.read_text(encoding="utf-8")
+    assert whole.startswith(after_arm[:200]), "the acquisition emptied the send's log"
+    assert "TBLSTRT" in whole
+
+
+def test_a_load_and_arm_does_not_arm_setup_strings_the_wire_never_saw(
+        window, tmp_path, qtbot):
+    """`wire_fingerprint` always carried the panes' setup strings, whatever the send
+    delivered, so a `setup=False` send recorded as armed a set of strings the box may
+    never have had. Latent on the day; found reading the code afterwards (task 56)."""
+    load_into(window, tmp_path, make_method())
+    until(qtbot, lambda: window.worker.boxes and idle(window))
+    window.send(setup=False)
+    until(qtbot, lambda: idle(window) and window._armed)
+
+    method = window.build_method()
+    assert window._armed[0][1] is None, "the setup phase was recorded as sent"
+    assert matches_wire(window._armed, method)
+
+    # The table is compared exactly: it is what an acquisition starts against, and a
+    # pane edited after the send is a table the box is not holding.
+    window.panes[BOX].set_text(window.panes[BOX].text().replace("500:B:0", "501:B:0"))
+    window.panes[BOX].reparse()
+    assert not matches_wire(window._armed, window.build_method())
+
+
+def test_a_full_send_arms_every_phase_including_setup(window, tmp_path, qtbot):
+    """The other half of the same rule: what a `Send setup` put on the wire is compared
+    in full, so an edited setup line still greys Acquire out."""
+    load_into(window, tmp_path, make_method())
+    until(qtbot, lambda: window.worker.boxes and idle(window))
+    window.send(setup=True)
+    until(qtbot, lambda: idle(window) and window._armed)
+    assert window._armed[0][1] == ("STBLCLK,EXT", "STBLTRG,POS")
+    window.panes[BOX].set_text("SDCB,1,12.0\n\n" + window.panes[BOX].text())
+    window.panes[BOX].reparse()
+    assert not matches_wire(window._armed, window.build_method())
+
+
+def test_a_box_with_an_empty_pane_is_not_a_box_the_method_names(
+        window, tmp_path, qtbot):
+    """The launch scan gives every box it finds a pane, and a pane used to become a
+    `BoxMethod` whether or not anything was written in it -- so the send read forty
+    round trips of state off the rack's fourth box, which no method on this instrument
+    names (found at the instrument, 2026-09-17; task 56)."""
+    load_into(window, tmp_path, make_method())
+    until(qtbot, lambda: window.worker.boxes and idle(window))
+    window._ensure_panes([BOX, "visitor"])
+    window.panes["visitor"].set_text("# nothing is declared here\n")
+    window.panes["visitor"].reparse()
+
+    named = [entry.name for entry in window.build_method().boxes]
+    assert named == [BOX], "a pane with no commands in it became a box of the method"
+
+    # A line that is a command makes it one, with nothing else to press.
+    window.panes["visitor"].set_text("SDCB,1,12.0\n")
+    window.panes["visitor"].reparse()
+    assert "visitor" in [entry.name for entry in window.build_method().boxes]
+
+
+def test_the_replicate_spinner_carries_its_own_label(window):
+    """"Replicates" sat in the Files group with no widget beside it for the whole of the
+    2026-09-17 sitting, the spinner being over by Acquire (task 56)."""
+    assert window.replicates.prefix() == "replicates: "
+    labels = [window.findChildren(type(window.stem))]
+    assert labels  # the Files group still has its other rows
 
 
 def test_stop_ends_a_series_after_the_current_repetition(window, tmp_path, qtbot):

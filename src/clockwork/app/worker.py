@@ -86,6 +86,7 @@ __all__ = [
     "StartConsole",
     "Worker",
     "fake_rack",
+    "matches_wire",
     "wire_fingerprint",
 ]
 
@@ -256,18 +257,52 @@ class SendResult:
     """
 
 
-def wire_fingerprint(method: Method) -> tuple:
+def wire_fingerprint(method: Method, *, setup: bool = True) -> tuple:
     """What a send would put on each box, in a form two methods can be compared by.
 
     The phases and the analog declarations, and nothing else. Deliberately not
     `method.stamp()`'s hash, which covers the whole document including `file_stem` --
     that changes on every acquisition, so an arming would expire the moment the counter
     moved, which is exactly when it is still good.
+
+    **`setup=False` leaves the setup strings out, because that send does not deliver
+    them.** A `Load and arm` sends `load` and `arm` and nothing else, so a fingerprint
+    that carried the panes' setup lines would record as armed a set of strings the wire
+    never saw, and Acquire would go green on a box whose setup is whatever the last
+    method left it at. The recorded tuple holds `None` there instead, and `matches_wire`
+    declines to compare it -- which is the truthful answer, since a trainee who presses
+    Load and arm has said the box already has its setup and clockwork has no reading that
+    either confirms or denies it. Latent on 2026-09-17, found reading the code afterwards
+    (lab record, task 56).
     """
     return tuple(
-        (entry.name, tuple(entry.setup), tuple(entry.load), tuple(entry.arm),
+        (entry.name, tuple(entry.setup) if setup else None,
+         tuple(entry.load), tuple(entry.arm),
          tuple(entry.dc_bias), tuple(entry.rf))
         for entry in method.boxes
+    )
+
+
+def matches_wire(armed: tuple, method: Method) -> bool:
+    """Whether the panes still say what a recorded send actually put on the wire.
+
+    Not `==` against a fresh fingerprint, because a `setup=False` send records `None`
+    for the phase it did not deliver and a phase that was never sent cannot have
+    changed since. Everything else is compared exactly: the table in the box and the
+    mode it was left in are what an acquisition starts against, and a pane edited after
+    the send is a table the box is not holding.
+    """
+    if not armed:
+        return False
+    now = wire_fingerprint(method)
+    if len(armed) != len(now):
+        return False
+    # `strict` on both: the lengths were compared above and a box-count or field-count
+    # mismatch that got past that is a bug here, not a method to be judged.
+    return all(
+        all(was is None or was == this
+            for was, this in zip(before, after, strict=True))
+        for before, after in zip(armed, now, strict=True)
     )
 
 
@@ -282,6 +317,11 @@ class Mailbox:
     lines through a widget that can show a number instead. So a `BatchSeen` that lands
     on top of another `BatchSeen` replaces it -- that is the single slot -- and every
     other event queues behind whatever is already there.
+
+    **A collapsed event has to carry absolute state**, which is why `BatchSeen` reports
+    the scans its frame has published rather than the scans in its own batch: what
+    survives a collapse must say as much as everything it replaced, or the progress bar
+    it feeds counts only the batches that happened to be drawn (task 56).
 
     Bounded, because the one failure this must not have is a run that fills memory
     because the window stopped draining: past `limit` the oldest events go and a note
@@ -406,8 +446,26 @@ class Worker(QThread):
         self._stop = threading.Event()
         self._stop_reason = ""
         self._setup_log: tuple[str, str] | None = None
-        """`(directory, stem)` of the send log that holds the last setup send, so an
-        acquisition under the same stem appends to it rather than overwriting it."""
+        """`(directory, stem)` of the send log that holds the last setup send.
+
+        Only for the sentence a replicate's own log carries, saying where the strings it
+        did not re-send went. What decides whether a log is appended to is `_send_log`,
+        which is every send and not only a setup one."""
+
+        self._send_log: tuple[str, str] | None = None
+        """`(directory, stem)` of the last send log this worker opened, of any kind.
+
+        The one thing that decides `append`. A send used to open its log `append=False`
+        unconditionally, so a **Load and arm destroyed the Send setup log that preceded
+        it under the same stem** -- and the 2026-09-17 sitting then read the emptied file
+        and reported that the CLOCK `setup` had never been sent, on the strength of
+        which it was sent again. It had gone out before every CLOCK series that
+        afternoon, which the transcripts, which append, said plainly. A stem is a piece
+        of work and its send log is that work's record, so everything done under one
+        stem is added to it and only a new stem starts a new file (lab record, task 56).
+
+        The rule that bought stands after the fix: **"was this string ever sent" is a
+        transcript question and never a send-log one.**"""
 
         self._last_run: Run | None = None
         self.start()
@@ -612,7 +670,11 @@ class Worker(QThread):
                               job.instrument_path, job.conditions)
         started = time.perf_counter()
         directory, stem = job.directory or os.getcwd(), job.stem
-        with self._logs(directory, stem, header, append=False) as paths:
+        append = self._send_log == (directory, stem)
+        # Before the work and not after it, so a send that raises part way through does
+        # not leave the next one free to overwrite what it managed to write.
+        self._send_log = (directory, stem)
+        with self._logs(directory, stem, header, append=append) as paths:
             snapshot = send_phases(
                 method, self.boxes, setup=job.setup, progress=self.mailbox.put,
                 conditions=job.conditions, listings=self.listings,
@@ -623,7 +685,7 @@ class Worker(QThread):
         return SendResult(snapshot=snapshot, setup=job.setup, send_log=paths[1],
                           transcript_path=paths[0],
                           seconds=time.perf_counter() - started,
-                          armed=wire_fingerprint(method))
+                          armed=wire_fingerprint(method, setup=job.setup))
 
     # -- acquiring -----------------------------------------------------------
 
@@ -703,7 +765,7 @@ class Worker(QThread):
                     run = self._one_run(
                         method, job, console, stream, width, directory, stem,
                         replicate=replicate,
-                        first_log=self._setup_log if not replicate else None,
+                        first_log=self._send_log if not replicate else None,
                         prologue=prologue if index == 0 else None,
                     )
                     runs.append(run)
@@ -757,8 +819,15 @@ class Worker(QThread):
                               job.instrument_path, job.conditions)
         # A replicate re-sends neither `setup` nor `load`, so its send log carries its
         # reset and start lists and a line saying where the others went -- which is how
-        # the bench script's replicate logs read and what makes them findable.
+        # the bench script's replicate logs read and what makes them findable. Its stem
+        # is its own, so `first_log` never matches and it opens a file of its own.
+        #
+        # `first_log` is the last send log of any kind and not only the last *setup* one
+        # (`_send_log`): a queue row with `setup` unchecked sends load and arm under this
+        # stem and then acquires under it, and matching on the setup log alone made the
+        # acquisition truncate the load-and-arm log it had just written (task 56).
         append = first_log is not None and first_log == (directory, stem)
+        self._send_log = (directory, stem)
         if replicate and self._setup_log is not None:
             header += ("\nthis is a replicate: its method's setup, load and arm strings "
                        f"went in {transcript.send_log_name(self._setup_log[1])} and were "

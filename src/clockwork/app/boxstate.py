@@ -20,6 +20,16 @@ under an external clock is an uninitialised local and is not shown as a frequenc
 And a two-getter `read_sequencer` updates the sequencer rows and nothing else, so a
 panel refreshed during a run says which of its rows are minutes old.
 
+**A mark compares what the method asked for with what the box can give.** An ARB
+module's waveform frequency comes off an integer divider, so `SWFREQ,n,15000` is
+acknowledged and read back as 14914 (§6.2), and a panel that compared the two strings
+marked **eight settings on each ARB box as disagreeing on every run** -- the standing
+false alarm decision 6 was written to avoid, and a warning that fires every time is a
+warning nobody reads. Four of the eight were the frequency and four were `SWFVRNG,n,15`
+against a box that answers in volts to two places. Numbers are compared as numbers here
+and the frequency against `arb_frequency`, so `DIFFERS` means a module is holding
+something nobody asked it for (lab record, task 56).
+
 Nothing here imports Qt, so `tools/check_public.py` exercises the whole judgement on a
 clone with no display.
 """
@@ -36,8 +46,11 @@ from ..acq.loop import (
 from ..method import BoxMethod, declared_commands, is_comment
 from ..mips import (
     ARB_MODULE_GETTERS,
+    ARB_POINTS_PER_PERIOD,
     COMPRESSOR_GETTERS,
     BoxState,
+    arb_frequency,
+    arb_points_per_period,
     declared_settings,
 )
 
@@ -166,9 +179,36 @@ class Reading:
     when: str = ""
     sequencer: BoxState | None = None
     sequencer_when: str = ""
+    converting: BoxState | None = None
+    """The last reading whose DC bias monitors were actually converting, kept when a
+    later one supersedes it.
+
+    A reading taken with the box armed is a true reading whose monitors mean nothing:
+    the 100 ms service task that maintains them does not run in table mode (§8.2, task
+    43). So pressing Read state during a run replaced the between-`setup`-and-`load`
+    reading -- the one taken while the box was still local, and the only one whose
+    monitors were a measurement of anything -- with one where they are frozen. Every
+    statement the panel then made was true and the evidence had gone. It is kept here
+    instead: the rows carry the newest setpoints and the monitor beside each falls back,
+    dated, to the last figures that were real (lab record, tasks 51 and 56)."""
+
+    converting_when: str = ""
 
     def __bool__(self) -> bool:
         return self.state is not None or self.sequencer is not None
+
+    def with_state(self, state: BoxState, when: str) -> Reading:
+        """This box's panel after a whole-state reading, keeping what it supersedes.
+
+        A reading replaces everything except the last converting monitors, which it
+        replaces only by converting itself. The sequencer overlay goes, because a whole
+        reading is a whole reading and the two getters it covers are part of it.
+        """
+        if state.monitors_converting:
+            return Reading(state=state, when=when, converting=state,
+                           converting_when=when)
+        return Reading(state=state, when=when, converting=self.converting,
+                       converting_when=self.converting_when)
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,7 +244,7 @@ def state_table(reading: Reading, box: BoxMethod | None = None) -> StateTable:
     sections.append(_sequencer(reading, box))
     if state is not None:
         sections += [
-            _dc_bias(state, declared),
+            _dc_bias(state, declared, reading),
             _rf(state, declared),
             _arb(state, declared),
         ]
@@ -326,19 +366,27 @@ def _clock_source(box: BoxMethod | None) -> str:
     return found
 
 
-def _dc_bias(state: BoxState, declared: dict[str, dict[int, str]]) -> Section:
+def _dc_bias(state: BoxState, declared: dict[str, dict[int, str]],
+             reading: Reading) -> Section:
     """One row per channel: the setpoint, with the monitor as its note.
 
     The setpoint is what the box says it was told and is what a declaration is compared
     against; the monitor is a measurement of the output through the board's calibration
     and is a different number on a healthy channel. In table mode it is neither, and
     the note says so instead of showing it (§8.2, lab record, task 43).
+
+    **A frozen reading falls back to the last live one rather than to nothing.** The
+    setpoints are always this reading's -- they are what the box says it was told, and a
+    box in table mode answers that truthfully -- and only the monitor beside each falls
+    back, dated, to the last reading taken while they were converting
+    (`Reading.converting`, task 56).
     """
     setpoints = state.dc_bias_setpoints
     if not setpoints:
         return Section("DC bias")
     wanted = declared.get("GDCB", {})
     converting = state.monitors_converting
+    earlier = None if converting or reading.converting is state else reading.converting
     rows = []
     for index, volts in enumerate(setpoints):
         channel = index + 1
@@ -351,12 +399,10 @@ def _dc_bias(state: BoxState, declared: dict[str, dict[int, str]]) -> Section:
             mark = AGREES if _same_number(volts, asked,
                                           absolute=DC_BIAS_TOLERANCE_V) else DIFFERS
         monitor = state.dc_bias_readback(channel)
-        if not converting:
-            note = "not converting in table mode"
-        elif monitor is None:
-            note = ""
+        if converting:
+            note = "" if monitor is None else f"monitors {monitor:.2f} V"
         else:
-            note = f"monitors {monitor:.2f} V"
+            note = _kept_monitor(earlier, channel, reading.converting_when)
         rows.append(Row(f"channel {channel}", _render_volts(volts) + " V",
                         mark=mark, declared=shown, note=note, getter="GDCBALL"))
     note = ""
@@ -365,7 +411,22 @@ def _dc_bias(state: BoxState, declared: dict[str, dict[int, str]]) -> Section:
                 f"does not run in table mode, and this box answered {state.table_status}. "
                 "What they hold is wherever the box's filter had got to when it armed, "
                 "which is neither the output nor the last true reading (§8.2).")
+        if earlier is not None:
+            note += (" The figures on the rows are the last reading taken while they "
+                     f"were converting ({reading.converting_when}), kept because a "
+                     "refresh with the box armed would otherwise replace the only "
+                     "measurement of these outputs there is.")
     return Section("DC bias", tuple(rows), note=note)
+
+
+def _kept_monitor(earlier: BoxState | None, channel: int, when: str) -> str:
+    """The monitor note for a channel whose own reading is frozen."""
+    if earlier is None:
+        return "not converting in table mode"
+    monitor = earlier.dc_bias_readback(channel)
+    if monitor is None:
+        return "not converting in table mode"
+    return f"monitored {monitor:.2f} V when last live, {when}"
 
 
 def _rf(state: BoxState, declared: dict[str, dict[int, str]]) -> Section:
@@ -424,13 +485,57 @@ def _arb(state: BoxState, declared: dict[str, dict[int, str]]) -> Section:
             if getter not in answers:
                 continue
             asked = declared.get(getter, {}).get(module)
+            if getter == "GWFREQ":
+                rows.append(_frequency_row(module, answers, asked))
+                continue
             mark = FOUND if asked is None else (
-                AGREES if _same_text(answers[getter], asked) else DIFFERS)
+                # As numbers where both are numbers, falling back to text: `SWFVRNG,n,15`
+                # is answered in volts to two places and FWD is answered FWD.
+                AGREES if _same_number(answers[getter], asked) else DIFFERS)
             rows.append(Row(
                 f"module {module} {_ARB_LABELS.get(getter, getter[1:])}",
                 answers[getter], mark=mark, declared=asked or "",
                 getter=f"{getter},{module}"))
     return Section("ARB", tuple(rows))
+
+
+def _frequency_row(module: int, answers: dict[str, str], asked: str | None) -> Row:
+    """One module's waveform frequency, marked against what its divider can produce.
+
+    The divider is the whole of this: a request the module cannot hit is quantised down
+    to the nearest step it can, so `GWFREQ` answering something other than `SWFREQ` sent
+    it is the ordinary case and not a fault (§6.2, `clockwork.mips.arb_frequency`).
+
+    Read at `ARB_POINTS_PER_PERIOD` first, which every module on this instrument is at.
+    A module at some other points-per-period is not marked as disagreeing either: the
+    reading is back-solved, and a points-per-period that explains it makes the row agree
+    and says which one it must be at -- `SARBPPP` is not read, and a row that guessed
+    wrong about it would be the false alarm back under another name.
+    """
+    label = f"module {module} {_ARB_LABELS['GWFREQ']}"
+    reading = answers["GWFREQ"]
+    if asked is None:
+        return Row(label, reading, mark=FOUND, getter=f"GWFREQ,{module}")
+    mode = answers.get("GARBMODE", "TWAVE")
+    requested = _as_float(asked)
+    achieved = None if requested is None else arb_frequency(requested, mode=mode)
+    note, mark = "", DIFFERS
+    if achieved is not None and _same_number(reading, str(achieved)):
+        mark = AGREES
+        if str(achieved) != asked.strip():
+            note = (f"{asked} is not a step the divider can make; {achieved} Hz is the "
+                    "nearest it can, and is what the module is running")
+    elif requested is not None:
+        found = _as_float(reading)
+        period = None if found is None else arb_points_per_period(
+            requested, found, mode=mode)
+        if period is not None:
+            mark = AGREES
+            note = (f"{asked} quantises to {reading} Hz at {period} points per period, "
+                    f"so this module is not at the {ARB_POINTS_PER_PERIOD} the rest of "
+                    "the rack is")
+    return Row(label, reading, mark=mark, declared=asked, note=note,
+               getter=f"GWFREQ,{module}")
 
 
 def _unread(state: BoxState) -> Section:

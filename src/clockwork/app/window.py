@@ -69,8 +69,9 @@ from ..method import (
     Metadata,
     Method,
     RfChannel,
+    is_comment,
 )
-from ..method.text import render_pane, split_trainee_file, start_order
+from ..method.text import PaneResult, render_pane, split_trainee_file, start_order
 from .boxstate import Reading
 from .console_panel import ConsoleBar, ConsoleSettings
 from .launch import open_data_file, open_path
@@ -93,6 +94,7 @@ from .worker import (
     SendResult,
     StartConsole,
     Worker,
+    matches_wire,
     wire_fingerprint,
 )
 
@@ -143,6 +145,10 @@ class MainWindow(QMainWindow):
         self._job: Job | None = None
         self._armed: tuple = ()
         """What the last successful send put on the boxes (`wire_fingerprint`).
+
+        Read with `matches_wire` and never with `==`: a Load and arm records `None` for
+        the setup phase it did not send, and a phase the wire never saw is not one the
+        panes can have changed since (task 56).
 
         `run_acquisition` expects the boxes to be loaded and armed already, so this is
         what lets the window say "send first" rather than let a trainee watch three
@@ -335,7 +341,9 @@ class MainWindow(QMainWindow):
         files_form.addRow("Output directory", out_row)
         files_form.addRow("Initials", self.initials)
         files_form.addRow("Name", _row(self.stem, rename))
-        files_form.addRow("Replicates", self.replicates)
+        # Not a row of its own: the spinner itself lives beside Acquire, where the button
+        # that consumes it is, and the label left behind here sat in the Files group with
+        # nothing next to it for the whole of the 2026-09-17 sitting (task 56).
         files_form.addRow("Conditions", self.conditions)
 
         # -- the instrument document ------------------------------------
@@ -395,6 +403,12 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.find_button)
         grid.addWidget(self.setup_button)
         grid.addWidget(self.arm_button)
+        # The label goes with the widget. It used to sit in the Files group, a form row
+        # whose field was over here beside the button that consumes it, and the sitting
+        # of 2026-09-17 spent a day looking at the word "Replicates" with nothing next to
+        # it (task 56). A prefix rather than a `QLabel`, so the number and the word are
+        # one thing and cannot be separated again.
+        self.replicates.setPrefix("replicates: ")
         grid.addWidget(_row(self.acquire_button, self.replicates))
         grid.addWidget(self.replicate_button)
         grid.addWidget(self.stop_button)
@@ -543,8 +557,18 @@ class MainWindow(QMainWindow):
         boxes: list[BoxMethod] = []
         for name, result in results.items():
             dc_bias, rf = self.declared.get(name, ((), ()))
-            boxes.append(result.box_method(
-                self.ports.get(name, ""), dc_bias=dc_bias, rf=rf))
+            entry = result.box_method(
+                self.ports.get(name, ""), dc_bias=dc_bias, rf=rf)
+            # A pane is not a declaration. The launch scan gives every box it finds a
+            # pane, so the rack's fourth box -- which no method on this instrument names
+            # -- became a `BoxMethod` with five empty phases, and `send_phases` spent
+            # forty round trips reading the state of a box nothing was about to be sent
+            # to (found at the instrument, 2026-09-17; task 56). The method names the
+            # boxes it has strings or analog declarations for; the others keep their
+            # panes, and their state panels say "left as found" about everything, which
+            # is exactly what is true of them.
+            if _names_something(entry, result):
+                boxes.append(entry)
             warnings += list(result.warnings)
             for line in result.unplaced:
                 warnings.append(
@@ -610,12 +634,11 @@ class MainWindow(QMainWindow):
         # so a method that has not been sent, or one edited since it was, would spend
         # its frames having `TBLSTRT` refused for "not in table mode". Said here rather
         # than discovered three frames in.
-        now = wire_fingerprint(method) if method is not None else ()
         if not self._armed:
             not_armed = ["the boxes have not been loaded and armed with this method. "
                          "Send setup, or Load and arm for boxes that have had their "
                          "setup since power-up."]
-        elif now != self._armed:
+        elif method is None or not matches_wire(self._armed, method):
             not_armed = ["the panes have changed since the boxes were armed, so the "
                          "table in the box is not the one on screen. Load and arm "
                          "again."]
@@ -1177,14 +1200,17 @@ class MainWindow(QMainWindow):
         A two-getter `read_sequencer` updates the table engine and leaves the rest of
         the panel saying when *it* was read, because two commands were sent and sixty
         rows were not (task 43). Every other reading replaces the whole thing and drops
-        the sequencer overlay, which is part of it again.
+        the sequencer overlay, which is part of it again -- except the last converting
+        DC bias monitors, which `Reading.with_state` keeps, because a refresh taken with
+        the boxes armed is a true reading that destroys the only measurement of their
+        outputs there is (task 56).
         """
         stamp = f"{when}, at {time.strftime('%H:%M:%S')}"
         held = self.readings.get(name, Reading())
         if sequencer:
             reading = replace(held, sequencer=state, sequencer_when=stamp)
         else:
-            reading = Reading(state=state, when=stamp)
+            reading = held.with_state(state, stamp)
         self.readings[name] = reading
         pane = self.panes.get(name)
         if pane is not None:
@@ -1352,6 +1378,20 @@ class MainWindow(QMainWindow):
 
 
 # -- layout helpers ------------------------------------------------------------------
+
+
+def _names_something(entry: BoxMethod, result: PaneResult) -> bool:
+    """Whether this pane declares anything at all for its box.
+
+    A comment is not a declaration and neither is an empty pane. `start` and `reset` are
+    counted even though they are not phases a send delivers: a box that only appears in
+    the start list is still a box the method drives, and one dropped from `method.boxes`
+    would lose its readback and its stamp in the file.
+    """
+    return bool(
+        [command for command in entry.setup + entry.load + entry.arm
+         if not is_comment(command)]
+        or entry.dc_bias or entry.rf or result.start or result.reset)
 
 
 def _row(*widgets: QWidget) -> QWidget:

@@ -42,6 +42,7 @@ import time
 from typing import Protocol, runtime_checkable
 
 from . import table as _table
+from .arb import arb_frequency
 from .wire import DEFAULT_BAUDRATE, RING_BUFFER_BYTES, error_text
 
 
@@ -1076,7 +1077,7 @@ class FakeBox:
                 module, value = self._arb_module(argument)
                 if module is not None:
                     if name in _ARB_GETTABLE:
-                        self.arb[module][name] = value
+                        self.arb[module][name] = self._arb_stored(name, value, module)
                     self._ack()
             return True
 
@@ -1088,6 +1089,26 @@ class FakeBox:
             return True
 
         return False
+
+    def _arb_stored(self, name: str, value: str, module: int) -> str:
+        """What a module actually holds after being set to `value`, which is not always
+        `value`.
+
+        A waveform frequency comes off an integer divider, so `SWFREQ,n,15000` is
+        acknowledged and read back as 14914 (wire format 6.2). Modelled here rather than
+        echoed, because a stand-in that answers whatever it was told is a stand-in no
+        desk run can meet the eight standing disagreements on, which is how they reached
+        the instrument in the first place (lab record, task 56).
+        """
+        if name != "SWFREQ":
+            return value
+        try:
+            requested = float(value)
+        except ValueError:
+            return value
+        achieved = arb_frequency(
+            requested, mode=self.arb[module].get("SARBMODE", "TWAVE"))
+        return value if achieved is None else str(achieved)
 
     def describe_error(self) -> str:
         """The last error as words, for a test's failure message."""

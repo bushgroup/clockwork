@@ -465,7 +465,9 @@ def main() -> int:
         "an ARB setup block is accepted and reads back "
         f"({arb.command('GWFREQ,1', value=True)} Hz, "
         f"{arb.command('GALTWFM,1', value=True)})",
-        arb.command("GWFREQ,1", value=True) == "15000"
+        # 14914 and not 15000: a module's waveform clock is an integer divider and
+        # `GWFREQ` reports what it could make of the request (wire format 6.2).
+        arb.command("GWFREQ,1", value=True) == "14914"
         and arb.command("GALTWFM,1", value=True) == "REV",
     )
     table = "J10[HRsm1CD12m1ND4.0272r]100"

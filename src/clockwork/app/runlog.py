@@ -3,11 +3,23 @@
 Two things a trainee watches while a method frame runs, and the design of both comes
 from the instrument days rather than from taste.
 
-**The bar counts repetitions in place.** A repetition is about a second, so a bar over a
-method frame's hundred of them moves visibly and a line appended per repetition would
-push everything worth reading off the top within two minutes. No estimate of the time
-remaining is shown: the cost of a repetition is occupancy-dependent, so the first one
-does not predict the hundredth (lab record, task 34).
+**The bar counts scans, and the caption counts repetitions.** It ranged over
+repetitions until 2026-09-17, on the assumption that a repetition is about a second and
+a bar over a hundred of them moves visibly. That is true of a `per_repetition` method
+and wrong by 65x of a `single_frame` one, which puts its hundred accumulations inside
+the sequencer's own table and asks the console for **one** frame: the range was 1,
+`FrameBegun` filled it, and the bar sat at 100 % with a frozen caption for the whole
+65 s while a healthy CLOCK run went on behind it. Matt, watching it: *"I'm trying to
+acquire, but I'm not sure if anything is happening."* So the bar now ranges over the
+scans the whole run will publish -- two million for the detection-response method,
+five hundred thousand for the CLOCK one -- and advances on `BatchSeen`, which arrives
+about fifteen times a second in both. The caption still reads `repetition N of M`,
+because that is the number a trainee matches against the method (lab record, task 56).
+
+Nothing is ever said about the time remaining: the cost of a repetition is
+occupancy-dependent, so the first one does not predict the hundredth (lab record,
+task 34). The one wait that *is* estimated is the fold, which is silent for minutes and
+whose cost is the file's size rather than its frame count (`clockwork.acq.Folding`).
 
 **Left as found is collapsed, and nothing else is.** A clean golden run emits ten
 `left as found` lines by design -- the ARB module settings the method does not name --
@@ -19,6 +31,15 @@ disagreement is about *this* run's settings, and `DC bias monitors were not comp
 the sentence that stops a trainee reading a frozen monitor as a fault (lab record,
 task 43).
 
+**Two groups per box, and one of them opens itself.** A setting the method names on one
+module of a box and leaves on another is not the same fact as one the method has no
+opinion about anywhere, and the grouping used to hide the first inside the second: on
+2026-09-15 three settings were inherited rather than declared, the eleventh line was
+invisible among the ten, and the one that mattered -- `SWFDIR`/`SALTWFM` left `REV` --
+cost a run that showed no ions at all, which four strings then recovered a 73,000-fold
+signal increase from. So a line carrying `DECLARED_ELSEWHERE` goes in its own row, shown
+open, and the rest collapse as before (Matt, 2026-09-18; lab record, task 56).
+
 **A frame that ended on silence is surfaced.** `ended_by == "silence"` means the frame
 stopped because nothing had arrived for three seconds rather than because it counted
 out, which is the one per-repetition outcome worth interrupting a trainee for. A frame
@@ -28,7 +49,7 @@ that counted out is not logged at all; the bar already said so.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor, QFont
@@ -45,11 +66,13 @@ from PySide6.QtWidgets import (
 )
 
 from ..acq import (
+    DECLARED_ELSEWHERE,
     BatchSeen,
     BoxReady,
     BoxSaid,
     Event,
     Folded,
+    Folding,
     FrameBegun,
     FrameEnded,
     GateChecked,
@@ -60,7 +83,8 @@ from ..acq import (
     Warned,
 )
 
-__all__ = ["LEFT_AS_FOUND", "NEVER_GROUPED", "RunPanel", "is_left_as_found"]
+__all__ = ["LEFT_AS_FOUND", "NEVER_GROUPED", "RunPanel", "is_left_as_found",
+           "names_it_elsewhere"]
 
 LEFT_AS_FOUND = " is left as found on module"
 """The phrase `clockwork.acq.loop.left_as_found` builds every one of its lines around.
@@ -90,15 +114,58 @@ def is_left_as_found(message: str) -> bool:
     return LEFT_AS_FOUND in message
 
 
+def names_it_elsewhere(message: str) -> bool:
+    """Whether this left-as-found line is about a setting the method does name.
+
+    On another module of the same box, which is the interesting case: a method with an
+    opinion about module 1's direction and none about module 2's is a method with a gap
+    in it, where one that names no direction anywhere is simply not about direction
+    (`clockwork.acq.left_as_found`).
+    """
+    return DECLARED_ELSEWHERE in message
+
+
 @dataclass(frozen=True, slots=True)
 class Progress:
-    """Where a run has got to, for the bar and its caption."""
+    """Where a run has got to, for the bar and its caption.
+
+    The bar's two numbers are scans and the caption's two are repetitions, which is the
+    whole of the fix of task 56: one method frame of a `single_frame` method is one
+    repetition and half a million scans, and only one of those two counts is a thing a
+    bar can move over.
+    """
 
     method_frame: int = 0
     frames: int = 0
     repetition: int = 0
     of: int = 0
     scans: int = 0
+    """Scans published across the whole run so far: the bar's value."""
+
+    total: int = 0
+    """Scans the run publishes if every frame counts out: the bar's maximum."""
+
+    frame_length: int = 0
+    """One console frame's scans, so a frame that has begun can put the bar at its own
+    start before its first batch arrives."""
+
+    frame_number: int = 0
+    """Which console frame of the run is running, counted across method frames. What
+    `scans` is measured from, since a batch says how far into *its* frame it is."""
+
+    def at_batch(self, scans_so_far: int) -> Progress:
+        """This run, with the bar moved to a batch's own count of its frame.
+
+        Absolute rather than added up, because the window's mailbox collapses
+        consecutive `BatchSeen`s into one slot and a bar built by accumulating deltas
+        would drift low by everything it never drew (`clockwork.app.worker.Mailbox`,
+        `clockwork.acq.BatchSeen.scans_so_far`).
+        """
+        before = max(0, self.frame_number - 1) * self.frame_length
+        # Clamped, because scans keep arriving after a frame's own `finished` -- 500 on
+        # every frame of the 2026-09-17 series -- and a bar past its maximum is a bar Qt
+        # draws full while the run is not.
+        return replace(self, scans=min(self.total, before + scans_so_far))
 
     @property
     def text(self) -> str:
@@ -191,18 +258,30 @@ class RunPanel(QWidget):
     def show(self, event: Event) -> None:  # noqa: C901 -- one branch per event type
         """Render one event, or decide it is not worth a line."""
         if isinstance(event, BatchSeen):
-            return  # the bar's caption carries it; a line per batch would bury the log
+            # No line -- one per batch would bury the log at fifteen a second -- but this
+            # is the only thing that moves inside a frame, and inside a `single_frame`
+            # method's frame it is the only thing that moves at all.
+            self.progress = self.progress.at_batch(event.scans_so_far)
+            self.bar.setValue(self.progress.scans)
+            return
         if isinstance(event, RunBegun):
-            self.progress = Progress(frames=event.frames, of=event.console_frames)
-            self.bar.setRange(0, max(1, event.frames * event.console_frames))
+            total = event.frames * event.console_frames * event.frame_length
+            self.progress = Progress(frames=event.frames, of=event.console_frames,
+                                     total=total, frame_length=event.frame_length)
+            self.bar.setRange(0, max(1, total))
             self.bar.setValue(0)
             self.say(event.text)
             return
         if isinstance(event, FrameBegun):
-            self.progress = Progress(
+            self.progress = replace(
+                self.progress,
                 method_frame=event.method_frame, frames=self.progress.frames or 1,
-                repetition=event.repetition, of=event.of)
-            self.bar.setValue(event.frame_number)
+                repetition=event.repetition, of=event.of,
+                frame_number=event.frame_number)
+            # To this frame's own start, so a frame whose batches are still coming does
+            # not leave the bar where the last one's overrun put it.
+            self.progress = self.progress.at_batch(0)
+            self.bar.setValue(self.progress.scans)
             self.caption.setText(self.progress.text)
             return
         if isinstance(event, FrameEnded):
@@ -226,7 +305,7 @@ class RunPanel(QWidget):
             if event.error is not None:
                 self.say(event.text, warn=True)
             return
-        if isinstance(event, (BoxReady, GateChecked, Folded, BoxSaid)):
+        if isinstance(event, (BoxReady, GateChecked, Folding, Folded, BoxSaid)):
             self.say(event.text)
             return
         self.say(event.text)
@@ -259,16 +338,24 @@ class RunPanel(QWidget):
             self.say(message, warn=True)
             return
         box = message.split(" ", 1)[0]
-        parent = self._groups.get(box)
+        gap = names_it_elsewhere(message)
+        key = f"{box}\ngap" if gap else box
+        parent = self._groups.get(key)
         if parent is None:
             parent = QTreeWidgetItem([self._stamp(), ""])
             _colour(parent, self._warn_colour())
             self.log.addTopLevelItem(parent)
-            self._groups[box] = parent
+            self._groups[key] = parent
+            # Open from the first line rather than on click. A group that hides a
+            # setting the method has an opinion about elsewhere is the log doing the
+            # thing the grouping cost the lab a run for (task 56).
+            parent.setExpanded(gap)
         parent.addChild(QTreeWidgetItem(["", message]))
         count = parent.childCount()
-        parent.setText(1, f"{box}: {count} setting{'s' if count > 1 else ''} left as "
-                          "found (click to expand)")
+        settings = f"{count} setting{'s' if count > 1 else ''}"
+        parent.setText(1, f"{box}: {settings} left as found that this method names on "
+                          "other modules" if gap else
+                          f"{box}: {settings} left as found (click to expand)")
         self._scroll(parent)
 
     # -- small helpers -------------------------------------------------------

@@ -170,6 +170,7 @@ __all__ = [
     "WHEN_BEFORE",
     "Warned",
     "cautions",
+    "DECLARED_ELSEWHERE",
     "declared_differences",
     "enable_witness",
     "left_as_found",
@@ -228,6 +229,15 @@ fractional: `SWFREQ` came back 0.57% below the 15000 asked for
 (lab record, task 13), and a head driven near 1 MHz has no business being
 compared to the hertz. 1% is wide enough for a quantised setting and far too
 narrow to hide a head left on the wrong band.
+"""
+
+DECLARED_ELSEWHERE = ", and the method declares it on module"
+"""The clause `left_as_found` adds to a setting the method names elsewhere on this box.
+
+The whole of the difference between the two kinds of left-as-found line, and it is a
+phrase because that is how a window tells one `Warned` from another
+(`clockwork.app.runlog.LEFT_AS_FOUND`). Plural is added after it, so the match holds for
+one module and for four.
 """
 
 RF_DRIVE_TOLERANCE_PCT = 0.05
@@ -386,6 +396,22 @@ produces a hundred in a row, none of which is distinguishable from a good frame 
 file it writes. So the first miss is a `Warned` and the second ends the run.
 """
 
+FOLD_MB_PER_S = 2.1
+"""Roughly how fast a fold reads the raw file, for the estimate `Folding` carries.
+
+One measurement, and it is the only one that matters: 2026-09-17's beam-on
+detection-response run folded 1,310.5 MB in 624.1 s, which is 2.1 MB a second (lab
+record, task 56). The mechanical control of the same shape -- the same hundred
+repetitions of the same twenty thousand scans, with no ion beam -- folded 1.1 MB in
+3.4 s, so a rate read off *it* would be 0.3 MB/s and a rate read off the frame count
+would be neither. What a fold costs is the data in the file.
+
+Deliberately coarse, and rendered as "about N minutes" (`_about`). It exists so that a
+trainee meeting ten minutes of silence knows to wait rather than force-quit, which needs
+the order of magnitude and nothing finer; a wrong estimate that is still the right order
+does that job and a spuriously precise one invites a stopwatch.
+"""
+
 
 # --- what goes wrong -----------------------------------------------------------------
 
@@ -417,9 +443,19 @@ class EnableGateError(AcqError):
 class Event:
     """Something the loop did, reported as it happened.
 
-    Handed to the `progress` callback on the loop's own thread, so a window's handler
-    posts it to the UI thread and returns. Every event carries a `text` fit for a status
-    line, and the fields behind it for anything that wants more.
+    Handed to the `progress` callback as it happens, so a window's handler posts it to
+    the UI thread and returns. Every event carries a `text` fit for a status line, and
+    the fields behind it for anything that wants more.
+
+    **A callback must be safe to call from more than one thread.** Every event but one
+    is reported on the loop's own thread; `Folding` is reported on the folding worker,
+    because the fold genuinely begins there and an event emitted where it was *submitted*
+    would say a fold had started while an earlier one still had the worker (`_fold`,
+    `_submit_deferred_fold`). The alternative was to leave the ten and a half minutes a
+    fold can take with nothing said about it at all, which is what cost the 2026-09-17
+    sitting a misdiagnosis. The bar is low and every caller already clears it -- a
+    `list.append`, a `logging` call, the window's locked mailbox -- and it is stated here
+    rather than assumed (lab record, task 56).
     """
 
     @property
@@ -633,11 +669,22 @@ class BoxSaid(Event):
 
 @dataclass(frozen=True, slots=True)
 class BatchSeen(Event):
-    """One published batch, while the frame it belongs to is still running."""
+    """One published batch, while the frame it belongs to is still running.
+
+    **Carries the frame's running total, not only this batch's count.** These arrive
+    about fifteen times a second and a caller is entitled to drop them -- the window's
+    mailbox collapses consecutive ones into a single slot on purpose -- so an event that
+    said only how many scans *this* batch held would let a progress bar built by adding
+    them up drift low by however many were collapsed away. `scans_so_far` is absolute,
+    so the last one to survive a collapse says as much as all of them would have
+    (lab record, task 56).
+    """
 
     method_frame: int
     repetition: int
     batch: Batch
+    scans_so_far: int = 0
+    """Scans this console frame has published, this batch included."""
 
     @property
     def text(self) -> str:
@@ -672,6 +719,38 @@ class FrameEnded(Event):
     @property
     def text(self) -> str:
         return self.record.text
+
+
+@dataclass(frozen=True, slots=True)
+class Folding(Event):
+    """A method frame's fold has started, on the folding thread. `Folded` ends it.
+
+    `ReadingBack`'s treatment for the other half of a run that goes quiet where the work
+    is. A fold of a beam-on detection-response file took **624 s** on 2026-09-17 and the
+    run log's last line through all of it was the final repetition, which read as a dead
+    process to the session watching and would read as one to a trainee -- who would
+    force-quit and lose a 1.3 GB raw file that has no second copy (lab record, task 56).
+
+    **The size is what predicts the wait, not the repetition count.** The same hundred
+    repetitions of the same length folded in 3.4 s with no beam and in 624.1 s with one,
+    because what a fold costs is the data in the file and not the number of frames over
+    it. So this carries the megabytes it is about to read, and `seconds` is an estimate
+    off `FOLD_MB_PER_S` rather than anything the frame count could have given.
+    """
+
+    method_frame: int
+    frames_folding: tuple[int, ...]
+    megabytes: float = 0.0
+    seconds: float = 0.0
+    """Roughly how long this is expected to take. An estimate, and said as one."""
+
+    @property
+    def text(self) -> str:
+        count = len(self.frames_folding)
+        return (f"frame {self.method_frame}: summing {count} "
+                f"repetition{'s' if count != 1 else ''} "
+                f"({self.megabytes:,.0f} MB) into the companion, "
+                f"{_about(self.seconds)}; the run log is quiet until it is done")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1304,6 +1383,15 @@ def left_as_found(box: BoxMethod, state: BoxState) -> list[str]:
     Returns one line per setting, naming the modules it was not set on and what
     they are holding. An empty list is a method that names every module's every
     setting, which neither golden method does.
+
+    **A line says whether the method names this setting on some other module of the
+    same box**, in the clause `DECLARED_ELSEWHERE` -- which is the difference between a
+    setting the method has no opinion about and one it has an opinion about on module 1
+    and not on module 2. The second is worth a trainee's eye and the first is the ten
+    lines a clean run emits, and a window that showed them alike taught people to stop
+    reading (Matt, 2026-09-18; task 56). A phrase rather than a field, because these
+    reach the window as `Warned` and the classification a window does on them is the
+    same substring match as the rest (`clockwork.app.runlog`).
     """
     modules = state.modules
     if not modules:
@@ -1313,14 +1401,20 @@ def left_as_found(box: BoxMethod, state: BoxState) -> list[str]:
         if not is_comment(command))
     lines: list[str] = []
     for getter in ARB_MODULE_GETTERS:
+        named = covered.get(getter, {})
         loose = [module for module in modules
-                 if module not in covered.get(getter, {})
-                 and getter in state.module(module)]
+                 if module not in named and getter in state.module(module)]
         if not loose:
             continue
         holding = ", ".join(f"{module}: {state.module(module)[getter]}" for module in loose)
-        lines.append(f"{box.name} {getter[1:]} is left as found on "
-                     f"module{'s' if len(loose) > 1 else ''} {holding}")
+        line = (f"{box.name} {getter[1:]} is left as found on "
+                f"module{'s' if len(loose) > 1 else ''} {holding}")
+        elsewhere = sorted(module for module in named if module in modules)
+        if elsewhere:
+            line += (f"{DECLARED_ELSEWHERE}"
+                     f"{'s' if len(elsewhere) > 1 else ''} "
+                     + ", ".join(str(module) for module in elsewhere))
+        lines.append(line)
     return lines
 
 
@@ -2027,6 +2121,15 @@ def _ignore(_: Event) -> None:
     """The progress callback a caller that wants none gets."""
 
 
+def _about(seconds: float) -> str:
+    """A wait, at the resolution a trainee deciding whether to wait can use."""
+    if seconds < 30:
+        return "a few seconds"
+    if seconds < 90:
+        return "about a minute"
+    return f"about {round(seconds / 60)} minutes"
+
+
 def _reporter(progress: Callable[[Event], None] | None) -> Callable[[Event], None]:
     """The caller's progress callback, with the transcript in front of it.
 
@@ -2088,6 +2191,9 @@ class _Loop:
     _folder: ThreadPoolExecutor | None = None
     _pending: list[Future[FoldRecord]] = field(default_factory=list)
     _fold_due: int | None = None
+    _folded_bytes: int = 0
+    """How much of the raw file previous folds have already read, for `Folding`'s
+    estimate. Touched only on the folding thread, which is a single worker."""
 
     # -- the run -----------------------------------------------------------------------
 
@@ -2230,7 +2336,8 @@ class _Loop:
 
         def on_batch(batch: Batch) -> None:
             seen.append(batch)
-            self.report(BatchSeen(method_frame, repetition, batch))
+            self.report(BatchSeen(method_frame, repetition, batch,
+                                  sum(each.scans for each in seen)))
 
         def release() -> None:
             self._check_first_gate(method_frame, repetition)
@@ -2661,6 +2768,14 @@ class _Loop:
         be redone from it afterwards, which is exactly the case `keep_raw` protects.
         """
         numbers = tuple(self.recording.frames_of(method_frame))
+        megabytes = self._unfolded_megabytes()
+        # Reported from here, on the folding thread, and not from `_submit_deferred_fold`
+        # on the loop's: the pool has one worker, so a fold submitted while an earlier
+        # one still holds it does not start when it is submitted, and an event saying it
+        # had would be the window inventing the one fact a trainee is reading it for.
+        # The contract this extends is stated on `Event`.
+        self.report(Folding(method_frame, numbers, megabytes,
+                            megabytes / FOLD_MB_PER_S))
         began = time.perf_counter()
         try:
             rows = self.recording.fold(method_frame)
@@ -2669,3 +2784,19 @@ class _Loop:
                               error=f"{type(exc).__name__}: {exc}")
         return FoldRecord(method_frame, numbers, rows=rows,
                           seconds=time.perf_counter() - began)
+
+    def _unfolded_megabytes(self) -> float:
+        """How much raw data this fold has to read: the file's growth since the last one.
+
+        Read off the file rather than derived from the frame count, because the count
+        does not predict a fold's cost and the bytes do (`Folding`, `FOLD_MB_PER_S`).
+        The console is still writing the file, so this is its size at the moment the
+        fold started and nothing more exact is available or wanted.
+        """
+        try:
+            size = os.path.getsize(self.recording.raw_path)
+        except OSError:
+            return 0.0
+        grown = max(0, size - self._folded_bytes)
+        self._folded_bytes = size
+        return grown / 1e6

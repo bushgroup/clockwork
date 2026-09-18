@@ -1069,6 +1069,40 @@ Power-up state: modules on a common clock are **not** phase-aligned
 until synced. Issue `ARBSYNC` (or pulse the sync line) after enabling
 waveforms and before anything timing-sensitive.
 
+#### `SWFREQ` is quantized, and `GWFREQ` reports the quantized value
+
+A module cannot produce an arbitrary waveform frequency. Its output clock
+comes from an integer divider off the module's own master clock, so the
+firmware computes the nearest divider at or below the requested frequency
+and reports what that divider actually gives. `SWFREQ` acknowledges the
+request; `GWFREQ` answers the achieved frequency, and the two are equal
+only when the request happens to fall on a divider step.
+
+From `SetFrequency` in the ARB module firmware (`GordonAnderson/ARB`,
+commit `1e8a149`, `ARB.ino`), with integer division throughout and
+`VARIANT_MCK = 42,000,000 Hz` on the module board:
+
+| Mode | Divider | Achieved frequency |
+|---|---|---|
+| `TWAVE` | `div = MCK / (2 * ppp * f) + 1` | `MCK / (2 * ppp * div)` |
+| `ARB` | `div = MCK / (2 * f) + 1` | `MCK / (2 * div)` |
+
+`ppp` is the module's points per period (`SARBPPP`/`GARBPPP`, 8–128).
+The firmware's own comment gives the valid divider range as 26 to 1312.
+
+Worked example, which is the SLIM case: `SWFREQ,n,15000` in `TWAVE` mode
+with `ppp = 32` gives `div = 42000000 / (2 * 32 * 15000) + 1 = 44` and
+therefore `42000000 / (2 * 32 * 44) = 14914 Hz`. All eight modules of both
+ARB boxes acknowledged 15000 and read back 14914 on 2026-09-17. **14914 is
+the correct answer, not a failed send.**
+
+A host comparing a declared frequency with a readback must compare against
+the achieved frequency and not against the request, or it reports a
+disagreement on every module of every run (see `clockwork.mips.arb_frequency`).
+The divider step near 15 kHz is about 0.6 %, which is far wider than any
+rounding tolerance, so a fractional tolerance is not a substitute for
+computing it.
+
 ### 6.3 The two broadcast lines: `r`/`s` table channels and fan-out limits
 
 The time-critical signals do not travel over TWI. The controller has

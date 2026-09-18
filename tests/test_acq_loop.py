@@ -50,6 +50,7 @@ from clockwork.acq import (
     DataStream,
     FakeConsole,
     Folded,
+    Folding,
     FrameBegun,
     FrameEnded,
     PhaseSent,
@@ -1451,6 +1452,56 @@ def test_the_fold_starts_after_the_next_frame_has_been_released(rig, monkeypatch
     # Method frame 1's fold is owed the moment its last repetition ends; it must not
     # begin until method frame 2's start list has gone out.
     assert began[0] > released[1]
+
+
+def test_a_fold_says_it_has_started_before_it_says_it_has_finished(rig):
+    """`Folded` is reported when a fold ends, and nothing was reported when one began.
+
+    The run log's last line was therefore the final repetition, followed by silence for
+    as long as the fold took -- 624 s on 2026-09-17, which the session watching read as
+    a dead process and a trainee would answer with a force-quit and a lost 1.3 GB raw
+    file that has no second copy (task 56).
+    """
+    method = make_method(frames=2, accumulations=1)
+    boxes = make_boxes(BOX)
+    seen: list[acq.Event] = []
+    send_phases(method, boxes)
+    run = rig.acquire(method, boxes, progress=seen.append)
+
+    assert run.complete and len(run.folds) == 2
+    kinds = [type(event) for event in seen]
+    assert kinds.count(Folding) == 2
+    # In that order for each method frame, which is the whole point: a start that
+    # arrived after its own end would say nothing about the wait.
+    for number in (1, 2):
+        started = next(at for at, event in enumerate(seen)
+                       if isinstance(event, Folding) and event.method_frame == number)
+        ended = next(at for at, event in enumerate(seen)
+                     if isinstance(event, Folded) and event.record.method_frame == number)
+        assert started < ended
+
+    begun = next(event for event in seen if isinstance(event, Folding))
+    assert begun.frames_folding and begun.megabytes > 0
+    assert "summing" in begun.text and "quiet until it is done" in begun.text
+
+
+def test_a_batch_says_how_far_into_its_frame_it_is_and_not_just_its_own_size(rig):
+    """A caller is entitled to drop these -- the window's mailbox collapses consecutive
+    ones into a single slot on purpose -- so the count has to be absolute or a progress
+    bar built on it counts only the batches that were drawn (task 56)."""
+    method = make_method()
+    boxes = make_boxes(BOX)
+    seen: list[acq.Event] = []
+    send_phases(method, boxes)
+    rig.acquire(method, boxes, progress=seen.append)
+
+    for repetition in range(1, ACCUMULATIONS + 1):
+        batches = [event for event in seen
+                   if isinstance(event, BatchSeen) and event.repetition == repetition]
+        assert batches, f"repetition {repetition} published nothing"
+        counts = [event.scans_so_far for event in batches]
+        assert counts == sorted(counts), "the running total went backwards"
+        assert counts[-1] == sum(event.batch.scans for event in batches)
 
 
 def test_the_guard_can_be_turned_off(rig):

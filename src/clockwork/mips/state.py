@@ -37,16 +37,28 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
+from .arb import (
+    ARB_MODULE_MCK_HZ,
+    ARB_POINTS_PER_PERIOD,
+    ARB_PPP_RANGE,
+    arb_frequency,
+    arb_points_per_period,
+)
 from .box import Box, MipsError
 
 __all__ = [
     "ARB_MODULE_GETTERS",
-    "COMPRESSOR_GETTERS",
+    "ARB_MODULE_MCK_HZ",
+    "ARB_POINTS_PER_PERIOD",
+    "ARB_PPP_RANGE",
     "BoxState",
+    "COMPRESSOR_GETTERS",
     "MAX_ARB_MODULES",
     "RESYNC_AFTER_NAK_S",
-    "SEQUENCER_GETTERS",
     "RfReading",
+    "SEQUENCER_GETTERS",
+    "arb_frequency",
+    "arb_points_per_period",
     "declared_settings",
     "describe",
     "read_sequencer",

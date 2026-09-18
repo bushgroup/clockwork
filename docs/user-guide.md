@@ -91,16 +91,42 @@ typed by hand: the state panel below is where a value already on a box is read b
    window stays responsive throughout.
 
 **Acquire is greyed out until the boxes agree with the method in the panes.** clockwork keeps a
-fingerprint of what the last Send setup or Load and arm actually put on each box, covering setup,
-load, arm and the acquisition's own declarations; Acquire is disabled until that fingerprint
-matches what the panes now hold, with the reason named in the button's tooltip: "the boxes have
-not been loaded and armed with this method" the first time, or "the panes have changed since the
-boxes were armed" after an edit. This exists because a box nobody sent to answers `TBLSTRT` with a
-refusal partway through a series, which used to cost a trainee three frames and an `abort_after`
-before anyone noticed the setup step had been skipped.
+fingerprint of what the last Send setup or Load and arm actually put on each box, and Acquire is
+disabled until that fingerprint matches what the panes now hold, with the reason named in the
+button's tooltip: "the boxes have not been loaded and armed with this method" the first time, or
+"the panes have changed since the boxes were armed" after an edit. This exists because a box
+nobody sent to answers `TBLSTRT` with a refusal partway through a series, which used to cost a
+trainee three frames and an `abort_after` before anyone noticed the setup step had been skipped.
+The fingerprint covers what the send actually delivered, so a Load and arm covers the table, the
+mode change and the acquisition's declarations, and does not claim anything about the setup
+strings it did not send. Editing a setup line after a Load and arm therefore leaves Acquire
+available. Send setup again if the box needs that line.
 
 **Stop** ends a run after its current repetition and fold rather than mid-flight, so what a stopped
 run leaves on disk is a short experiment and not a broken one.
+
+## What the progress bar counts, and the wait at the end
+
+The bar counts **scans across the whole run**, not repetitions, and it advances about fifteen
+times a second while the digitizer is publishing. The caption above it counts repetitions, which
+is the number to match against the method. Both matter because the two golden methods are shaped
+differently: a per-repetition method asks the console for one frame per accumulation and the
+caption steps through them, while a single-frame method puts its accumulations inside the
+sequencer's own table and asks for one frame of half a million scans. In the second case the
+caption reads `repetition 1 of 1` for the whole minute the frame takes, and the bar is the only
+thing that moves.
+
+No estimate of the time remaining is shown. The cost of a repetition depends on how much of the
+detector's signal survives zero suppression, so the first repetition does not predict the
+hundredth.
+
+**A run is not over when its last repetition ends.** The repetitions are summed into the
+`.summed.uimf` companion afterwards, and the run log says so before it starts: "summing 100
+repetitions (1,310 MB) into the companion, about 10 minutes; the run log is quiet until it is
+done". Nothing is printed while it runs. The estimate is coarse and it is an estimate, but the
+order of magnitude is right, and a fold of a beam-on detection-response run has taken **624
+seconds**. Do not close the window or kill the process during it. The per-repetition raw file is
+complete on disk by then, and the companion is what a force-quit would lose.
 
 ## Replicates and naming
 
@@ -132,7 +158,15 @@ was sent. A few things it reports are worth knowing before the first time they a
   from another session.
 - **DC bias monitors freeze the moment a box enters table mode.** A reading taken while armed is
   reported as not converting rather than compared against anything, because a frozen monitor is not
-  a disagreement.
+  a disagreement. The panel keeps the last reading whose monitors were live and shows those
+  figures on the rows instead, with the time they were taken, so pressing Read state during a run
+  does not cost you the only measurement of those outputs you have.
+- **An ARB module's waveform frequency reads back lower than you set it, and that is correct.**
+  The module's output clock is an integer divider off a 42 MHz master clock, so it can only make
+  the frequencies that divider produces. `SWFREQ,n,15000` is acknowledged and reads back as
+  **14914 Hz**, on every module of both ARB boxes. The panel marks the row as declared and says
+  which frequency the divider reached. A row marked as differing means the module is holding a
+  frequency no request of yours would produce.
 
 A box nothing has been read off yet says so plainly instead of showing empty rows.
 

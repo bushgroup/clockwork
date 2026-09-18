@@ -416,3 +416,26 @@ def test_note_block_gives_every_line_its_own_record() -> None:
         logger.removeHandler(handler)
         logger.setLevel(level)
     assert handler.messages == ["one", "two"]
+
+
+
+def test_a_setting_the_method_names_on_another_module_says_so_in_its_line() -> None:
+    """The clause a window splits the two groups on (`DECLARED_ELSEWHERE`, task 56).
+
+    A method that declares `SWFDIR` on module 1 and leaves 2 to 4 has a gap in it; one
+    that declares no direction anywhere is not about direction, and the ten lines a
+    clean run emits are all of the second kind.
+    """
+    from clockwork.acq import left_as_found
+    from clockwork.method import BoxMethod
+
+    # An ARB box: `auklet_box` carries a bank and two heads and no modules, and a
+    # left-as-found line is about a module.
+    box = Box(transport=FakeBox(name="MIPS-B", arb_modules=4), name="bufflehead")
+    entry = BoxMethod(name="bufflehead", port="COM7", setup=("SWFDIR,1,REV",))
+    lines = left_as_found(entry, read_state(box))
+    direction = [line for line in lines if " WFDIR " in line]
+    assert direction, "the method left three modules' direction as found"
+    assert "and the method declares it on module 1" in direction[0]
+    others = [line for line in lines if " WFDIR " not in line]
+    assert others and not any("the method declares it" in line for line in others)

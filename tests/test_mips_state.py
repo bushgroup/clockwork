@@ -17,9 +17,12 @@ import pytest
 from clockwork import transcript
 from clockwork.mips import (
     ARB_MODULE_GETTERS,
+    ARB_POINTS_PER_PERIOD,
     Box,
     BoxState,
     FakeBox,
+    arb_frequency,
+    arb_points_per_period,
     read_state,
 )
 
@@ -144,12 +147,15 @@ def test_every_module_answers_the_per_module_getters() -> None:
     fake = FakeBox(name="MIPS-B", arb_modules=4, dcb_channels=0)
     box = Box(transport=fake, name="bufflehead")
     for module in (1, 2, 3, 4):
-        box.command(f"SWFREQ,{module},{14914 if module == 2 else 10019}")
+        # Requested, not read back: the module quantises 15000 to the 14914 its divider
+        # can make, which is what both ARB boxes answer on the instrument (wire format
+        # 6.2, lab record, task 56).
+        box.command(f"SWFREQ,{module},{15000 if module == 2 else 10000}")
     state = read_state(box)
     assert state.modules == (1, 2, 3, 4)
     assert set(state.module(2)) == set(ARB_MODULE_GETTERS)
     assert state.module(2)["GWFREQ"] == "14914"
-    assert state.module(1)["GWFREQ"] == "10019"
+    assert state.module(1)["GWFREQ"] == "9943"
 
 
 def test_a_box_with_no_arb_modules_costs_no_per_module_round_trips() -> None:
@@ -230,3 +236,53 @@ def test_summarised_nests_and_puts_logging_back() -> None:
             assert box._marking({"sent": 1}) is None
         assert box._marking({"sent": 1}) is None
     assert box._marking({"sent": 1}) == {"sent": 1}
+
+
+# --- the ARB waveform divider ---------------------------------------------------------
+
+
+def test_the_frequency_a_module_can_make_is_the_one_the_instrument_reads_back():
+    """The number the 2026-09-17 sitting saw on all eight modules of both ARB boxes.
+
+    `SWFREQ,n,15000` in TWAVE mode at 32 points per period: the firmware takes
+    `42000000 / (2 * 32 * 15000) + 1 = 44` as its divider and reports
+    `42000000 / (2 * 32 * 44) = 14914`. Not a failed send (wire format 6.2).
+    """
+    assert arb_frequency(15000) == 14914
+    assert arb_frequency(15000, ARB_POINTS_PER_PERIOD, mode="TWAVE") == 14914
+
+
+def test_the_divider_is_the_firmware_s_own_integer_arithmetic():
+    """Restated here from `SetFrequency` rather than taken on trust, because integer
+    division is the whole of it and a float would give 15000 back."""
+    for requested, period in ((15000, 32), (10000, 32), (15000, 96), (4000, 8)):
+        divider = 42_000_000 // (2 * period * requested) + 1
+        assert arb_frequency(requested, period) == 42_000_000 // (2 * period * divider)
+
+
+def test_arb_mode_divides_without_the_points_per_period():
+    """`SetFrequency` has two branches and only the TWAVE one multiplies by `ppp`."""
+    assert arb_frequency(15000, mode="ARB") != arb_frequency(15000, mode="TWAVE")
+    assert arb_frequency(15000, mode="ARB") == 42_000_000 // (
+        2 * (42_000_000 // (2 * 15000) + 1))
+
+
+def test_a_request_no_divider_can_be_computed_for_is_refused_rather_than_guessed():
+    assert arb_frequency(0) is None
+    assert arb_frequency(-15000) is None
+
+
+def test_the_points_per_period_behind_a_reading_is_recovered_or_refused():
+    """`SARBPPP` is not read back, so a module at some other points per period is
+    recognised by back-solving rather than reported as a disagreement -- and a frequency
+    no points per period explains is the disagreement that is real."""
+    assert arb_points_per_period(15000, arb_frequency(15000, 96)) is not None
+    assert arb_points_per_period(15000, 5000) is None
+
+
+def test_the_stand_in_quantises_a_frequency_the_way_a_module_does():
+    """A stand-in that answered whatever it was told is a stand-in no desk run can meet
+    the eight standing disagreements on, which is how they reached the instrument."""
+    box = Box(transport=FakeBox(name="MIPS-A", arb_modules=1), name="t")
+    box.command("SWFREQ,1,15000")
+    assert read_state(box).module(1)["GWFREQ"] == "14914"
