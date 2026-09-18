@@ -74,6 +74,7 @@ from ..method.text import render_pane, split_trainee_file, start_order
 from .boxstate import Reading
 from .console_panel import ConsoleBar, ConsoleSettings
 from .launch import open_data_file, open_path
+from .librarypanel import LibraryDialog
 from .naming import clean_initials, next_stem
 from .panes import BoxPane
 from .queuepanel import QueuePanel
@@ -418,11 +419,17 @@ class MainWindow(QMainWindow):
             "Split one of the lab's old multi-box paste files into panes, off the "
             "`MIPS A`/`MIPS B` comments it names its boxes in. Anything the file does "
             "not attribute comes back whole, for the clipboard.")
+        self.action_library = QAction("Method &library…", self)
+        self.action_library.setToolTip(
+            "Every method a directory holds, named, hashed, dated and described. Open "
+            "one into the panes, or compare two -- or compare one against what the "
+            "boxes are holding now.")
         self.action_quit = QAction("&Quit", self)
         for action in (self.action_open, self.action_save, self.action_save_as):
             file_menu.addAction(action)
         file_menu.addSeparator()
         file_menu.addAction(self.action_import)
+        file_menu.addAction(self.action_library)
         file_menu.addSeparator()
         self.action_forget_geometry = QAction("Forget the window position", self)
         file_menu.addAction(self.action_forget_geometry)
@@ -476,6 +483,7 @@ class MainWindow(QMainWindow):
         self.action_save.triggered.connect(lambda: self.save_method())
         self.action_save_as.triggered.connect(lambda: self.save_method(ask=True))
         self.action_import.triggered.connect(self.open_trainee_file)
+        self.action_library.triggered.connect(self.open_library)
         self.action_quit.triggered.connect(self.close)
         self.action_find.triggered.connect(self.find_boxes)
         self.action_read_state.triggered.connect(self.read_state)
@@ -762,6 +770,22 @@ class MainWindow(QMainWindow):
                 if line.strip():
                     self.run_panel.say(f"    {line}")
         self._pane_changed()
+
+    def open_library(self) -> None:
+        """The method browser: open a document into the panes, or run either diff.
+
+        The directory offered the first time is `lab_dir("golden")` where it resolves
+        and nothing has been picked yet -- a one-time suggestion, not a stored default
+        (`Settings.library_dir`), since a public clone has no golden library to suggest
+        and this repo's own is lab material this module never names by path.
+        """
+        directory = self.settings.library_dir or clockwork.lab_dir("golden") or ""
+        dialog = LibraryDialog(directory, self.readings, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.chosen_path:
+            self.settings.library_dir = dialog.directory()
+            self._load_method(dialog.chosen_path)
+        else:
+            self.settings.library_dir = dialog.directory()
 
     # -- the instrument document ---------------------------------------------
 

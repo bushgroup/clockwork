@@ -29,6 +29,7 @@ pytest.importorskip("pytestqt")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings, Qt  # noqa: E402
+from PySide6.QtWidgets import QDialog  # noqa: E402
 
 from clockwork import instrument as instrument_module  # noqa: E402
 from clockwork import method as method_module  # noqa: E402
@@ -50,10 +51,17 @@ from clockwork.app.boxstate import (  # noqa: E402
     state_table,
 )
 from clockwork.app.launch import open_data_file, open_with  # noqa: E402
+from clockwork.app.librarypanel import (  # noqa: E402
+    InstrumentDiffDialog,
+    LibraryDialog,
+    MethodDiffDialog,
+)
+from clockwork.app.methodlib import method_diff  # noqa: E402
 from clockwork.app.panes import MARGIN_TAGS, BoxPane  # noqa: E402
 from clockwork.app.queuepanel import QueuePanel  # noqa: E402
 from clockwork.app.runlog import RunPanel, is_left_as_found  # noqa: E402
 from clockwork.app.settings import Settings  # noqa: E402
+from clockwork.app.statepanel import StatePanel  # noqa: E402
 from clockwork.app.window import MainWindow  # noqa: E402
 from clockwork.method.text import render_pane  # noqa: E402
 from clockwork.mips import (  # noqa: E402
@@ -1084,3 +1092,107 @@ def test_the_queue_panel_puts_back_a_cell_the_queue_owns(qtbot):
     assert item.text(OUTCOME) == ""
     item.setText(REPS, "not a number")
     assert queue.rows[0].replicates == 3 and item.text(REPS) == "3"
+
+
+# --- the method library (task 54) ------------------------------------------------------
+
+
+@pytest.fixture
+def library(tmp_path) -> str:
+    """A directory holding two documents, one of them broken, for the browser to list."""
+    method_module.save(make_method(stem="a"), str(tmp_path / "a.toml"))
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    method_module.save(make_method(stem="b"), str(nested / "method.toml"))
+    (tmp_path / "broken.toml").write_text("schema_version = 2\n", encoding="utf-8")
+    return str(tmp_path)
+
+
+def test_the_dialog_lists_every_document_the_directory_holds(library, qtbot):
+    dialog = LibraryDialog(library, {})
+    qtbot.addWidget(dialog)
+    assert dialog.table.rowCount() == 3
+    assert len(dialog.entries) == 3
+    assert sum(1 for entry in dialog.entries if not entry.ok) == 1
+
+
+def test_open_is_only_enabled_for_a_single_good_selection(library, qtbot):
+    dialog = LibraryDialog(library, {})
+    qtbot.addWidget(dialog)
+    dialog.table.selectRow(next(i for i, e in enumerate(dialog.entries) if e.ok))
+    assert dialog.open_button.isEnabled()
+    assert not dialog.diff_methods_button.isEnabled()
+    dialog.table.selectRow(next(i for i, e in enumerate(dialog.entries) if not e.ok))
+    assert not dialog.open_button.isEnabled()
+
+
+def test_diff_two_methods_needs_exactly_two_selected(library, qtbot):
+    dialog = LibraryDialog(library, {})
+    qtbot.addWidget(dialog)
+    good = [i for i, e in enumerate(dialog.entries) if e.ok]
+    dialog.table.selectRow(good[0])
+    assert not dialog.diff_methods_button.isEnabled()
+    dialog.table.selectionModel().select(
+        dialog.table.model().index(good[1], 0),
+        dialog.table.selectionModel().SelectionFlag.Select
+        | dialog.table.selectionModel().SelectionFlag.Rows)
+    assert dialog.diff_methods_button.isEnabled()
+
+
+def test_open_into_panes_names_the_chosen_path_and_accepts(library, qtbot):
+    dialog = LibraryDialog(library, {})
+    qtbot.addWidget(dialog)
+    row = next(i for i, e in enumerate(dialog.entries) if e.ok)
+    dialog.table.selectRow(row)
+    qtbot.mouseClick(dialog.open_button, Qt.MouseButton.LeftButton)
+    assert dialog.chosen_path == dialog.entries[row].path
+    assert dialog.result() == QDialog.DialogCode.Accepted
+
+
+def test_open_library_loads_the_dialogs_chosen_method_and_remembers_the_directory(
+        window, tmp_path, monkeypatch):
+    """`open_library` cannot exercise the real modal dialog in a test, so the dialog
+    class is stood in for -- what matters here is what the window does with the result,
+    which is exactly what `_load_method` does with any other path."""
+    path = str(tmp_path / "picked.toml")
+    method_module.save(make_method(stem="picked"), path)
+
+    class _Stub:
+        def __init__(self, directory, readings, parent):
+            self.chosen_path = path
+        def directory(self):
+            return "chosen-directory"
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr("clockwork.app.window.LibraryDialog", _Stub)
+    window.open_library()
+    assert window.method_path == path
+    assert window.settings.library_dir == "chosen-directory"
+
+
+def test_method_diff_dialog_marks_a_changed_line_and_an_added_box(qtbot):
+    a = make_method(load=["ONE"])
+    b = method_module.from_dict({
+        **method_module.to_dict(a),
+        "boxes": [
+            {**method_module.to_dict(a)["boxes"][0], "load": ["TWO"]},
+            {"name": "box2", "port": "COM9", "setup": [], "load": ["NEW"], "arm": []},
+        ],
+    })
+    dialog = MethodDiffDialog(method_diff(a, b))
+    qtbot.addWidget(dialog)
+    titles = [dialog.tree.topLevelItem(i).text(0)
+              for i in range(dialog.tree.topLevelItemCount())]
+    assert any(title.startswith("box2") and "only in B" in title for title in titles)
+    assert method_diff(a, a).identical
+    assert not method_diff(a, b).identical
+
+
+def test_instrument_diff_dialog_builds_one_state_panel_per_box(window, tmp_path, qtbot):
+    method = make_method()
+    dialog = InstrumentDiffDialog(method, window.readings)
+    qtbot.addWidget(dialog)
+    panels = dialog.findChildren(StatePanel)
+    assert len(panels) == len(method.boxes)
+    assert all(panel.opened for panel in panels)
