@@ -3,23 +3,49 @@
 The build and install chain for `clockwork.exe`, adapted from mainspring's (lab record, task 32).
 It was built and first measured around a placeholder window, and rebuilt around the real one on
 2026-09-17: same excludes, still no hidden imports, 0.15 s more cold start. Task 52 adapts this
-chain to carry the acquisition console alongside it.
+chain to carry the acquisition console alongside it, so that one installer puts both on a fresh
+instrument PC (lab record, decision 9).
 
 ## Building
 
 ```
 uv run tools/warm_numba_cache.py   # writes packaging/numba_cache_seed/
 uv run tools/write_commit.py       # writes src/clockwork/_commit.py
+uv run tools/stage_console.py      # writes packaging/console_payload/, if this machine has built one
 uv run tools/make_icon.py          # writes src/clockwork/app/resources/clockwork.ico (only after packaging/icon/clockwork.svg changes)
 powershell -ExecutionPolicy Bypass -File tools/build_exe.ps1
 ```
 
-`build_exe.ps1` runs the first two steps itself, cuts `PATH` down to the Windows directories and
+`build_exe.ps1` runs the first three steps itself, cuts `PATH` down to the Windows directories and
 `uv`'s own before invoking PyInstaller (a wider `PATH` risks a foreign DLL substitution the way
 mainspring's task 07 found once, and `clockwork.spec`'s provenance guard fails the build rather
-than ship one), then runs `clockwork.exe --self-check` and times a cold and a warm launch. It
-needs Windows PowerShell's script execution allowed for that one invocation
-(`-ExecutionPolicy Bypass`, or `Set-ExecutionPolicy` once per machine) -- unset on a fresh clone.
+than ship one), then copies `packaging/console_payload/` beside the built `clockwork.exe` (below),
+runs `clockwork.exe --self-check` and times a cold and a warm launch. It needs Windows
+PowerShell's script execution allowed for that one invocation (`-ExecutionPolicy Bypass`, or
+`Set-ExecutionPolicy` once per machine) -- unset on a fresh clone.
+
+## The acquisition console payload
+
+`tools/stage_console.py` finds this machine's built console the same way a running `clockwork.exe`
+finds it at first launch (`clockwork.acq.find_console`: `$CLOCKWORK_CONSOLE`, a `console/`
+directory beside the installation, then a lab checkout), copies its executable, DLLs, `config.txt`
+and `app.h` into `packaging/console_payload/`, and prints why it staged nothing when this machine
+has not built a console yet -- which is not a build failure, since a bare `clockwork.exe` is still
+a useful thing to build for testing away from the instrument. `build_exe.ps1` then copies that
+directory to `dist/clockwork/console/`, a plain file copy and not a PyInstaller `datas` entry:
+PyInstaller's own onedir layout nests bundled data under `dist/clockwork/_internal/`, and
+`find_console` looks for `console/` beside the `.exe` itself. `clockwork.iss`'s existing `[Files]`
+wildcard (`dist\clockwork\*`, recursive) picks the directory up without a change of its own, so the
+installer puts the console beside `clockwork.exe` and the first launch's console path defaults to
+it.
+
+The console's own CMake build writes `app.h` beside its executable naming the version and commit
+it was built from -- a public fork of PNNL's console
+([`bushgroup/AqMD3-Acquisition-Console`](https://github.com/bushgroup/AqMD3-Acquisition-Console),
+branch `clockwork`), so the commit is a derived fact and not vendor material. `tools/stage_console.py`
+pins the commit it expects in `EXPECTED_CONSOLE_COMMIT`; `tools/check_public.py` compares that pin
+against the staged `app.h`, SKIPPED when nothing is staged, and fails if the lab's console checkout
+has moved on without the pin being bumped to match.
 
 Compile the installer separately, with Inno Setup 6's `ISCC.exe`:
 
@@ -78,10 +104,10 @@ name, so the exclusion list in `clockwork.spec` is doing real work, not standing
 
 ## Open
 
-- **Where the installer is validated** (task 32 step 5): still open in the lab record. The
-  installer itself compiles clean on MASSTRO (`clockwork-0.1.0-setup.exe`, 92 MB) -- what remains
-  is running it on a Windows install that never had the dev toolchain on it, since developing on
-  the deployment machine is what hides a missing dependency until someone else runs the build.
+- **Where the installer is validated** (task 52 step 5): still open in the lab record. The
+  installer itself compiles clean on MASSTRO -- what remains is running it on a Windows install
+  that never had the dev toolchain on it, since developing on the deployment machine is what hides
+  a missing dependency until someone else runs the build.
 - **The console subsystem is on** (`console=True`) so `--self-check` has somewhere to print;
   `tools/build_exe.ps1`'s launch check waits past the console's own default-titled window before
   reading the title, which a windowed (`console=False`) build never needed to. The real window

@@ -12,13 +12,14 @@ is one button.
 
 ## Status
 
-Pre-alpha, and nothing has been acquired with it yet. What exists: the protocol documents, the
-self-check, `clockwork.mips` (send strings and pulse-sequence tables to a box, follow what it
-reports), `clockwork.method` (load, validate and stamp a method) and `clockwork.acq` (drive the
+Pre-alpha, and not yet accepted against the real instrument. What exists: the protocol documents,
+the self-check, `clockwork.mips` (send strings and pulse-sequence tables to a box, follow what it
+reports), `clockwork.method` (load, validate and stamp a method), `clockwork.acq` (drive the
 acquisition console through a whole acquisition, create the UIMF file it appends to, and sum a
-method frame's repetitions into a companion file). What does not: the window. Both of the lower
-layers ship a stand-in for the hardware they talk to, so a clone with no instrument can run
-everything the self-check runs, the whole UIMF path included. Documents:
+method frame's repetitions into a companion file), and the window: one pane per box, Send setup,
+Load and arm, Acquire, Stop, a run queue and a method library. Both lower layers ship a stand-in
+for the hardware they talk to, so a clone with no instrument can run everything the self-check
+runs, the whole UIMF path included. Documents:
 
 - [`docs/mips-wire-format.md`](docs/mips-wire-format.md): how a MIPS box takes a pulse-sequence
   table, times it, and reports back, derived from the public firmware.
@@ -26,7 +27,11 @@ everything the self-check runs, the whole UIMF path included. Documents:
   AqMD3 acquisition console, derived from its source.
 - [`docs/method-file-format.md`](docs/method-file-format.md): the flat TOML method a trainee
   loads, and the stamp that traces an acquisition back to it.
+- [`docs/instrument-file-format.md`](docs/instrument-file-format.md): the flat TOML document
+  beside the method that records the machine's own calibration and vertical settings.
 - [`docs/glossary.md`](docs/glossary.md): what the terms mean.
+- [`docs/user-guide.md`](docs/user-guide.md): the installed window, from the two vendor installs
+  it needs to a first acquisition.
 
 ## The two files an acquisition writes
 
@@ -48,6 +53,12 @@ carries the method frame and repetition it came from, the digitizer's bit depth,
 that produced it, text and hash. A frame is marked complete only once clockwork has finished
 writing it, so a run cut short by a power loss opens, and the frame it was writing reads as
 unfinished rather than as damaged.
+
+A run also leaves two text files beside the UIMF pair: a send log, `<stem>.sent.txt`, holding
+every string the run sent and what each box said back, filtered down to what a trainee reads at
+the bench, and a wire transcript, `<stem>-<date>.transcript.log`, the same traffic unfiltered,
+byte for byte. The send log is where to start when something goes wrong; the transcript is the
+forensic record behind it. `docs/user-guide.md` covers both.
 
 ## Running from source
 

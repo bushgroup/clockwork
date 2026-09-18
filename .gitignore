@@ -24,3 +24,7 @@ src/clockwork/_commit.py
 # tools/warm_numba_cache.py's build-time output, bundled into the .exe by
 # packaging/clockwork.spec; regenerated before every build, never tracked.
 packaging/numba_cache_seed/
+# tools/stage_console.py's build-time output: the acquisition console's exe, DLLs,
+# config.txt and app.h, copied from a lab-side build; regenerated before every build,
+# never tracked (lab record, task 52).
+packaging/console_payload/

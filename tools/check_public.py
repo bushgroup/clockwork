@@ -88,7 +88,12 @@ QT_PREFIXES = ("PySide6", "PyQt", "pyqtgraph", "shiboken")
 
 SHIPPED_ROOTS = ("src", "docs", "tools", "tests", "packaging", "README.md")
 SHIPPED_SUFFIXES = (".py", ".md", ".ps1", ".iss", ".spec", ".svg", ".toml", ".txt", ".cfg")
-SHIPPED_SKIP = ("__pycache__", ".venv", ".git", "dist", "build")
+SHIPPED_SKIP = ("__pycache__", ".venv", ".git", "dist", "build",
+                # Gitignored build-time output under packaging/ (tools/warm_numba_cache.py,
+                # tools/stage_console.py): never shipped in a git clone, so a citation
+                # inside one -- the lab's own config.txt, staged verbatim, cites lab
+                # notes freely -- is not a public-repo violation to scan for.
+                "numba_cache_seed", "console_payload")
 
 LAB_DIRECTORIES = ("notes", "tasks", "explorations", "golden", "literature", "vendor",
                    "falkor")
@@ -190,6 +195,25 @@ def main() -> int:
         + ", ".join(f"{where} {what}" for where, what in declared.items()) + ")",
         len(set(declared.values())) == 1,
     )
+
+    payload_dir = os.path.join(ROOT, "packaging", "console_payload")
+    app_h = os.path.join(payload_dir, "app.h")
+    if not os.path.isfile(app_h):
+        skip("the staged console build matches the commit tools/stage_console.py pins",
+             "no console payload staged (tools/stage_console.py); a public clone, or a "
+             "build made before one, ships clockwork alone")
+    else:
+        pin_text = open(os.path.join(ROOT, "tools", "stage_console.py"),
+                        encoding="utf-8").read()
+        pinned = re.search(r'^EXPECTED_CONSOLE_COMMIT = "([^"]*)"', pin_text, re.MULTILINE)
+        staged = re.search(r'^\s*#define\s+GIT_COMMIT_HASH\s+"([^"]*)"',
+                           open(app_h, encoding="utf-8").read(), re.MULTILINE)
+        check_true(
+            "the staged console build matches the commit tools/stage_console.py pins "
+            f"({staged.group(1) if staged else '(not found)'!r} vs "
+            f"{pinned.group(1) if pinned else '(not found)'!r})",
+            bool(pinned) and bool(staged) and pinned.group(1) == staged.group(1),
+        )
 
     section("module layout and the no-Qt seam")
     for name in LOWER_LAYERS + ("clockwork.app",):

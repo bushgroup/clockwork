@@ -15,5 +15,8 @@
   its two forms, and the full scale and channel offset the digitizer acquired through.
 - [**Glossary**](glossary.md). What the terms in these documents, in the package and in a method
   file mean, from SLIM and the pusher pulse to `STBLDAT`, zero suppress and the provenance stamp.
+- [**User guide**](user-guide.md). The installed window, from the two vendor installs it needs
+  before it to a first acquisition: the panes and their tags, Send setup, Load and arm, Acquire,
+  replicates, the state panel, and the files a run leaves on disk.
 
 The top-level [`README.md`](../README.md) covers running from source.

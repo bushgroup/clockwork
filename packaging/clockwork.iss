@@ -12,8 +12,11 @@
 ; Unlike mainspring, clockwork has no file type of its own to associate: it drives boxes
 ; and the acquisition console and writes UIMF files, but mainspring is the only viewer
 ; (CLAUDE.md's decisions of record) -- so this carries no [Registry] section at all.
-; Task 52 adds the acquisition console as a second payload once task 32's chain is
-; adapted rather than built from nothing.
+;
+; The [Files] wildcard below already carries the acquisition console as a second
+; payload (task 52): tools/build_exe.ps1 copies packaging/console_payload/, staged by
+; tools/stage_console.py, to dist/clockwork/console/ before this script ever runs, so
+; nothing here names the console directly.
 
 #define MyAppName "clockwork"
 #define MyAppVersion "0.1.0"

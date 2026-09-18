@@ -41,6 +41,14 @@ if (-not $SkipBuild) {
         throw "Recording the build commit failed (exit $LASTEXITCODE)."
     }
 
+    Write-Host "Staging the acquisition console payload..." -ForegroundColor Cyan
+    # Never fails the build: a checkout with no console build yet (or a public clone)
+    # gets a clockwork.exe with no console beside it, and says so (lab record, task 52).
+    uv run tools/stage_console.py
+    if ($LASTEXITCODE -ne 0) {
+        throw "Staging the console payload failed (exit $LASTEXITCODE)."
+    }
+
     Write-Host "Building clockwork.exe with PyInstaller..." -ForegroundColor Cyan
     # Build with only the Windows directories and uv's on PATH. PyInstaller resolves DLL
     # dependencies through PATH as a last resort, so a PATH carrying another Python
@@ -65,6 +73,21 @@ if (-not (Test-Path $exePath)) {
     throw "Expected build output at $exePath, but it does not exist. Run without -SkipBuild first."
 }
 
+$consolePayload = Join-Path $root "packaging\console_payload"
+$consoleDest = Join-Path $distDir "clockwork\console"
+if ((Test-Path $consolePayload) -and (Get-ChildItem $consolePayload -ErrorAction SilentlyContinue)) {
+    Write-Host "Copying the console payload beside clockwork.exe..." -ForegroundColor Cyan
+    # A plain directory copy, not a PyInstaller datas entry: PyInstaller's own onedir
+    # layout nests bundled data under dist\clockwork\_internal\, and
+    # clockwork.acq.find_console looks for console\ beside the .exe itself (lab
+    # record, task 50 decision 9) -- so this has to land one level up from where
+    # collect_data_files() would have put it.
+    New-Item -ItemType Directory -Force -Path $consoleDest | Out-Null
+    Copy-Item -Path (Join-Path $consolePayload "*") -Destination $consoleDest -Force -Recurse
+} else {
+    Write-Host "No console payload staged -- clockwork.exe will ship without the acquisition console." -ForegroundColor Yellow
+}
+
 Write-Host "Running --self-check against the built .exe..." -ForegroundColor Cyan
 & $exePath --self-check
 if ($LASTEXITCODE -ne 0) {
@@ -73,6 +96,10 @@ if ($LASTEXITCODE -ne 0) {
 
 $size = (Get-ChildItem (Split-Path $exePath) -Recurse | Measure-Object -Property Length -Sum).Sum
 Write-Host ("clockwork/ folder size: {0:N1} MB" -f ($size / 1MB))
+if (Test-Path $consoleDest) {
+    $consoleSize = (Get-ChildItem $consoleDest -Recurse | Measure-Object -Property Length -Sum).Sum
+    Write-Host ("  of which console/: {0:N1} MB" -f ($consoleSize / 1MB))
+}
 
 function Measure-Startup([string]$label) {
     $proc = Start-Process -FilePath $exePath -PassThru
