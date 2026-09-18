@@ -1711,8 +1711,10 @@ def test_a_comment_in_a_phase_never_reaches_a_box():
     seen: list[acq.Event] = []
     send_phases(method, boxes, progress=seen.append)
     assert not any(b"#" in written for written in boxes[BOX].transport.written)
-    assert [(event.phase, event.command) for event in seen if isinstance(event, PhaseSent)]         == [("setup", "SMOD,LOC"), ("setup", "STBLCLK,EXT"), ("setup", "STBLTRG,POS"),
-            ("load", per_repetition_table(SCANS)), ("arm", "SMOD,TBL")]
+    sent = [(event.phase, event.command) for event in seen if isinstance(event, PhaseSent)]
+    assert sent == [("setup", "SMOD,LOC"), ("setup", "STBLCLK,EXT"),
+                    ("setup", "STBLTRG,POS"), ("load", per_repetition_table(SCANS)),
+                    ("arm", "SMOD,TBL")]
 
 
 def test_a_comment_does_not_move_the_guard_that_drops_a_box_to_local():
@@ -1735,7 +1737,8 @@ def test_a_comment_in_the_start_and_reset_lists_is_not_a_step(rig):
         start=[[BOX, "# what releases the frame"], [BOX, "TBLSTRT"]],
         reset=[[BOX, "# between replicates"], [BOX, "SMOD,LOC"], [BOX, "SMOD,TBL"]],
     )
-    assert [step.command for step in method.start] ==         ["# what releases the frame", "TBLSTRT"]
+    assert [step.command for step in method.start] == ["# what releases the frame",
+                                                       "TBLSTRT"]
     boxes = make_boxes(BOX)
     send_phases(method, boxes, progress=None)
     run = rig.acquire(method, boxes, replicate=True)

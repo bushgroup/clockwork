@@ -150,7 +150,7 @@ def test_the_companion_inherits_the_calibration(tmp_path, geometry):
     assert params.calibration_done
 
 
-def stored_bpi_mz(path: str, frame: int) -> "np.ndarray":
+def stored_bpi_mz(path: str, frame: int) -> np.ndarray:
     """The writer's own `BPI_MZ` column, in scan order, straight off the table."""
     with sqlite3.connect(path) as conn:
         return np.asarray(
