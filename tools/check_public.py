@@ -1654,6 +1654,103 @@ def main() -> int:
         state_table(Reading()).empty,
     )
 
+    section("the run queue")
+    # Task 53. `clockwork.app.runqueue` is the whole of what an unattended series
+    # decides -- which row runs next, what a row's outcome says in the morning, and when
+    # a failure ends the night -- and it imports no Qt, so a clone with no display
+    # checks the rules the table draws. The table itself is `tests/test_app.py`.
+    from clockwork.app import runqueue
+
+    queue = runqueue.RunQueue([
+        runqueue.QueueRow(method_path=os.path.join("methods", f"{name}.toml"))
+        for name in ("blank", "sample", "wash")])
+    check_true(
+        "a queue names its rows by their document rather than by their path",
+        [row.name for row in queue.rows] == ["blank", "sample", "wash"],
+    )
+    check_true(
+        "Start takes the first waiting row, and the row in flight can then be neither "
+        "removed nor moved: its strings are already on the wire",
+        queue.begin() is queue.rows[0] and not queue.remove(0)
+        and queue.move(0, 1) == 0,
+    )
+    check_true(
+        "a waiting row may be brought forward to just behind the row in flight and no "
+        "further, the positions before it having been run or skipped",
+        queue.move(2, -1) == 1 and queue.move(1, -1) == 1,
+    )
+    check_true(
+        "a failed row ends the series and the rest carry the reason they did not run",
+        queue.finish(runqueue.FAILED, "TBLSTRT was refused") is False
+        and queue.advance() is None
+        and [row.state for row in queue.rows] == [
+            runqueue.FAILED, runqueue.SKIPPED, runqueue.SKIPPED]
+        and "failed" in queue.rows[1].problem,
+    )
+    going_on = runqueue.RunQueue([
+        runqueue.QueueRow(method_path="a.toml", go_on=True),
+        runqueue.QueueRow(method_path="b.toml")])
+    going_on.begin()
+    check_true(
+        "a row that says go on is walked past instead, because a series of independent "
+        "samples should not lose the night to one of them",
+        going_on.finish(runqueue.FAILED, "the console would not start") is True
+        and going_on.advance() is going_on.rows[1],
+    )
+    stopping = runqueue.RunQueue([runqueue.QueueRow(method_path="a.toml"),
+                                  runqueue.QueueRow(method_path="b.toml")])
+    stopping.begin()
+    stopping.cancel("stopped by the operator")
+    check_true(
+        "Stop skips everything that has not started and leaves the row in flight "
+        "running, which is what ending after the current repetition and its fold means",
+        stopping.rows[0].state == runqueue.RUNNING
+        and stopping.rows[1].state == runqueue.SKIPPED,
+    )
+
+    queued_method = method_module.from_dict({
+        "schema_version": 2,
+        "metadata": {"name": "self-check queue", "created": _dt.date(2026, 9, 18)},
+        "acquisition": {"frames": 1, "scans": 8, "accumulations": 2,
+                        "file_stem": "260918_QQ_001",
+                        "repetition_mode": "per_repetition"},
+        "boxes": [{"name": "box1", "port": "COM3",
+                   "load": ["STBLDAT;0:[A:1,0:A:1,100:A:0,200:];"],
+                   "arm": ["SMOD,TBL"]}],
+        "start": [["box1", "TBLSTRT"]],
+    })
+
+    def queued_run(stem: str, *, silence: int = 0, stopped: str | None = None):
+        return acq.Run(
+            method=queued_method, raw_path=f"{stem}.uimf",
+            summed_path=f"{stem}.summed.uimf",
+            frames=tuple(
+                acq.FrameRecord(method_frame=1, repetition=index + 1,
+                                frame_number=index + 1, outcome="acquired",
+                                ended_by="silence" if index < silence else "counted")
+                for index in range(2)),
+            folds=(acq.FoldRecord(method_frame=1, frames_folded=(1, 2), rows=8),),
+            warnings=(), seconds=1.0, stopped_early=stopped)
+
+    reported = runqueue.QueueRow(method_path="sample.toml")
+    state = runqueue.outcome_of(
+        reported, [queued_run("260918_QQ_001"), queued_run("260918_QQ_002", silence=1)])
+    check_true(
+        "a finished row carries the stems its replicates were written under and the "
+        "repetitions that ended on the silence rather than on their own count",
+        state == runqueue.DONE
+        and reported.stems == ("260918_QQ_001", "260918_QQ_002")
+        and "260918_QQ_001, 260918_QQ_002" in reported.outcome
+        and "1 repetition(s) ended on the silence" in reported.outcome,
+    )
+    halted = runqueue.QueueRow(method_path="sample.toml")
+    check_true(
+        "a row the operator stopped is neither done nor failed: its run folded the "
+        "frame it was in, so what it left on disk is a short experiment",
+        runqueue.outcome_of(halted, [queued_run("260918_QQ_003", stopped="by hand")])
+        == runqueue.STOPPED and "stopped: by hand" in halted.outcome,
+    )
+
     section("hardware")
     skip("a MIPS box answers GVER", "no serial hardware in a self-check; lab record, task 04")
     skip("the acquisition console answers info", "no console in a self-check; lab record, task 03")

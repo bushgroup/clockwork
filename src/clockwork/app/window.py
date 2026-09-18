@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDockWidget,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -75,7 +76,9 @@ from .console_panel import ConsoleBar, ConsoleSettings
 from .launch import open_data_file, open_path
 from .naming import clean_initials, next_stem
 from .panes import BoxPane
+from .queuepanel import QueuePanel
 from .runlog import RunPanel
+from .runqueue import FAILED, STOPPED, QueueRow, RunQueue, outcome_of
 from .settings import Settings
 from .worker import (
     Acquire,
@@ -146,6 +149,17 @@ class MainWindow(QMainWindow):
         replicate, because neither changes what a box is holding, and it goes stale the
         moment a pane is edited."""
 
+        self.queue = RunQueue()
+        """The unattended series, empty until a trainee puts something in it (task 53).
+
+        The window is its sequencer: it submits the same `Send` and `Acquire` jobs the
+        buttons do, one row at a time, so a queued acquisition and a pressed one are the
+        same path onto the wire and leave the same files and logs behind."""
+
+        self._queue_job: Job | None = None
+        """The job the queue is waiting on, so the sequencer reacts to its own work and
+        not to a discovery or a state reading that happened to land in between."""
+
         self._last_run_paths: tuple[str, str, str] = ("", "", "")
         """`(raw, summed, stem)` of the last run, for Open in mainspring and Open the
         log. The summed path is only offered once the fold has written it, and the
@@ -208,6 +222,21 @@ class MainWindow(QMainWindow):
         whole.setStretchFactor(0, 3)
         whole.setStretchFactor(1, 2)
         self.setCentralWidget(whole)
+
+        # The queue is a dock rather than a fourth splitter pane: one method at a time
+        # is the first release and stays the ordinary way to work (the window design's
+        # decision 7), so a trainee who never runs a series should not pay screen for
+        # one. Shut by default, remembered per machine, and it opens to the full
+        # width of the window under the run log, where an overnight series is read
+        # beside the warnings it produced.
+        self.queue_panel = QueuePanel(self.queue)
+        self.queue_dock = QDockWidget("Run queue", self)
+        self.queue_dock.setObjectName("run_queue")
+        self.queue_dock.setWidget(self.queue_panel)
+        self.queue_dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea
+                                        | Qt.DockWidgetArea.TopDockWidgetArea)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.queue_dock)
+        self.queue_dock.setVisible(False)
 
         self.console_bar = ConsoleBar()
         self.statusBar().addPermanentWidget(self.console_bar)
@@ -405,6 +434,14 @@ class MainWindow(QMainWindow):
         self.action_console = QAction("Start the &console", self)
         for action in (self.action_find, self.action_read_state, self.action_console):
             run_menu.addAction(action)
+        run_menu.addSeparator()
+        self.action_queue = self.queue_dock.toggleViewAction()
+        self.action_queue.setText("Run &queue")
+        self.action_queue.setToolTip(
+            "A list of methods with their samples and replicate counts, run in order "
+            "on the one worker: a series of conditions overnight or over lunch, from "
+            "one click.")
+        run_menu.addAction(self.action_queue)
 
         help_menu = self.menuBar().addMenu("&Help")
         self.action_about = QAction("&About clockwork", self)
@@ -449,6 +486,12 @@ class MainWindow(QMainWindow):
         self.console_bar.restart_requested.connect(self.restart_console)
         self.console_bar.settings_requested.connect(self.console_settings)
 
+        self.queue_panel.start_requested.connect(self.start_queue)
+        self.queue_panel.stop_requested.connect(lambda: self.stop())
+        self.queue_panel.add_requested.connect(self.queue_add_methods)
+        self.queue_panel.add_open_requested.connect(self.queue_add_open_method)
+        self.queue_panel.changed.connect(self._refresh_actions)
+
         self.initials.editingFinished.connect(self._initials_changed)
         self.output_dir.editingFinished.connect(self._refresh_stem)
         self.repetition_mode.currentTextChanged.connect(lambda _: self._refresh_actions())
@@ -463,6 +506,7 @@ class MainWindow(QMainWindow):
         self.output_dir.setText(self.settings.output_dir)
         self.replicates.setValue(self.settings.replicates)
         self.conditions.setPlainText(self.settings.conditions)
+        self.queue_dock.setVisible(self.settings.queue_open)
         if self.instrument_path:
             self._load_instrument(self.instrument_path)
         if self.method_path and os.path.isfile(self.method_path):
@@ -538,7 +582,10 @@ class MainWindow(QMainWindow):
 
     def _refresh_actions(self) -> None:
         """Which buttons may be pressed, and why the greyed-out one is greyed out."""
-        busy = self._job is not None
+        # A running queue is busy even in the instant between two of its jobs: the next
+        # one is submitted from the signal that ended the last, and a trainee who got a
+        # button back in that gap would be sending to boxes the queue is about to arm.
+        busy = self._job is not None or self.queue.running
         method = self.build_method()
         problems = refusals(method) if method is not None else ["no boxes found yet"]
         notes = (list(method.warnings) + cautions(method)) if method is not None else []
@@ -583,6 +630,7 @@ class MainWindow(QMainWindow):
         for pane in self.panes.values():
             pane.state.set_busy(busy or not self.worker.boxes)
         self.action_console.setEnabled(not busy and not have_console)
+        self.queue_panel.set_busy(busy)
 
         text: list[str] = []
         if blocking:
@@ -602,12 +650,23 @@ class MainWindow(QMainWindow):
         if path:
             self._load_method(path)
 
-    def _load_method(self, path: str) -> None:
+    def _load_method(self, path: str, *, quiet: bool = False) -> bool:
+        """Put a document into the panes and the form, and say whether it opened.
+
+        `quiet` sends the failure to the run log instead of a message box, and exists
+        for the queue: a modal dialog raised by row four of an overnight series would
+        stop the instrument at three in the morning and hold it there until somebody
+        walked in and clicked OK.
+        """
         try:
             method = method_module.load(path)
         except (OSError, method_module.MethodError) as exc:
-            self._complain("That method could not be opened", str(exc))
-            return
+            if quiet:
+                self.run_panel.say(
+                    f"{os.path.basename(path)} could not be opened: {exc}", warn=True)
+            else:
+                self._complain("That method could not be opened", str(exc))
+            return False
         self.method_path = path
         self.settings.method_path = path
         self.metadata = method.metadata
@@ -637,6 +696,7 @@ class MainWindow(QMainWindow):
             # method is only a hint, so nothing is re-discovered here.
             self.find_boxes()
         self._pane_changed()
+        return True
 
     def save_method(self, ask: bool = False) -> None:
         method = self.build_method()
@@ -792,29 +852,32 @@ class MainWindow(QMainWindow):
             label=f"reading {box}" if box else "reading the boxes",
             names=(box,) if box else ()))
 
-    def send(self, *, setup: bool) -> None:
+    def send(self, *, setup: bool) -> Send | None:
+        """Queue a send, and hand the job back so the queue can wait on its own work."""
         method = self.build_method()
         if method is None:
-            return
-        self.worker.submit(Send(
+            return None
+        job = Send(
             label="sending setup, load and arm" if setup else "loading and arming",
             method=method, setup=setup,
             conditions=self.conditions.toPlainText(),
             directory=self._directory(), stem=self.stem.text().strip(),
             method_path=self.method_path,
             instrument=self.instrument, instrument_path=self.instrument_path,
-        ))
+        )
+        self.worker.submit(job)
+        return job
 
-    def acquire(self, *, replicate_only: bool = False) -> None:
+    def acquire(self, *, replicate_only: bool = False) -> Acquire | None:
         method = self.build_method()
         if method is None:
-            return
+            return None
         if self.worker.console is None or not self.worker.console.alive:
             self.run_panel.say("starting the acquisition console first")
             self.start_console()
         self.settings.conditions = self.conditions.toPlainText()
         self.settings.replicates = self.replicates.value()
-        self.worker.submit(Acquire(
+        job = Acquire(
             label="acquiring" if not replicate_only else "acquiring a replicate",
             method=method, instrument=self.instrument,
             instrument_path=self.instrument_path, method_path=self.method_path,
@@ -823,7 +886,9 @@ class MainWindow(QMainWindow):
             replicates=1 if replicate_only else self.replicates.value(),
             conditions=self.conditions.toPlainText(),
             replicate_only=replicate_only,
-        ))
+        )
+        self.worker.submit(job)
+        return job
 
     def replicate(self) -> None:
         self._refresh_stem()
@@ -832,6 +897,149 @@ class MainWindow(QMainWindow):
     def stop(self) -> None:
         self.worker.request_stop()
         self.run_panel.say("stopping after this repetition and its fold", warn=True)
+        if self.queue.running:
+            # The row in flight is not abandoned: `run_acquisition` ends after the
+            # current repetition and its fold, and the row closes itself when its job
+            # comes back. What Stop decides here is that nothing after it starts.
+            self.queue.cancel("stopped by the operator")
+            self.run_panel.say(
+                "the queue stops with this row; the rows after it are skipped",
+                warn=True)
+            self.queue_panel.refresh()
+        self._refresh_actions()
+
+    # -- the queue -----------------------------------------------------------
+
+    def queue_add_methods(self) -> None:
+        """Rows for one or more documents on disk, with the fields as they stand."""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Add methods to the queue",
+            os.path.dirname(self.method_path) or "",
+            "Method documents (*.toml);;All files (*)")
+        for path in paths:
+            self.queue.add(self._queue_row(path))
+        if paths:
+            self.queue_dock.setVisible(True)
+            self.queue_panel.refresh()
+            self._refresh_actions()
+
+    def queue_add_open_method(self) -> None:
+        """A row for the method the panes hold, which has to have been saved first.
+
+        A row names a document and reads it when it starts, so a pane edited since the
+        last Save is not what the row would run. That is said rather than prevented:
+        a trainee who queued the file on purpose and is still typing in the panes is
+        doing something reasonable, and the warning is what makes it deliberate.
+        """
+        if not self.method_path:
+            self._complain(
+                "This method has not been saved",
+                "A queue row names a document on disk and reads it when the row "
+                "starts, so there has to be a file. Save the method first.")
+            return
+        method = self.build_method()
+        try:
+            saved = method_module.load(self.method_path)
+        except (OSError, method_module.MethodError) as exc:
+            self._complain("That method could not be re-read", str(exc))
+            return
+        if method is not None and wire_fingerprint(saved) != wire_fingerprint(method):
+            self.run_panel.say(
+                f"{os.path.basename(self.method_path)} was queued, but the panes have "
+                "changed since it was saved: the row will run what the file says, not "
+                "what is on screen. Save the method again to queue the edit.", warn=True)
+        self.queue.add(self._queue_row(self.method_path))
+        self.queue_dock.setVisible(True)
+        self.queue_panel.refresh()
+        self._refresh_actions()
+
+    def _queue_row(self, path: str) -> QueueRow:
+        return QueueRow(method_path=path,
+                        conditions=self.conditions.toPlainText().strip(),
+                        replicates=self.replicates.value())
+
+    def start_queue(self) -> None:
+        """Walk every waiting row in order: load it, send it, acquire its replicates."""
+        if self.queue.running or self._job is not None:
+            return
+        row = self.queue.begin()
+        self.queue_panel.refresh()
+        if row is None:
+            self.run_panel.say("the queue has no waiting rows", warn=True)
+            self._refresh_actions()
+            return
+        self.run_panel.say(
+            f"the queue starts: {self.queue.waiting + 1} row(s) to run")
+        self._start_row(row)
+
+    def _start_row(self, row: QueueRow) -> None:
+        """Open the row's method into the panes and put it on the wire.
+
+        The document goes through the panes rather than past them, so what a queued row
+        sends is what `build_method` makes of the panes -- the same method a trainee
+        would have sent by hand -- and the window shows the experiment that is running
+        rather than the one before it.
+        """
+        self.run_panel.say(
+            f"queue row {self.queue.index + 1} of {len(self.queue.rows)}: {row.name}"
+            + (f" -- {row.conditions}" if row.conditions else ""))
+        if not self._load_method(row.method_path, quiet=True):
+            self._row_finished(FAILED, "that method could not be opened")
+            return
+        self.conditions.setPlainText(row.conditions)
+        self.replicates.setValue(row.replicates)
+        method = self.build_method()
+        problems = (refusals(method) if method is not None
+                    else ["no boxes answered, so there is nothing to send to"])
+        if problems:
+            self._row_finished(FAILED, "; ".join(problems))
+            return
+        row.step = "sending"
+        self.queue_panel.refresh()
+        self._queue_job = self.send(setup=row.setup)
+        if self._queue_job is None:
+            self._row_finished(FAILED, "there was no method to send")
+
+    def _queue_step(self, job: Job, result: object) -> None:
+        """One of the queue's own jobs came back: acquire the row, or close it off."""
+        if isinstance(job, Send):
+            if self.queue.cancelled:
+                self._row_finished(STOPPED, self.queue.cancelled)
+                return
+            row = self.queue.current
+            if row is None:
+                return
+            row.step = "acquiring"
+            self.queue_panel.refresh()
+            self._queue_job = self.acquire()
+            if self._queue_job is None:
+                self._row_finished(FAILED, "there was no method to acquire")
+            return
+        row = self.queue.current
+        if row is None:
+            return
+        runs = list(result) if isinstance(result, list) else []
+        self._row_finished(outcome_of(row, runs))
+
+    def _row_finished(self, state: str, problem: str = "") -> None:
+        """Close the row in flight off and start the next one, or end the series."""
+        self._queue_job = None
+        row = self.queue.current
+        if row is None:
+            return
+        where = self.queue.index + 1
+        self.queue.finish(state, problem)
+        self.run_panel.say(
+            f"queue row {where} ({row.name}): {row.state}"
+            + (f" -- {row.outcome}" if row.outcome else ""),
+            warn=row.state in (FAILED, STOPPED))
+        following = self.queue.advance()
+        self.queue_panel.refresh()
+        if following is not None:
+            self._start_row(following)
+            return
+        self.run_panel.say(self.queue.summary, warn=bool(self.queue.cancelled))
+        self.statusBar().showMessage(self.queue.summary)
         self._refresh_actions()
 
     # -- opening what a run left ---------------------------------------------
@@ -917,6 +1125,11 @@ class MainWindow(QMainWindow):
             self.console_bar.show_status(result)
         self.run_panel.idle(f"{job.label}: done")
         self.statusBar().showMessage(f"{job.label}: done")
+        # After the log lines and before the buttons are re-read: the next row of a
+        # queue is submitted from here, and a window that had already re-enabled Acquire
+        # would offer a button that the very next statement takes away again.
+        if job is self._queue_job:
+            self._queue_step(job, result)
         self._refresh_actions()
 
     def _job_failed(self, job: Job, message: str) -> None:
@@ -925,6 +1138,8 @@ class MainWindow(QMainWindow):
         self.run_panel.say(f"{job.label} failed: {message}", warn=True)
         self.run_panel.idle(f"{job.label}: failed")
         self.statusBar().showMessage(f"{job.label}: failed")
+        if job is self._queue_job:
+            self._row_finished(FAILED, message)
         self._refresh_actions()
 
     def _state_read(self, name: str, state: object) -> None:
@@ -1104,6 +1319,7 @@ class MainWindow(QMainWindow):
         self.settings.output_dir = self.output_dir.text().strip()
         self.settings.conditions = self.conditions.toPlainText()
         self.settings.replicates = self.replicates.value()
+        self.settings.queue_open = self.queue_dock.isVisible()
         self.settings.sync()
         self._drain_timer.stop()
         self.worker.shutdown()

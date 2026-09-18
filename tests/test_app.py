@@ -28,18 +28,20 @@ import pytest
 pytest.importorskip("pytestqt")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QSettings  # noqa: E402
+from PySide6.QtCore import QSettings, Qt  # noqa: E402
 
 from clockwork import instrument as instrument_module  # noqa: E402
 from clockwork import method as method_module  # noqa: E402
 from clockwork.acq import FrameEnded, Warned  # noqa: E402
-from clockwork.acq.process import ConsoleConfig, ConsoleProcess  # noqa: E402
 from clockwork.acq.loop import (  # noqa: E402
     WHEN_ARMED,
+    FoldRecord,
     FrameRecord,
+    Run,
     declared_differences,
 )
-from clockwork.app import naming  # noqa: E402
+from clockwork.acq.process import ConsoleConfig, ConsoleProcess  # noqa: E402
+from clockwork.app import naming, queuepanel, runqueue  # noqa: E402
 from clockwork.app.boxstate import (  # noqa: E402
     AGREES,
     DIFFERS,
@@ -49,6 +51,7 @@ from clockwork.app.boxstate import (  # noqa: E402
 )
 from clockwork.app.launch import open_data_file, open_with  # noqa: E402
 from clockwork.app.panes import MARGIN_TAGS, BoxPane  # noqa: E402
+from clockwork.app.queuepanel import QueuePanel  # noqa: E402
 from clockwork.app.runlog import RunPanel, is_left_as_found  # noqa: E402
 from clockwork.app.settings import Settings  # noqa: E402
 from clockwork.app.window import MainWindow  # noqa: E402
@@ -829,3 +832,255 @@ def test_a_box_the_method_names_that_nothing_answered_for_is_still_editable(
     assert BOX in window.panes
     assert window.panes[BOX].status.text() == "off or absent"
     assert window.panes[BOX].text().startswith("STBLCLK,EXT")
+
+
+# --- the run queue's rules, with no window in sight -----------------------------------
+
+
+def a_run(stem: str, *, stopped: str = "", silence: int = 0, complete: bool = True):
+    """A `Run` in the shape the queue reads: a stem, an ending and its frames.
+
+    Built rather than acquired, because what is under test here is the sentence a row
+    shows in the morning and not the loop that produced it. A frame that did not acquire
+    is what makes a run incomplete, which is the queue's own reason to call a row failed.
+    """
+    method = make_method(stem=stem)
+    frames = tuple(
+        FrameRecord(method_frame=1, repetition=index + 1, frame_number=index + 1,
+                    outcome="acquired" if complete or index else "timed out",
+                    ended_by="silence" if index < silence else "counted")
+        for index in range(ACCUMULATIONS))
+    folds = () if not complete else (
+        FoldRecord(method_frame=1, frames_folded=(1,), rows=SCANS, seconds=0.1),)
+    return Run(method=method, raw_path=f"/data/{stem}.uimf",
+               summed_path=f"/data/{stem}.summed.uimf", frames=frames, folds=folds,
+               warnings=(), seconds=1.0, stopped_early=stopped or None)
+
+
+def test_a_row_reports_its_stems_its_stop_and_the_repetitions_that_went_quiet():
+    row = runqueue.QueueRow(method_path="/methods/clock.toml")
+    assert row.name == "clock"
+    state = runqueue.outcome_of(
+        row, [a_run("260918_ZZ_001"), a_run("260918_ZZ_002", silence=1)])
+    assert state == runqueue.DONE
+    assert row.stems == ("260918_ZZ_001", "260918_ZZ_002")
+    assert row.silent_frames == 1
+    assert "260918_ZZ_001, 260918_ZZ_002" in row.outcome
+    assert "1 repetition(s) ended on the silence" in row.outcome
+
+
+def test_a_stopped_run_is_neither_done_nor_failed_because_its_files_are_good():
+    row = runqueue.QueueRow(method_path="clock.toml")
+    state = runqueue.outcome_of(row, [a_run("260918_ZZ_001", stopped="by the operator")])
+    assert state == runqueue.STOPPED
+    assert "stopped: by the operator" in row.outcome
+
+
+def test_a_run_that_came_back_incomplete_fails_the_row():
+    row = runqueue.QueueRow(method_path="clock.toml")
+    assert runqueue.outcome_of(row, [a_run("260918_ZZ_001", complete=False)]) \
+        == runqueue.FAILED
+    assert runqueue.outcome_of(row, []) == runqueue.FAILED
+
+
+def test_a_failed_row_ends_the_series_and_the_rest_are_skipped_with_the_reason():
+    queue = runqueue.RunQueue([runqueue.QueueRow(method_path=f"{n}.toml")
+                               for n in ("a", "b", "c")])
+    assert queue.begin() is queue.rows[0]
+    assert queue.finish(runqueue.FAILED, "TBLSTRT was refused") is False
+    assert [row.state for row in queue.rows] == [
+        runqueue.FAILED, runqueue.SKIPPED, runqueue.SKIPPED]
+    assert "a failed" in queue.rows[1].problem
+    assert queue.advance() is None and not queue.running
+
+
+def test_a_row_that_says_go_on_is_walked_past_and_the_series_continues():
+    queue = runqueue.RunQueue([
+        runqueue.QueueRow(method_path="a.toml", go_on=True),
+        runqueue.QueueRow(method_path="b.toml"),
+    ])
+    queue.begin()
+    assert queue.finish(runqueue.FAILED, "the console would not start") is True
+    assert queue.advance() is queue.rows[1]
+    assert queue.rows[1].state == runqueue.RUNNING
+
+
+def test_stop_skips_what_has_not_started_and_leaves_the_row_in_flight_running():
+    """Stop does not abandon an acquisition: it ends after the current repetition and
+    its fold, so the row in flight is still running here and closes itself later."""
+    queue = runqueue.RunQueue([runqueue.QueueRow(method_path=f"{n}.toml")
+                               for n in ("a", "b")])
+    queue.begin()
+    queue.cancel("stopped by the operator")
+    assert queue.rows[0].state == runqueue.RUNNING
+    assert queue.rows[1].state == runqueue.SKIPPED
+    queue.finish(runqueue.STOPPED)
+    assert queue.advance() is None
+
+
+def test_a_skipped_row_is_offered_again_by_start_and_a_finished_one_is_not():
+    queue = runqueue.RunQueue([runqueue.QueueRow(method_path=f"{n}.toml")
+                               for n in ("a", "b")])
+    queue.begin()
+    queue.finish(runqueue.DONE)
+    queue.advance()
+    queue.cancel("stopped by the operator")
+    queue.finish(runqueue.STOPPED)
+    assert queue.begin() is None, "both rows have run; Start has nothing to offer"
+    queue.rows[1].reset()
+    assert queue.begin() is queue.rows[1]
+
+
+def test_the_row_in_flight_cannot_be_removed_or_moved_and_none_can_pass_it():
+    queue = runqueue.RunQueue([runqueue.QueueRow(method_path=f"{n}.toml")
+                               for n in ("a", "b", "c")])
+    queue.begin()
+    assert queue.remove(0) is False
+    assert queue.move(0, 1) == 0
+    # Row `c` may be brought forward to just after the row running, and no further:
+    # the positions before it have been run or skipped already.
+    assert queue.move(2, -1) == 1
+    assert queue.move(1, -1) == 1
+    assert [row.name for row in queue.rows] == ["a", "c", "b"]
+
+
+def test_a_row_added_while_one_runs_does_not_move_the_index():
+    queue = runqueue.RunQueue([runqueue.QueueRow(method_path=f"{n}.toml")
+                               for n in ("a", "b")])
+    queue.begin()
+    queue.add(runqueue.QueueRow(method_path="c.toml"), at=0)
+    assert queue.current is queue.rows[1] and queue.rows[1].name == "a"
+
+
+CONDITIONS = queuepanel.CONDITIONS_COLUMN
+REPS = queuepanel.REPLICATES_COLUMN
+OUTCOME = queuepanel.OUTCOME_COLUMN
+
+
+# --- the queue over the stand-ins -----------------------------------------------------
+
+
+def queued(window, tmp_path, name: str, method, **row) -> str:
+    """Save a method under its own name and put a row for it in the window's queue."""
+    path = str(tmp_path / f"{name}.toml")
+    method_module.save(method, path)
+    window.queue.add(runqueue.QueueRow(method_path=path, **row))
+    window.queue_panel.refresh()
+    return path
+
+
+def test_a_queue_of_two_methods_runs_both_in_order_and_records_where_they_went(
+        window, tmp_path, qtbot):
+    """The whole of what the queue is for: two rows, unattended, each sent before its
+    own acquisition because the two rows may name different methods."""
+    ready_to_acquire(window, qtbot, tmp_path)
+    queued(window, tmp_path, "first", make_method(), conditions="10 uM bradykinin")
+    queued(window, tmp_path, "second", make_method(scans=SCANS * 2), replicates=2)
+
+    runs: list[object] = []
+    window.worker.run_done.connect(runs.append)
+    window.start_queue()
+    until(qtbot, lambda: not window.queue.running and idle(window), timeout=300_000)
+
+    first, second = window.queue.rows
+    assert [row.state for row in window.queue.rows] == [runqueue.DONE, runqueue.DONE]
+    assert len(first.stems) == 1 and len(second.stems) == 2
+    assert len(set(first.stems + second.stems)) == 3, "three runs, three names"
+    assert len(runs) == 3
+    # The row's note reaches the file it was queued against, not the field's last value.
+    assert first.conditions == "10 uM bradykinin"
+    for stem in first.stems + second.stems:
+        assert (tmp_path / f"{stem}.sent.txt").is_file()
+    # The second row's method is the one that ran it: the window's panes were reloaded
+    # from the row's own document before it was sent.
+    assert window.scans.value() == SCANS * 2
+
+
+def test_a_queue_row_whose_method_will_not_open_fails_and_stops_the_series(
+        window, tmp_path, qtbot):
+    """And without a message box: a modal dialog raised by row four of an overnight
+    series holds the instrument until somebody walks in and clicks OK."""
+    ready_to_acquire(window, qtbot, tmp_path)
+    broken = tmp_path / "broken.toml"
+    broken.write_text("this is not a method\n", encoding="utf-8")
+    window.queue.add(runqueue.QueueRow(method_path=str(broken)))
+    queued(window, tmp_path, "after", make_method())
+
+    complaints: list[str] = []
+    window._complain = lambda title, detail: complaints.append(title)
+    window.start_queue()
+    until(qtbot, lambda: not window.queue.running and idle(window), timeout=120_000)
+
+    assert [row.state for row in window.queue.rows] == [
+        runqueue.FAILED, runqueue.SKIPPED]
+    assert complaints == [], "a failed row must not raise a dialog nobody is there for"
+    assert "could not be opened" in window.queue.rows[0].problem
+    assert "stops on a failure" in window.queue.rows[1].problem
+
+
+def test_a_row_that_says_go_on_lets_the_series_reach_the_next_one(
+        window, tmp_path, qtbot):
+    ready_to_acquire(window, qtbot, tmp_path)
+    broken = tmp_path / "broken.toml"
+    broken.write_text("not a method\n", encoding="utf-8")
+    window.queue.add(runqueue.QueueRow(method_path=str(broken), go_on=True))
+    queued(window, tmp_path, "after", make_method())
+
+    window.start_queue()
+    until(qtbot, lambda: not window.queue.running and idle(window), timeout=300_000)
+    assert [row.state for row in window.queue.rows] == [
+        runqueue.FAILED, runqueue.DONE]
+
+
+def test_a_waiting_row_is_edited_while_the_row_above_it_runs(window, tmp_path, qtbot):
+    """The queue exists to be added to and changed while it runs; only the row in
+    flight is fixed, because its values were on the wire before the edit."""
+    ready_to_acquire(window, qtbot, tmp_path)
+    queued(window, tmp_path, "first", make_method(accumulations=6))
+    queued(window, tmp_path, "second", make_method())
+
+    window.start_queue()
+    qtbot.waitUntil(lambda: window.run_panel.progress.repetition >= 1, timeout=120_000)
+    assert window.queue.index == 0
+    panel = window.queue_panel
+    panel.tree.topLevelItem(1).setText(CONDITIONS, "changed while row 1 ran")
+    panel.tree.topLevelItem(1).setText(REPS, "2")
+    # The running row's cells are not a form: what it is doing was decided when it
+    # started.
+    assert not panel.tree.topLevelItem(0).flags() & Qt.ItemFlag.ItemIsEditable
+    assert panel.tree.topLevelItem(1).flags() & Qt.ItemFlag.ItemIsEditable
+
+    window.stop()
+    until(qtbot, lambda: not window.queue.running and idle(window), timeout=180_000)
+    assert window.queue.rows[1].conditions == "changed while row 1 ran"
+    assert window.queue.rows[1].replicates == 2
+    assert window.queue.rows[0].state == runqueue.STOPPED
+    assert window.queue.rows[1].state == runqueue.SKIPPED
+
+
+def test_the_buttons_a_trainee_presses_are_greyed_out_while_the_queue_runs(
+        window, tmp_path, qtbot):
+    ready_to_acquire(window, qtbot, tmp_path)
+    queued(window, tmp_path, "only", make_method(accumulations=6))
+    assert window.queue_panel.start_button.isEnabled()
+    window.start_queue()
+    qtbot.waitUntil(lambda: window.run_panel.progress.repetition >= 1, timeout=120_000)
+    assert not window.acquire_button.isEnabled()
+    assert not window.setup_button.isEnabled()
+    assert not window.queue_panel.start_button.isEnabled()
+    assert window.queue_panel.stop_button.isEnabled()
+    window.stop()
+    until(qtbot, lambda: not window.queue.running and idle(window), timeout=180_000)
+
+
+def test_the_queue_panel_puts_back_a_cell_the_queue_owns(qtbot):
+    """`ItemIsEditable` is per item, so a double-click on the outcome opens an editor
+    over a column the queue writes. What it says is put back."""
+    queue = runqueue.RunQueue([runqueue.QueueRow(method_path="a.toml", replicates=3)])
+    panel = QueuePanel(queue)
+    qtbot.addWidget(panel)
+    item = panel.tree.topLevelItem(0)
+    item.setText(OUTCOME, "typed over the outcome")
+    assert item.text(OUTCOME) == ""
+    item.setText(REPS, "not a number")
+    assert queue.rows[0].replicates == 3 and item.text(REPS) == "3"

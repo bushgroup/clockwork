@@ -130,6 +130,22 @@ class Settings:
     def open_state_panels(self, value: object) -> None:
         self._settings.setValue("open_state_panels", ",".join(sorted(value)))
 
+    @property
+    def queue_open(self) -> bool:
+        """Whether the run queue's dock was left showing (task 53).
+
+        Shut by default. One method at a time with a replicate count is the ordinary
+        way to work and the queue is the thing a trainee reaches for on the days they
+        leave a series running, so it is remembered rather than opened: a window that
+        offered a queue every morning would be offering it mostly to people not using
+        one.
+        """
+        return str(self._settings.value("queue_open", "")).lower() in ("true", "1")
+
+    @queue_open.setter
+    def queue_open(self, value: bool) -> None:
+        self._settings.setValue("queue_open", bool(value))
+
     # -- the window itself ---------------------------------------------------
 
     @property
