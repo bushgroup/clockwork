@@ -1,22 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Placeholder icon art for the packaging chain built in task 32: a plain clock face,
-  the package's own name, nothing borrowed from mainspring's spiral, so the build has
-  something real to rasterise. Task 08's successors in the lab record own
-  the window's actual identity and may replace this file outright.
+  Two interlocking gears, the way a clock movement actually looks with the case open.
+  Same eight-stop viridis ramp as mainspring's spiral (../mainspring/.../mainspring.svg),
+  run diagonally instead of radially so it reads as the same family rather than a copy.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
-  <circle cx="128" cy="128" r="118" fill="#1b2733" stroke="#8fa6bd" stroke-width="8"/>
-  <circle cx="128" cy="128" r="6" fill="#e7edf3"/>
-  <!-- hour hand -->
-  <line x1="128" y1="128" x2="128" y2="68" stroke="#e7edf3" stroke-width="12" stroke-linecap="round"/>
-  <!-- minute hand -->
-  <line x1="128" y1="128" x2="176" y2="150" stroke="#e7edf3" stroke-width="10" stroke-linecap="round"/>
-  <!-- twelve tick marks -->
-  <g stroke="#8fa6bd" stroke-width="6" stroke-linecap="round">
-    <line x1="128" y1="20" x2="128" y2="40"/>
-    <line x1="236" y1="128" x2="216" y2="128"/>
-    <line x1="128" y1="236" x2="128" y2="216"/>
-    <line x1="20" y1="128" x2="40" y2="128"/>
-  </g>
+  <title>clockwork</title>
+  <defs>
+    <linearGradient id="viridis" x1="18" y1="228" x2="238" y2="28" gradientUnits="userSpaceOnUse">
+      <stop offset="0.0%" stop-color="#440154"/>
+      <stop offset="14.3%" stop-color="#46327e"/>
+      <stop offset="28.6%" stop-color="#365c8d"/>
+      <stop offset="42.9%" stop-color="#277f8e"/>
+      <stop offset="57.1%" stop-color="#1fa187"/>
+      <stop offset="71.4%" stop-color="#4ac16d"/>
+      <stop offset="85.7%" stop-color="#a0da39"/>
+      <stop offset="100.0%" stop-color="#fde725"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#viridis)" fill-rule="evenodd" d="M163.33 139.41 L179.31 147.52 L179.31 168.48 L163.33 176.59 L172.39 192.06 L161.05 209.69 L143.22 207.88 L142.48 225.79 L123.41 234.50 L109.39 223.33 L99.09 237.99 L78.34 235.01 L72.58 218.04 L55.98 224.80 L40.14 211.08 L44.48 193.68 L26.85 190.40 L20.95 170.29 L34.00 158.00 L20.95 145.71 L26.85 125.60 L44.48 122.32 L40.14 104.92 L55.98 91.20 L72.58 97.96 L78.34 80.99 L99.09 78.01 L109.39 92.67 L123.41 81.50 L142.48 90.21 L143.22 108.12 L161.05 106.31 L172.39 123.94 Z M72.00 158.00 A28.00 28.00 0 1 1 128.00 158.00 A28.00 28.00 0 1 1 72.00 158.00 Z"/>
+  <path fill="url(#viridis)" fill-rule="evenodd" d="M214.00 88.00 L222.48 100.48 L213.23 119.69 L198.19 120.84 L193.72 135.25 L172.93 139.99 L162.65 128.95 L148.60 134.44 L131.93 121.15 L134.16 106.22 L121.10 98.66 L121.10 77.34 L134.16 69.78 L131.93 54.85 L148.60 41.56 L162.65 47.05 L172.93 36.01 L193.72 40.75 L198.19 55.16 L213.23 56.31 Z M156.00 88.00 A16.00 16.00 0 1 1 188.00 88.00 A16.00 16.00 0 1 1 156.00 88.00 Z"/>
 </svg>
