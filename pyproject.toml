@@ -1,6 +1,6 @@
 [project]
 name = "clockwork"
-version = "0.1.0"
+version = "0.9.0"
 description = "Control software for SLIMPHONY-style ion mobility mass spectrometers: MIPS pulse sequences, SA220P acquisition, UIMF output."
 readme = "README.md"
 requires-python = "==3.12.*"
