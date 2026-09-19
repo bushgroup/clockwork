@@ -24,6 +24,10 @@ you are reading this file *without* that import, you have a public clone — the
   `clockwork.acq` (ZeroMQ client to the acquisition console, UIMF file and parameter creation) and
   `clockwork.method` (the saved per-box strings plus acquisition settings) **never import Qt**;
   `clockwork.app` is PySide6 on top of them. A script that drives one box must not pull a GUI in.
+- **mainspring is a pinned dependency, not a vendored one.** The writer names, the parameter
+  constants and the words that launch the viewer are imported from `mainspring.uimf` and
+  `mainspring.interface`, never retyped; moving the pin means re-running `uv run
+  tools/check_public.py` and `uv run pytest` here in the same change.
 - **Never talk to hardware from the UI thread.** An `STBLDAT` table string must stream to the box
   without a stall of more than a few seconds or the box abandons it; sends and acquisitions run on
   worker threads and report back.
@@ -54,4 +58,4 @@ you are reading this file *without* that import, you have a public clone — the
 ## Maintaining this file
 
 This file stays lean: rules for working *in this repo*, nothing about the science or the project's
-state. Those belong in the lab repo's CLAUDE.md and notes. Keep it under 60 lines.
+state. Those belong in the lab repo's CLAUDE.md and notes. Keep it under 65 lines.
