@@ -4,8 +4,8 @@
 .DESCRIPTION
     Drives PyInstaller against packaging/clockwork.spec (dist/ and build/ land at the
     repo root regardless of caller cwd), then launches the built .exe twice -- timing
-    from process start to the placeholder window appearing -- so cold and warm startup
-    are both on record. The build is onedir only: a clockwork/ folder holding
+    from process start to the Qt window appearing -- so cold and warm startup are both
+    on record. The build is onedir only: a clockwork/ folder holding
     clockwork.exe beside its dependencies, no extraction, packaged by Inno Setup
     (packaging/clockwork.iss) -- mainspring measured the alternative, a single .exe that
     extracts to a temp directory on every launch, unacceptably slow (mainspring's
@@ -89,9 +89,13 @@ if ((Test-Path $consolePayload) -and (Get-ChildItem $consolePayload -ErrorAction
 }
 
 Write-Host "Running --self-check against the built .exe..." -ForegroundColor Cyan
-& $exePath --self-check
-if ($LASTEXITCODE -ne 0) {
-    throw "clockwork.exe --self-check failed (exit $LASTEXITCODE) -- see its own output above."
+# A windowed exe (console=False, task 60) returns control to PowerShell the instant it
+# is started, so `& $exePath --self-check; $LASTEXITCODE` would read the exit code of
+# nothing -- clockwork.app.main attaches to this console on its own (AttachConsole) and
+# prints here, but the process itself still has to be waited on.
+$selfCheck = Start-Process -FilePath $exePath -ArgumentList "--self-check" -Wait -PassThru
+if ($selfCheck.ExitCode -ne 0) {
+    throw "clockwork.exe --self-check failed (exit $($selfCheck.ExitCode)) -- see its own output above."
 }
 
 $size = (Get-ChildItem (Split-Path $exePath) -Recurse | Measure-Object -Property Length -Sum).Sum
@@ -105,14 +109,10 @@ function Measure-Startup([string]$label) {
     $proc = Start-Process -FilePath $exePath -PassThru
     $start = Get-Date
     $deadline = $start.AddSeconds($TimeoutSeconds)
-    # `console=True` (clockwork.spec's own reasoning: --self-check needs somewhere to
-    # print) means this process owns a console window as well as the one Qt shows, and
-    # the console exists, with Windows's default "no title set yet" placeholder -- the
-    # untitled window's own path -- before clockwork.app.main reaches the line that
-    # renames it. So MainWindowHandle alone is not "the app is up": wait past that
-    # placeholder too, the same wait mainspring's windowed build never needed.
-    while ((-not $proc.HasExited) -and
-           (($proc.MainWindowHandle -eq [IntPtr]::Zero) -or ($proc.MainWindowTitle -eq $exePath))) {
+    # Windowed (console=False, task 60), the same shape as mainspring's own build: one
+    # window, the Qt one, so MainWindowHandle alone is "the app is up" -- no console to
+    # race against and no placeholder title to wait past.
+    while ((-not $proc.HasExited) -and ($proc.MainWindowHandle -eq [IntPtr]::Zero)) {
         Start-Sleep -Milliseconds 25
         $proc.Refresh()
         if ((Get-Date) -gt $deadline) {

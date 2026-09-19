@@ -43,6 +43,80 @@ def _numba_cache_dir() -> str:
     return os.path.join(base, "clockwork", "numba-cache")
 
 
+class _GuardedStream:
+    """A stream that never raises: `print`, `parser.error` and argparse's usage message
+    all call `write`/`flush` on `sys.stdout`/`sys.stderr` without expecting either to
+    fail. A windowed build (`packaging/clockwork.spec`, `console=False`) starts both as
+    `None`, and a self-check's report file may fail to open (a locked file, a read-only
+    profile) -- neither should be the reason an exit code never comes back.
+    """
+
+    def __init__(self, stream: object | None = None) -> None:
+        self._stream = stream
+
+    def write(self, text: str) -> None:
+        if self._stream is None:
+            return
+        try:
+            self._stream.write(text)
+        except (AttributeError, OSError, ValueError):
+            pass
+
+    def flush(self) -> None:
+        if self._stream is None:
+            return
+        try:
+            self._stream.flush()
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
+def _attach_parent_console() -> bool:
+    """Undo `console=False`'s redirection to nothing by attaching this process's
+    stdio to the console it was started from, so a `--self-check` run from PowerShell
+    or cmd prints where the operator is looking (task 60). False when there is no
+    parent console to attach to -- launched from the Start menu, or by anything else
+    that is not itself a console -- which is not a failure: the caller falls back to
+    `_open_report_file`.
+    """
+    if sys.platform != "win32":
+        return False
+    import ctypes
+
+    attach_parent_process = -1
+    if not ctypes.windll.kernel32.AttachConsole(attach_parent_process):
+        return False
+    sys.stdout = _GuardedStream(open("CONOUT$", "w", encoding="utf-8", errors="replace"))
+    sys.stderr = _GuardedStream(open("CONOUT$", "w", encoding="utf-8", errors="replace"))
+    return True
+
+
+def _report_log_path() -> str:
+    """Where `--self-check`'s report goes with no console to attach to: a per-user log
+    file beside `_numba_cache_dir`'s own directory, so a launch with nothing to print to
+    still leaves a file an operator can go and read (task 60)."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/.cache")
+    return os.path.join(base, "clockwork", "self-check.log")
+
+
+def _open_report_file() -> str | None:
+    """Point stdout and stderr at `_report_log_path()`, for a `--self-check` run with no
+    parent console to attach to. Returns the path on success, or None if even the log
+    file could not be opened -- in which case both streams are left silently guarded
+    rather than raising, and only the exit code carries the verdict.
+    """
+    path = _report_log_path()
+    stream = None
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        stream = open(path, "a", encoding="utf-8")
+    except OSError:
+        pass
+    sys.stdout = _GuardedStream(stream)
+    sys.stderr = _GuardedStream(stream)
+    return path if stream is not None else None
+
+
 def _seed_numba_cache(cache_dir: str) -> None:
     """Copy a build-time pre-warmed numba cache into `cache_dir`, on a frozen build's
     first launch only (`tools/warm_numba_cache.py`; mirrors mainspring's
@@ -139,6 +213,13 @@ def main(argv: list[str] | None = None) -> int:
     """Console-script entry point, and the frozen build's entry point through
     `packaging/entrypoint.py`.
     """
+    # `console=False` (packaging/clockwork.spec, task 60) starts both streams as
+    # `None`; guarded before the parser exists so an unrecognised option's usage
+    # message -- argparse's own error path -- cannot raise on a stream that is not
+    # there, whether or not `--self-check` is the argument that follows.
+    sys.stdout = _GuardedStream(sys.stdout)
+    sys.stderr = _GuardedStream(sys.stderr)
+
     parser = argparse.ArgumentParser(prog="clockwork")
     parser.add_argument(
         "--self-check", action="store_true",
@@ -161,20 +242,12 @@ def main(argv: list[str] | None = None) -> int:
 
     import clockwork
 
-    if sys.platform == "win32":
-        # `console=True` (see `packaging/clockwork.spec`) means this process owns a
-        # console window as well as the one Qt shows below, and Windows titles a
-        # console "<path to the exe>" until something says otherwise -- which is also
-        # what a build that crashed before reaching this line leaves it as. Naming it
-        # here is what lets `tools/build_exe.ps1`'s launch check tell "reached working
-        # code" from "died on the way here" without caring which of the two windows it
-        # happens to see first.
-        import ctypes
-
-        ctypes.windll.kernel32.SetConsoleTitleW(f"clockwork {clockwork.__version__}")
-
     if args.self_check:
-        return _self_check()
+        report_path = None if _attach_parent_console() else _open_report_file()
+        code = _self_check()
+        if report_path is not None:
+            print(f"self-check report written to {report_path}")
+        return code
 
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication

@@ -201,11 +201,13 @@ _exe_common = dict(
     strip=False,
     upx=False,
     upx_exclude=[],
-    # Windowed (console=False, mainspring's choice) redirects stdout/stderr to nowhere,
-    # which would swallow --self-check's own report -- the one thing this placeholder
-    # exists to run. Console stays on while --self-check does the packaging chain's
-    # talking; task 50's real window is free to turn it off once nothing needs it.
-    console=True,
+    # Windowed, mainspring's own choice (task 60): a trainee launching the installed
+    # build sees the Qt window and nothing else, with no second, closeable console
+    # window whose close box kills the run. Windowed mode redirects stdout/stderr to
+    # nowhere, which would otherwise swallow --self-check's report -- clockwork.app.main
+    # answers that by attaching to the console it was started from (or falling back to
+    # a log file) rather than by keeping a console around for it.
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

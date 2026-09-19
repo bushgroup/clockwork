@@ -62,9 +62,11 @@ it to `PATH` yourself, until something does that for every clone.
 
 - **No file association.** mainspring is the only UIMF viewer (`CLAUDE.md`'s decisions of
   record), so `clockwork.iss` carries no `[Registry]` section and no `associate` task.
-- **`console=True`**, not mainspring's windowed build: a windowed build redirects stdout/stderr to
-  nowhere, which would swallow `--self-check`'s report. The real window kept it on for that
-  reason; turning it off costs nothing the day nothing needs the console.
+- **Windowed (`console=False`), mainspring's own choice, since task 60.** A trainee launching the
+  installed build sees the Qt window and nothing else -- no second, closeable console window whose
+  close box kills the run. `--self-check` still reports: `clockwork.app.main` attaches to the
+  console it was started from (`AttachConsole`) when there is one, and falls back to a per-user log
+  file (`%LOCALAPPDATA%\clockwork\self-check.log`) when there is not.
 - **`pyserial`'s non-Windows `list_ports` backends are excluded** (`list_ports_linux`,
   `list_ports_osx`) -- dead code on the only OS this ships for.
 - **The icon is placeholder art** (`packaging/icon/clockwork.svg`, one plain clock face, one
@@ -108,9 +110,4 @@ name, so the exclusion list in `clockwork.spec` is doing real work, not standing
   installer itself compiles clean on MASSTRO -- what remains is running it on a Windows install
   that never had the dev toolchain on it, since developing on the deployment machine is what hides
   a missing dependency until someone else runs the build.
-- **The console subsystem is on** (`console=True`) so `--self-check` has somewhere to print;
-  `tools/build_exe.ps1`'s launch check waits past the console's own default-titled window before
-  reading the title, which a windowed (`console=False`) build never needed to. The real window
-  left it on, so a trainee launching the installed build sees a console window beside the Qt one;
-  whether that is worth keeping for `--self-check`'s sake is the open half.
 
