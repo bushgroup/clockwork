@@ -37,6 +37,7 @@ import re
 import time
 
 import pytest
+from mainspring.interface import read_live_pointer
 from mainspring.uimf import UimfFile
 
 import clockwork
@@ -60,6 +61,7 @@ from clockwork.acq import (
     refusals,
     run_acquisition,
 )
+from clockwork.acq import loop as loop_module
 from clockwork.acq import send_phases as _send_phases
 from clockwork.mips import Box, BoxRejected, FakeBox, compile_table, digital_events
 from clockwork.mips import compressor as mips_compressor
@@ -1820,3 +1822,96 @@ def test_a_comment_is_not_a_table_the_counts_are_checked_against():
                              per_repetition_table(SCANS)])
     assert refusals(method) == []
     assert cautions(method) == []
+
+
+# --- the run in progress, for a viewer already open (lab record, task 58) ---------------
+
+
+def test_a_run_publishes_the_raw_file_it_is_writing_and_withdraws_it_at_the_end(rig):
+    """The pointer a mainspring left open with `Live` ticked reads every couple of
+    seconds, so that following an acquisition costs nobody a path typed into a dialog.
+
+    The assertion that matters is the one taken *during* the run: a pointer written and
+    removed inside `run_acquisition` would leave exactly the same disk afterwards as one
+    never written at all. It is taken from the progress callback, which the loop calls
+    on its own thread once a frame has begun and so at a moment when the raw file exists
+    and is being appended to.
+    """
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes, progress=None)
+    during: list[object] = []
+
+    def watch(event):
+        if isinstance(event, FrameBegun):
+            during.append(read_live_pointer())
+
+    run = rig.acquire(method, boxes, progress=watch)
+    assert run.complete
+    assert during and all(seen is not None for seen in during)
+    assert {seen.path for seen in during} == {run.raw_path}
+    assert {seen.writer for seen in during} == {"clockwork"}
+    # `started` drives nothing and is there for an operator asking why their window
+    # moved; what is checked is that it was filled in at all.
+    assert all(seen.started for seen in during)
+    assert read_live_pointer() is None
+
+
+def test_a_run_that_raises_still_withdraws_the_pointer(rig, monkeypatch):
+    """The `finally` is the half that matters. A pointer left standing says a run is in
+    progress when none is, and although mainspring guards against one nobody withdrew,
+    that guard is for a power cut rather than for an exception.
+
+    The failure is put inside the loop rather than in a box or the console on purpose:
+    those are frame outcomes, recorded against their frame and not raised
+    (`run_acquisition`'s docstring), so the only way to reach the `finally` by raising is
+    for something to go wrong that the loop does not have an answer for. What that is
+    does not matter -- that it is not swallowed does.
+    """
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes, progress=None)
+
+    def boom(self, **kwargs):
+        assert read_live_pointer() is not None, "published before the run begins"
+        raise RuntimeError("the console fell over")
+
+    monkeypatch.setattr(loop_module._Loop, "run", boom)
+    with pytest.raises(RuntimeError, match="fell over"):
+        rig.acquire(method, boxes)
+    assert read_live_pointer() is None
+
+
+def test_a_run_the_operator_stopped_withdraws_the_pointer_too(rig):
+    """Stop is not an error and does not raise: the run folds the frame it was in,
+    closes its files and returns. That path goes through the same `close`."""
+    method = make_method(accumulations=3)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes, progress=None)
+    run = rig.acquire(method, boxes, stop=lambda: "the operator pressed Stop")
+    assert run.stopped_early
+    assert read_live_pointer() is None
+
+
+def test_a_recording_handed_in_is_not_published_by_the_run(rig, tmp_path):
+    """Whether a person is watching is the caller's knowledge, not this function's.
+    A recording made outside and handed over was made by somebody who could have asked
+    to publish it and did not, so `run_acquisition` does not decide for them."""
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes, progress=None)
+    geometry = acq.Geometry.from_tof_width(
+        rig.fake.tof_width(), sample_rate_hz=rig.console.sample_rate_hz,
+        post_trigger_samples=rig.fake.post_trigger_samples,
+    )
+    recording = acq.Recording.create(tmp_path, method, geometry)
+    during: list[object] = []
+
+    def watch(event):
+        if isinstance(event, FrameBegun):
+            during.append(read_live_pointer())
+
+    run = rig.acquire(method, boxes, recording=recording, progress=watch)
+    assert run.complete
+    assert during and all(seen is None for seen in during)
+    assert recording.live_pointer is None

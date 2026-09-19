@@ -1873,6 +1873,13 @@ def run_acquisition(
     console's `PostTriggerDelay` in samples and the number every scan's leading zero run
     is built from.
 
+    **A recording created here publishes the run**, which is what lets a mainspring
+    window already open with `Live` ticked follow this acquisition without anybody
+    typing a path: the raw file's name goes into mainspring's run pointer at the
+    creation above and is withdrawn by the `close` in the `finally` below, on every way
+    out of this function -- a run that finished, a run the operator stopped, a run that
+    raised, and a run abandoned after `abort_after` failures (lab record, task 58).
+
     `frame_timeout` defaults to twice how long the frame should take plus a floor, which
     is derived from the pusher period the console measured; the constants say why one
     fixed number will not do. `empty_settle` is how long a frame that published nothing
@@ -1977,6 +1984,13 @@ def run_acquisition(
                 box_state=snapshot.render() if snapshot else "",
                 conditions=snapshot.conditions.strip() if snapshot else "",
                 clock=clock, started=started, overwrite=overwrite,
+                # A run this function created the files for is a run somebody pressed
+                # Acquire for, so it is published: a mainspring left open with `Live`
+                # ticked picks it up within a couple of seconds and follows the raw
+                # file, and the `finally` below withdraws it. A recording handed in
+                # was created by a caller who could have asked for the same thing and
+                # did not (lab record, task 58).
+                publish=True,
             )
         loop = _Loop(
             method=method, boxes=boxes, console=console, stream=stream,
@@ -1995,8 +2009,9 @@ def run_acquisition(
         run = loop.run(replicate=replicate)
     finally:
         # A recording is finished when the run that fills it is, whoever made it, and
-        # closing it is what honours `keep_raw`. The chain is the other way round: it
-        # outlives a run, so it is stopped only by whoever opened it.
+        # closing it is what honours `keep_raw` and withdraws the run pointer. The
+        # chain is the other way round: it outlives a run, so it is stopped only by
+        # whoever opened it.
         if recording is not None:
             recording.close()
         if owns_chain:

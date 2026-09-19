@@ -17,7 +17,9 @@ Two files come out of one acquisition (lab record, task 02).
 The raw file keeps the plain name because it is the one that exists first, grows during
 the run and can be watched live (Matt, 2026-09-10). The companion is today's file shape,
 which is what trainees and PNNL's tools open, and `keep_raw = false` in the method leaves
-only it behind.
+only it behind. A recording made with `publish=True` names the raw file in mainspring's
+run pointer for as long as it is open, which is how a viewer already running finds the
+acquisition without being pointed at it (lab record, task 58).
 
 **Two phases per frame.** `Recording.begin_frame` writes the frame's parameters and hands
 back the `FrameRequest` to give the console; `Recording.end_frame` writes what only the
@@ -48,6 +50,7 @@ import time
 from collections.abc import Callable, Iterator
 
 import numpy as np
+from mainspring.interface import clear_live_pointer, write_live_pointer
 from mainspring.uimf import (
     FrameSpec,
     GlobalSpec,
@@ -354,6 +357,11 @@ class Recording:
         self._elapsed: dict[int, float] = {}
         self._began: dict[int, float] = {}
         self._closed = False
+        # Where this recording published itself as the run in progress, or None if it
+        # did not. Kept rather than re-derived, so that the clear at the close takes the
+        # file away from where the write put it even if the environment has moved under
+        # a long run (`mainspring.interface.live_pointer_path` reads a variable).
+        self._pointer: str | None = None
 
     @classmethod
     def create(
@@ -372,6 +380,7 @@ class Recording:
         clock: Callable[[], float] = time.perf_counter,
         started: float | None = None,
         overwrite: bool = False,
+        publish: bool = False,
     ) -> Recording:
         """Create the raw file, with its schema and global parameters, and return the
         recording that will fill it.
@@ -422,6 +431,21 @@ class Recording:
 
         The summed companion is not created here. It is created by the first `fold`, so
         that a run which never gets that far does not leave an empty second file.
+
+        **`publish` says this is a run and not merely a file.** It writes the raw file's
+        path into mainspring's run pointer, which a viewer already open with `Live`
+        ticked reads every couple of seconds, so that watching an acquisition costs
+        nobody a path typed into a file dialog; `close` takes it away again. The raw
+        file is what is published rather than the companion, because it is the one that
+        exists first and grows during the run (lab record, task 58).
+
+        It is off by default because the pointer is a claim that an operator is running
+        the instrument now, and most of the ways a `Recording` gets made are not that: a
+        bench script re-folding an old file, a test, and `clockwork --self-check`, which
+        writes a real UIMF into a temporary directory and would otherwise drag an
+        operator's window off a live run and then clear the pointer that run had
+        published. `run_acquisition` passes it; a caller who builds a `Recording` itself
+        and hands it over is the one who knows whether a person is watching.
         """
         stem = stem or method.acquisition.file_stem
         path = raw_path(directory, stem)
@@ -442,6 +466,13 @@ class Recording:
         recording = cls.__new__(cls)
         recording._init(method, geometry, writer, globals_, instrument, clock,
                         clock() if started is None else float(started), overwrite)
+        if publish:
+            # After the writer, so that the file a viewer is sent to exists by the time
+            # it is named. Suppressed rather than raised: `%LOCALAPPDATA%` being
+            # unwritable is a reason for a second window not to follow this run, and
+            # not a reason for the run not to happen.
+            with contextlib.suppress(OSError):
+                recording._pointer = write_live_pointer(writer.path, writer="clockwork")
         return recording
 
     # --- paths -------------------------------------------------------------------------
@@ -455,6 +486,16 @@ class Recording:
     def summed_path(self) -> str:
         """Where the fold writes, whether or not it has written yet."""
         return summed_path(self._raw.path)
+
+    @property
+    def live_pointer(self) -> str | None:
+        """The run pointer this recording published, or `None` if it published none.
+
+        `None` both for a recording created without `publish` and for one whose close
+        has already withdrawn it, which is the same question a caller wants answered:
+        whether anything out there is currently being told to follow this file.
+        """
+        return self._pointer
 
     def frames_of(self, method_frame: int) -> list[int]:
         """The raw frame numbers one method frame produced, in acquisition order."""
@@ -719,6 +760,12 @@ class Recording:
         is the only record of how one repetition differed from the next, which is what a
         drift correction would need (lab record, task 02); a run that produced no
         companion has nothing to be replaced by.
+
+        **The run pointer is withdrawn before the raw file is removed, not after.** It
+        is the same two lines either way and the order is the whole of the difference:
+        a pointer still standing while `keep_raw = false` deletes the file it names is
+        an instruction to follow a file this process is in the act of taking away
+        (lab record, task 58).
         """
         if self._closed:
             return
@@ -726,6 +773,9 @@ class Recording:
         self._raw.close()
         if self._summed is not None:
             self._summed.close()
+        if self._pointer is not None:
+            clear_live_pointer(self._pointer)
+            self._pointer = None
         if not self.keep_raw and self._folded:
             with contextlib.suppress(OSError):
                 os.remove(self._raw.path)

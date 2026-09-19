@@ -202,3 +202,11 @@ raw per-repetition file otherwise. mainspring's own installer registers itself f
 is what clockwork tries first; where that registration is not in force, set mainspring's path in
 this window's settings and the button uses that instead. mainspring is the only viewer clockwork
 carries an opinion about. Nothing here plots data.
+
+To watch a run as it is acquired, leave a mainspring window open with `Live` ticked before
+pressing Acquire. clockwork publishes the file it is writing when the run starts and withdraws it
+when the run ends, and mainspring 1.6.0 and later read that every two seconds, so the window
+moves to each acquisition of a session as it begins and says which run it is following. No path
+is typed and nothing is configured. The window follows the raw per-repetition file, which is the
+one that grows during a run; the summed companion is written at the end, and **Open in
+mainspring** is how to reach it.

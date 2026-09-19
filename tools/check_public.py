@@ -178,12 +178,35 @@ def lab_side_references() -> list[str]:
     return out
 
 
+def isolate_run_pointer() -> None:
+    """Send this run's mainspring run pointer to a scratch file of its own.
+
+    The sections below acquire, which publishes the file being written as the run in
+    progress (lab record, task 58). On an instrument PC that pointer is the real one,
+    read by whatever mainspring the operator has open, so a self-check run during an
+    acquisition would drag their window onto a stand-in's invented spectrum and then
+    withdraw the pointer the real run had published. The variable is mainspring's own
+    override, meant for exactly this; the name is imported rather than spelled out.
+    """
+    import atexit
+    import shutil
+    import tempfile
+
+    from mainspring.interface import LIVE_POINTER_ENV, LIVE_POINTER_NAME
+
+    scratch = tempfile.mkdtemp(prefix="clockwork-self-check-")
+    atexit.register(shutil.rmtree, scratch, True)
+    os.environ[LIVE_POINTER_ENV] = os.path.join(scratch, LIVE_POINTER_NAME)
+
+
 def main() -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except AttributeError:
             pass
+
+    isolate_run_pointer()
 
     section("package and versions")
     import clockwork
@@ -787,6 +810,31 @@ def main() -> int:
         check_true(f"and it is exactly {accumulations} times one repetition, bin for bin",
                    exact and len(one) > 0)
 
+        # The run pointer: what a mainspring already open with `Live` ticked reads to
+        # find the acquisition, published by the recording that owns the raw file and
+        # withdrawn when it closes (lab record, task 58). The schema is mainspring's
+        # and is imported, here as in `clockwork.acq.uimf`, so that no spelling of it
+        # exists in this repository to disagree with the one in that one.
+        from mainspring.interface import read_live_pointer
+
+        published = acq.Recording.create(directory, recipe, geometry, stem="pointer",
+                                         publish=True)
+        named = read_live_pointer()
+        check_true("a published recording names its raw file as the run in progress, "
+                   "for a viewer that is already open to follow",
+                   named is not None and named.path == published.raw_path
+                   and named.writer == "clockwork"
+                   and os.path.isfile(published.raw_path))
+        published.close()
+        check_true("and closing it withdraws the pointer, so a viewer is not left "
+                   "following a run that has ended",
+                   read_live_pointer() is None and published.live_pointer is None)
+        with acq.Recording.create(directory, recipe, geometry,
+                                  stem="unpublished") as quiet:
+            check_true("while a recording that did not publish leaves the pointer "
+                       "alone, a file not being a run",
+                       quiet.live_pointer is None and read_live_pointer() is None)
+
     section("one whole acquisition")
     # Task 23's loop, which is the section above and the two before it composed: the
     # boxes loaded and armed, one console frame per repetition with the start list
@@ -1093,6 +1141,11 @@ def main() -> int:
                     "and folded the method frame into a companion of today's shape",
                     len(run.folds) == 1 and run.folds[0].error is None
                     and UimfFile(run.summed_path).frame_params(1).scans == scans,
+                )
+                check_true(
+                    "and withdrew the run pointer on its way out, so a viewer that "
+                    "followed this run is not still being told it is in progress",
+                    read_live_pointer() is None,
                 )
 
                 replicate = acq.run_acquisition(

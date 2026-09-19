@@ -18,6 +18,7 @@ import sqlite3
 
 import numpy as np
 import pytest
+from mainspring.interface import read_live_pointer, write_live_pointer
 from mainspring.uimf import UimfFile
 
 import clockwork
@@ -425,3 +426,84 @@ def test_a_run_that_folded_nothing_keeps_its_raw_file_anyway(tmp_path):
         recording.begin_frame(1, 1)
         recording.end_frame(complete=False)
     assert os.path.isfile(raw)
+
+
+# --- the run in progress (lab record, task 58) -----------------------------------------
+
+
+def test_a_recording_is_not_published_unless_it_is_asked_to_be(tmp_path):
+    """The pointer is a claim that somebody is running the instrument now, and most of
+    the ways a `Recording` gets made are not that: a bench script re-folding an old file,
+    a test, `clockwork --self-check`. Off unless a caller says otherwise."""
+    with FakeConsole() as fake:
+        geometry = make_geometry(fake)
+    with Recording.create(tmp_path, make_method(), geometry) as recording:
+        assert recording.live_pointer is None
+        assert read_live_pointer() is None
+
+
+def test_a_published_recording_names_its_raw_file_and_gives_it_up_at_the_close(tmp_path):
+    """The raw file and not the companion: it is the one that exists first and grows
+    during the run, so it is the one a viewer can follow. The companion does not exist
+    yet at this point, which is the other half of the same fact."""
+    with FakeConsole() as fake:
+        geometry = make_geometry(fake)
+    recording = Recording.create(tmp_path, make_method(), geometry, publish=True)
+    named = read_live_pointer()
+    assert named is not None
+    assert named.path == recording.raw_path == os.path.abspath(recording.raw_path)
+    assert named.writer == "clockwork"
+    assert not os.path.exists(recording.summed_path)
+    recording.close()
+    assert read_live_pointer() is None
+    assert recording.live_pointer is None
+
+
+def test_closing_twice_is_still_idempotent_with_a_pointer_to_withdraw(tmp_path):
+    with FakeConsole() as fake:
+        geometry = make_geometry(fake)
+    recording = Recording.create(tmp_path, make_method(), geometry, publish=True)
+    recording.close()
+    write_live_pointer(str(tmp_path / "somebody-elses-run.uimf"), writer="another")
+    recording.close()
+    named = read_live_pointer()
+    assert named is not None and named.writer == "another", (
+        "a second close must not take away a pointer this recording did not write"
+    )
+
+
+def test_the_pointer_is_withdrawn_before_keep_raw_removes_the_file(tmp_path, monkeypatch):
+    """The ordering is the whole of this. A pointer still standing while the file it
+    names is deleted is an instruction to follow a file this process is in the act of
+    taking away, and on Windows the reader it sent there is what makes the delete fail.
+
+    Every removal is recorded, not only the raw file's: `clockwork.acq.uimf` and
+    `mainspring.interface` hold the same `os` module, so patching one patches both, and
+    the withdrawal of the pointer is itself one of the calls seen here. That makes the
+    sequence the assertion -- the pointer goes, and only then does the file.
+    """
+    method = make_method(accumulations=2, keep_raw=False)
+    removals: list[tuple[str, object]] = []
+    real_remove = os.remove
+
+    def remove(path, *args, **kwargs):
+        removals.append((str(path), read_live_pointer()))
+        return real_remove(path, *args, **kwargs)
+
+    with FakeConsole() as fake, DataStream(fake.data_endpoint) as stream, \
+            Console(fake.command_endpoint) as console:
+        geometry = make_geometry(fake)
+        console.configure(offset_v=0.25)
+        start_chain(console, stream, settle=1.0, quiet=0.05)
+        with Recording.create(tmp_path, method, geometry, publish=True) as recording:
+            raw = recording.raw_path
+            acquire(recording, console, stream, method)
+            assert read_live_pointer() is not None
+            monkeypatch.setattr("clockwork.acq.uimf.os.remove", remove)
+        console.stop_acquire()
+
+    assert not os.path.exists(raw), "keep_raw = false leaves only the companion"
+    assert [path for path, _ in removals][-1] == raw
+    assert dict(removals)[raw] is None, (
+        "the pointer was still standing when the file it named was deleted"
+    )
