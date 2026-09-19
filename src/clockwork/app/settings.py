@@ -162,6 +162,23 @@ class Settings:
     def queue_open(self, value: bool) -> None:
         self._settings.setValue("queue_open", bool(value))
 
+    @property
+    def open_mainspring_on_acquire(self) -> bool:
+        """Whether Acquire opens a viewer on the file it is writing (task 55).
+
+        Off by default, which is the decision and not caution: a window that started
+        another program every time a button was pressed would be taking the screen at
+        the moment a trainee was looking at something else, and the button beside the
+        checkbox already answers for anyone who wants one run watched. Remembered
+        because the day a trainee turns it on is a day they want it on all day.
+        """
+        return str(self._settings.value("open_mainspring_on_acquire", "")).lower() \
+            in ("true", "1")
+
+    @open_mainspring_on_acquire.setter
+    def open_mainspring_on_acquire(self, value: bool) -> None:
+        self._settings.setValue("open_mainspring_on_acquire", bool(value))
+
     # -- the window itself ---------------------------------------------------
 
     @property

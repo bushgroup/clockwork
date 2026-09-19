@@ -59,7 +59,7 @@ import clockwork
 from .. import instrument as instrument_module
 from .. import method as method_module
 from ..acq import ConsoleProcess, StateRead, find_console
-from ..acq.loop import WHEN_ARMED, cautions, refusals
+from ..acq.loop import WHEN_ARMED, RunBegun, cautions, refusals
 from ..instrument import UNCALIBRATED, Instrument
 from ..method import (
     REPETITION_MODES,
@@ -74,7 +74,13 @@ from ..method import (
 from ..method.text import PaneResult, render_pane, split_trainee_file, start_order
 from .boxstate import Reading
 from .console_panel import ConsoleBar, ConsoleSettings
-from .launch import open_data_file, open_path
+from .launch import (
+    open_data_file,
+    open_data_file_with_options,
+    open_path,
+    still_running,
+    viewer_options,
+)
 from .librarypanel import LibraryDialog
 from .naming import clean_initials, next_stem
 from .panes import BoxPane
@@ -99,6 +105,18 @@ from .worker import (
 )
 
 __all__ = ["DRAIN_MS", "MainWindow"]
+
+MAINSPRING_TIP = ("Open the file in mainspring, which is the only viewer clockwork has. "
+                  "The summed companion once the fold has written it, the raw file "
+                  "before that.")
+"""The button between runs: a file that is finished, and the fold's companion for choice."""
+
+MAINSPRING_LIVE_TIP = (
+    "Open the file being acquired in mainspring, following it as the console writes "
+    "it, in the Show mode this method's repetition mode asks for. The raw file and "
+    "never the summed companion: the companion is written by a fold afterwards and is "
+    "not the file filling now. Press it again for a second viewer.")
+"""The button during a run. Different enough from the other to be worth saying."""
 
 DRAIN_MS = 50
 """How often the UI thread empties the worker's progress mailbox.
@@ -172,6 +190,35 @@ class MainWindow(QMainWindow):
         log. The summed path is only offered once the fold has written it, and the
         directory is taken off the paths rather than off the field, which a trainee may
         have changed since."""
+
+        self._live_run: tuple[str, str, str] = ("", "", "")
+        """The same three for the run *in progress*, empty between jobs (task 55).
+
+        Taken from `RunBegun`, which is the moment the raw file exists, rather than
+        from `_run_done`, which is a minute later and the whole point: a trainee who
+        wants to know whether anything is happening needs the file while it is filling.
+        A replicate series keeps the previous run's names through the gap between one
+        run and the next, which is right -- that file is still there and still worth
+        opening -- and the job ending clears it."""
+
+        self._viewer_launched = False
+        """Whether this window has opened a viewer since it started.
+
+        Not persisted and not per run. A viewer launched with `--follow` ends with
+        `Live` ticked and moves to each later acquisition of the session by itself
+        through the run pointer (task 58), so a second launch would only be a second
+        window doing the same thing. A trainee who closes the viewer wants the next
+        Acquire to bring one back, which is what `_viewer_is_up` below is for."""
+
+        self._viewer_process: object | None = None
+        """What the launch handed back, where the route that took it has a handle:
+        polled, never waited on, so that a closed viewer is noticed."""
+
+        self.launched_commands: list[list[str]] = []
+        """Under `--fake`, the command lines a launch would have run. A simulated
+        instrument writes a simulated file and a viewer opened on one would be showing
+        numbers that came from nowhere, so the command line is the thing to check at a
+        desk and it is recorded and said rather than run."""
 
         self._build()
         self._connect()
@@ -372,6 +419,15 @@ class MainWindow(QMainWindow):
         self.stop_button = QPushButton("Stop")
         self.mainspring_button = QPushButton("Open in mainspring")
         self.log_button = QPushButton("Open the log")
+        self.open_on_acquire = QCheckBox("Open mainspring on Acquire")
+        self.open_on_acquire.setToolTip(
+            "On, the first acquisition of this session opens mainspring on the file "
+            "being written, following, in the Show mode the repetition mode asks for. "
+            "One viewer a session and not one a run: a viewer opened this way ends "
+            "with Live ticked and moves to each later acquisition by itself, so a "
+            "replicate series and a run queue open one window between them. Close it "
+            "and the next Acquire brings one back; the button above opens another "
+            "whenever you want a second.")
         for button, tip in (
             (self.find_button, "Ask every MIPS-class port what box is behind it. A "
                                "port that does not answer has its box off or absent; "
@@ -390,10 +446,7 @@ class MainWindow(QMainWindow):
             (self.stop_button, "End the series after the current repetition and its "
                                "fold. What it leaves on disk is a short experiment, "
                                "not a broken one."),
-            (self.mainspring_button, "Open the file in mainspring, which is the only "
-                                     "viewer clockwork has. The summed companion once "
-                                     "the fold has written it, the raw file before "
-                                     "that."),
+            (self.mainspring_button, MAINSPRING_TIP),
             (self.log_button, "Open both files a run leaves beside the data: the wire "
                               "transcript and the send log."),
         ):
@@ -415,6 +468,7 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.replicate_button)
         grid.addWidget(self.stop_button)
         grid.addWidget(_row(self.mainspring_button, self.log_button))
+        grid.addWidget(self.open_on_acquire)
 
         panel = QWidget()
         column = QVBoxLayout(panel)
@@ -531,6 +585,7 @@ class MainWindow(QMainWindow):
         self.replicates.setValue(self.settings.replicates)
         self.conditions.setPlainText(self.settings.conditions)
         self.queue_dock.setVisible(self.settings.queue_open)
+        self.open_on_acquire.setChecked(self.settings.open_mainspring_on_acquire)
         if self.instrument_path:
             self._load_instrument(self.instrument_path)
         if self.method_path and os.path.isfile(self.method_path):
@@ -657,7 +712,13 @@ class MainWindow(QMainWindow):
         self.replicate_button.setEnabled(
             not busy and not blocking and self.worker.snapshot is not None)
         self.stop_button.setEnabled(busy and not self.worker.stopping)
+        # Enabled from the moment a run's raw file exists and not from the moment the
+        # run ends (task 55), which is why `_live_run` is taken off `RunBegun`. The
+        # tooltip is part of the same answer: the two cases open different files, and a
+        # button whose wording did not change would be describing one of them wrongly.
         self.mainspring_button.setEnabled(any(self._last_run_paths[:2]))
+        self.mainspring_button.setToolTip(
+            MAINSPRING_LIVE_TIP if self._live_run_path() else MAINSPRING_TIP)
         self.log_button.setEnabled(bool(self._last_run_paths[2]))
         self.action_read_state.setEnabled(not busy and bool(self.worker.boxes))
         for pane in self.panes.values():
@@ -1093,7 +1154,94 @@ class MainWindow(QMainWindow):
 
     # -- opening what a run left ---------------------------------------------
 
+    def _live_run_path(self) -> str:
+        """The raw file of the run in progress, or "" when no run is in progress.
+
+        One source of truth and not two: `_live_run` is filled by `RunBegun` and
+        emptied by the job ending, whichever way it ended, so there is no second
+        condition here that could disagree with it.
+        """
+        return self._live_run[0]
+
+    def _viewer_is_up(self) -> bool:
+        """Whether the viewer this window launched is still open.
+
+        Asked rather than assumed, because a trainee who closed the viewer wants the
+        next Acquire to bring one back. The process handle comes from the resolved
+        association, so this costs a `poll` and no more; where there is no handle --
+        under `--fake`, or a route that started nothing we can hold -- the launch is
+        taken to have stuck, and the button is how a second one is opened.
+        """
+        if self._viewer_launched and self._viewer_process is not None \
+                and not still_running(self._viewer_process):
+            self._viewer_launched = False
+            self._viewer_process = None
+        return self._viewer_launched
+
+    def _run_begun(self, event: RunBegun) -> None:
+        """The run's files exist, so the buttons that open them are worth pressing.
+
+        This is what makes live viewing reachable (task 55): the raw file is the one
+        the console is filling, and `_run_done` -- where the paths used to be recorded
+        first -- is a minute or an hour later. `_run_done` still has the last word,
+        since it is the one that knows whether the raw file was kept.
+
+        The checkbox is answered here and not in `acquire`, for the same reason and one
+        more: a queued row submits the same `Acquire` job a button does, so a run queue
+        gets the behaviour without a third route to it.
+        """
+        stem = os.path.splitext(os.path.basename(event.raw_path))[0]
+        self._live_run = (event.raw_path, event.summed_path, stem)
+        self._last_run_paths = self._live_run
+        if self.open_on_acquire.isChecked() and not self._viewer_is_up():
+            self._launch_viewer()
+        self._refresh_actions()
+
+    def _launch_viewer(self) -> None:
+        """Open the run in progress in mainspring, following, in the method's mode.
+
+        The raw file and never the summed companion: the companion is written by a fold
+        after a method frame ends and is not the file being written now (the raw file
+        keeps the plain name *because* it is the one that can be watched). A failure
+        goes to the status bar and the run log and never to a dialog -- the run is what
+        matters, and a modal box over a running acquisition is exactly what a trainee
+        who ticked a checkbox did not ask for.
+        """
+        path = self._live_run[0]
+        if not path:
+            return
+        result = open_data_file_with_options(
+            path, viewer_options(self.repetition_mode.currentText()),
+            self.settings.mainspring_path,
+            spawn=self._record_launch if self.fake else None,
+        )
+        if result:
+            self._viewer_launched = True
+            self._viewer_process = result.process
+            self.statusBar().showMessage(
+                f"{os.path.basename(path)} opened in mainspring through {result.how}, "
+                "following")
+        else:
+            self.statusBar().showMessage(
+                f"mainspring could not be opened: {result.problem}")
+            self.run_panel.say(
+                f"the file being acquired could not be opened in mainspring, tried "
+                f"{result.how}: {result.problem}", warn=True)
+
+    def _record_launch(self, line: object) -> None:
+        """Under `--fake`, say what would have been run instead of running it."""
+        parts = [str(part) for part in line]  # type: ignore[union-attr]
+        self.launched_commands.append(parts)
+        self.run_panel.say("--fake: mainspring would have been launched as "
+                           + " ".join(parts))
+
     def open_in_mainspring(self) -> None:
+        if self._live_run_path():
+            # During a run the button and the checkbox do the same thing, deliberately:
+            # pressing it again is how a trainee gets a second viewer, which is the one
+            # thing the once-a-session rule takes away.
+            self._launch_viewer()
+            return
         raw, summed, _ = self._last_run_paths
         path = summed if summed and os.path.isfile(summed) else raw
         if not path:
@@ -1144,6 +1292,8 @@ class MainWindow(QMainWindow):
                                "filling faster than it could be drawn", warn=True)
         for event in events:
             self.run_panel.show(event)
+            if isinstance(event, RunBegun):
+                self._run_begun(event)
             if isinstance(event, StateRead):
                 # The panels are fed from the send's own readings rather than by
                 # queuing a second `read_state` after every send. The reading
@@ -1164,6 +1314,9 @@ class MainWindow(QMainWindow):
     def _job_finished(self, job: Job, result: object) -> None:
         self._job = None
         self._drain()
+        # Drained first, so a `RunBegun` still in the mailbox does not refill this
+        # after the run it describes has ended.
+        self._live_run = ("", "", "")
         if isinstance(result, SendResult):
             self._armed = result.armed
             self.run_panel.say(
@@ -1184,6 +1337,7 @@ class MainWindow(QMainWindow):
     def _job_failed(self, job: Job, message: str) -> None:
         self._job = None
         self._drain()
+        self._live_run = ("", "", "")
         self.run_panel.say(f"{job.label} failed: {message}", warn=True)
         self.run_panel.idle(f"{job.label}: failed")
         self.statusBar().showMessage(f"{job.label}: failed")
@@ -1372,6 +1526,7 @@ class MainWindow(QMainWindow):
         self.settings.conditions = self.conditions.toPlainText()
         self.settings.replicates = self.replicates.value()
         self.settings.queue_open = self.queue_dock.isVisible()
+        self.settings.open_mainspring_on_acquire = self.open_on_acquire.isChecked()
         self.settings.sync()
         self._drain_timer.stop()
         self.worker.shutdown()

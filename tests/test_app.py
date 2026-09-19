@@ -28,6 +28,11 @@ import pytest
 pytest.importorskip("pytestqt")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from mainspring.interface import (  # noqa: E402
+    OPTION_FOLLOW,
+    OPTION_SHOW,
+    SHOW_WORDS,
+)
 from PySide6.QtCore import QSettings, Qt  # noqa: E402
 from PySide6.QtWidgets import QDialog  # noqa: E402
 
@@ -57,7 +62,14 @@ from clockwork.app.boxstate import (  # noqa: E402
     Reading,
     state_table,
 )
-from clockwork.app.launch import open_data_file, open_with  # noqa: E402
+from clockwork.app.launch import (  # noqa: E402
+    SHOW_FOR_MODE,
+    open_data_file,
+    open_data_file_with_options,
+    open_with,
+    show_word,
+    viewer_options,
+)
 from clockwork.app.librarypanel import (  # noqa: E402
     InstrumentDiffDialog,
     LibraryDialog,
@@ -269,6 +281,79 @@ def test_open_data_file_names_both_attempts_when_both_fail(tmp_path, monkeypatch
     result = open_data_file(missing, configured="nothing-here.exe")
     assert not result
     assert "no file" in result.problem
+
+
+# --- opening a file being acquired, with options ---------------------------------------
+
+
+def a_file(tmp_path, name: str = "260917_ZZ_001.uimf") -> str:
+    path = tmp_path / name
+    path.write_bytes(b"")
+    return str(path)
+
+
+def test_the_path_goes_where_the_registered_command_says_and_options_follow(tmp_path):
+    """`ShellExecute` on a document cannot carry `--follow`, so the association is
+    resolved to a command and the path is substituted for its `"%1"` -- put where the
+    template says, not appended after the last argument (task 55)."""
+    path = a_file(tmp_path)
+    lines: list[list[str]] = []
+    result = open_data_file_with_options(
+        path, ("--follow", "--show", "newest"),
+        resolve=lambda _: '"C:\\mainspring\\mainspring.exe" "%1" --quiet',
+        spawn=lines.append,
+    )
+    assert result
+    assert lines == [["C:\\mainspring\\mainspring.exe", path, "--quiet",
+                      "--follow", "--show", "newest"]]
+
+
+def test_a_template_with_no_placeholder_gets_the_path_appended(tmp_path):
+    path = a_file(tmp_path)
+    lines: list[list[str]] = []
+    open_data_file_with_options(path, ("--follow",), resolve=lambda _: "viewer.exe",
+                                spawn=lines.append)
+    assert lines == [["viewer.exe", path, "--follow"]]
+
+
+def test_no_association_falls_back_to_the_configured_path_with_the_options(tmp_path):
+    """The order `open_data_file` keeps, by the route that can carry arguments: a
+    machine whose association is absent is the machine where the setting was filled
+    in, and it gets the same options."""
+    path = a_file(tmp_path)
+    lines: list[list[str]] = []
+    result = open_data_file_with_options(
+        path, ("--follow", "--show", "rolling-sum"), configured='"C:\\ms\\ms.exe"',
+        resolve=lambda _: "", spawn=lines.append,
+    )
+    assert result and result.how == "C:\\ms\\ms.exe"
+    assert lines == [["C:\\ms\\ms.exe", path, "--follow", "--show", "rolling-sum"]]
+
+
+def test_a_machine_with_neither_route_names_both_attempts(tmp_path):
+    path = a_file(tmp_path)
+
+    def refuse(_line):
+        raise OSError("the system cannot find the file specified")
+
+    result = open_data_file_with_options(
+        path, ("--follow",), configured="gone.exe", resolve=lambda _: "", spawn=refuse)
+    assert not result
+    assert "the file association" in result.how and "gone.exe" in result.how
+    assert "nothing is registered for .uimf files" in result.problem
+    assert "cannot find the file" in result.problem
+
+
+def test_the_show_word_is_mainspring_s_own_and_covers_every_repetition_mode():
+    """The words are imported, never retyped, and a mode added to `clockwork.method`
+    without an answer here should fail on this line rather than launch a viewer into
+    whatever the fallback happens to be."""
+    assert set(SHOW_FOR_MODE) == set(method_module.REPETITION_MODES)
+    assert set(SHOW_FOR_MODE.values()) <= set(SHOW_WORDS)
+    assert show_word("single_frame") == "newest"
+    assert show_word("per_repetition") == "rolling-sum"
+    assert viewer_options("per_repetition") == (OPTION_FOLLOW, OPTION_SHOW,
+                                                "rolling-sum")
 
 
 # --- the panes ------------------------------------------------------------------------
@@ -1035,6 +1120,113 @@ def test_a_box_with_an_empty_pane_is_not_a_box_the_method_names(
     window.panes["visitor"].set_text("SDCB,1,12.0\n")
     window.panes["visitor"].reparse()
     assert "visitor" in [entry.name for entry in window.build_method().boxes]
+
+
+def a_run_begun(tmp_path, name: str = "260917_ZZ_001.uimf") -> RunBegun:
+    """The event the loop raises once the run's files exist, with its raw file made."""
+    raw = a_file(tmp_path, name)
+    return RunBegun(raw, raw.replace(".uimf", ".summed.uimf"),
+                    frames=1, console_frames=ACCUMULATIONS, frame_length=SCANS,
+                    frame_timeout=5.0)
+
+
+def test_the_button_goes_live_the_moment_the_run_s_raw_file_exists(
+        window, tmp_path, qtbot):
+    """Greyed until `_run_done` was the whole reason nobody had seen live viewing
+    (task 55): the file being written is the one worth opening, and it exists at
+    `RunBegun`. The tooltip changes with it, because the two cases open two files."""
+    load_into(window, tmp_path, make_method())
+    until(qtbot, lambda: window.worker.boxes and idle(window))
+    assert not window.mainspring_button.isEnabled()
+
+    window._run_begun(a_run_begun(tmp_path))
+    assert window.mainspring_button.isEnabled()
+    assert "being acquired" in window.mainspring_button.toolTip()
+    assert "never the summed companion" in window.mainspring_button.toolTip()
+
+    # And back to the wording for a file that is finished once the job is over.
+    window._live_run = ("", "", "")
+    window._refresh_actions()
+    assert window.mainspring_button.isEnabled()
+    assert "summed companion once the fold" in window.mainspring_button.toolTip()
+
+
+def test_the_checkbox_opens_one_viewer_a_session_and_not_one_a_run(
+        window, tmp_path, qtbot):
+    """A viewer launched following ends with `Live` ticked and moves to each later run
+    of the session by itself (task 58), so the second Acquire needs no second process.
+    The button is how a trainee deliberately opens another."""
+    load_into(window, tmp_path, make_method())
+    until(qtbot, lambda: window.worker.boxes and idle(window))
+    # So that the test does not depend on this machine having a `.uimf` association:
+    # with one, the resolved command is recorded; without one, the configured path is.
+    window.settings.mainspring_path = "mainspring.exe"
+    window.open_on_acquire.setChecked(True)
+
+    window._run_begun(a_run_begun(tmp_path))
+    assert len(window.launched_commands) == 1
+    line = window.launched_commands[0]
+    assert line[-3:] == [OPTION_FOLLOW, OPTION_SHOW, "rolling-sum"]
+    assert any(part.endswith("260917_ZZ_001.uimf") for part in line)
+
+    window._run_begun(a_run_begun(tmp_path, "260917_ZZ_002.uimf"))
+    assert len(window.launched_commands) == 1, "a second run opened a second viewer"
+
+    window.open_in_mainspring()
+    assert len(window.launched_commands) == 2, "the button no longer opens another"
+    assert window.launched_commands[1][-3:] == [OPTION_FOLLOW, OPTION_SHOW,
+                                                "rolling-sum"]
+
+
+def test_the_checkbox_is_off_until_it_is_ticked_and_is_remembered(
+        window, scratch_settings, tmp_path, qtbot):
+    load_into(window, tmp_path, make_method())
+    until(qtbot, lambda: window.worker.boxes and idle(window))
+    assert not window.open_on_acquire.isChecked()
+    window.settings.mainspring_path = "mainspring.exe"
+
+    window._run_begun(a_run_begun(tmp_path))
+    assert window.launched_commands == [], "a viewer was opened without being asked for"
+
+    window.open_on_acquire.setChecked(True)
+    window.close()
+    assert Settings(scratch_settings).open_mainspring_on_acquire
+
+
+def test_a_single_frame_method_opens_on_the_newest_frame(window, tmp_path, qtbot):
+    """A frame that fills for a minute shows nothing under a sum of finished frames,
+    so the mode is taken from the method and not fixed (Matt, 2026-09-17)."""
+    load_into(window, tmp_path, make_method())
+    until(qtbot, lambda: window.worker.boxes and idle(window))
+    window.settings.mainspring_path = "mainspring.exe"
+    window.repetition_mode.setCurrentText("single_frame")
+
+    window._run_begun(a_run_begun(tmp_path))
+    window.open_in_mainspring()
+    assert window.launched_commands[0][-3:] == [OPTION_FOLLOW, OPTION_SHOW, "newest"]
+
+
+def test_a_fake_acquisition_launches_the_viewer_on_the_file_it_is_writing(
+        window, tmp_path, qtbot):
+    """End to end over the stand-ins: the checkbox, the run, and the command line that
+    would have opened the file the console was filling. `--fake` records rather than
+    launches, because a simulated file is not one to show a trainee."""
+    ready_to_acquire(window, qtbot, tmp_path)
+    window.settings.mainspring_path = "mainspring.exe"
+    window.open_on_acquire.setChecked(True)
+
+    runs: list[object] = []
+    window.worker.run_done.connect(runs.append)
+    window.acquire()
+    until(qtbot, lambda: runs and idle(window), timeout=180_000)
+
+    assert len(window.launched_commands) == 1, window.launched_commands
+    line = window.launched_commands[0]
+    assert runs[0].raw_path in line, "the viewer was not opened on the raw file"
+    assert runs[0].summed_path not in line, "the companion is not the file being written"
+    assert line[-3:] == [OPTION_FOLLOW, OPTION_SHOW, "rolling-sum"]
+    # And the button reverts to the finished-file wording once the job is over.
+    assert "summed companion once the fold" in window.mainspring_button.toolTip()
 
 
 def test_the_replicate_spinner_carries_its_own_label(window):

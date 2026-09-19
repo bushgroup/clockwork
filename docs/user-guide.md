@@ -203,10 +203,28 @@ is what clockwork tries first; where that registration is not in force, set main
 this window's settings and the button uses that instead. mainspring is the only viewer clockwork
 carries an opinion about. Nothing here plots data.
 
-To watch a run as it is acquired, leave a mainspring window open with `Live` ticked before
-pressing Acquire. clockwork publishes the file it is writing when the run starts and withdraws it
-when the run ends, and mainspring 1.6.0 and later read that every two seconds, so the window
-moves to each acquisition of a session as it begins and says which run it is following. No path
-is typed and nothing is configured. The window follows the raw per-repetition file, which is the
+The button is live during a run as well, from the moment that run's raw file exists. Pressed
+then, it opens the file the console is filling, with mainspring following it and showing the view
+the method's repetition mode asks for: the newest frame under `single_frame`, where one frame
+fills for the whole run and a sum of finished frames would stay empty until the end, and the
+rolling sum of the newest finished frames under `per_repetition`, where a frame finishes every few
+hundred milliseconds. The tooltip says which of the two files the button will open. Carrying those
+options needs the program rather than the document, so clockwork resolves the `.uimf` association
+to the command registered behind it and runs that command on the file; a machine with no
+association falls back to the configured mainspring path, and a failure names both attempts.
+
+**Open mainspring on Acquire**, the checkbox under those two buttons, does the same without the
+click. It is off until you tick it, and it is remembered per machine. It opens one viewer for the
+session rather than one for each run: a viewer opened this way ends with `Live` ticked, so it
+moves to each later acquisition by itself and a replicate series or a run queue leaves one window
+open instead of ten. Close that window and the next Acquire opens another. Note that the view is
+chosen once, at launch, and rides into every run the viewer follows afterwards, so a queue mixing
+the two repetition modes leaves the viewer in the view its first run asked for.
+
+To watch a run as it is acquired without opening anything from here, leave a mainspring window
+open with `Live` ticked before pressing Acquire. clockwork publishes the file it is writing when
+the run starts and withdraws it when the run ends, and mainspring 1.6.0 and later read that every
+two seconds, so the window moves to each acquisition of a session as it begins and says which run
+it is following. No path is typed and nothing is configured. The window follows the raw per-repetition file, which is the
 one that grows during a run; the summed companion is written at the end, and **Open in
 mainspring** is how to reach it.
