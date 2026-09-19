@@ -1549,6 +1549,57 @@ def test_a_run_that_folded_nothing_keeps_its_raw_file_whatever_keep_raw_says(rig
     run = rig.acquire(method, boxes, abort_after=1)
     assert run.raw_kept and os.path.isfile(run.raw_path)
     assert not os.path.isfile(run.summed_path)
+    assert any("folded no method frame" in message for message in run.warnings), (
+        "a file the method asked to discard is still here, and only the warning says so"
+    )
+
+
+def test_a_clean_run_says_nothing_about_its_raw_file(rig):
+    """The warning is about a request that was not honoured, so a run that honoured
+    one -- either way -- carries none of it."""
+    boxes = make_boxes(BOX)
+    for keep_raw in (True, False):
+        method = make_method(keep_raw=keep_raw)
+        send_phases(method, boxes)
+        run = rig.acquire(method, boxes, stem=f"keep-{keep_raw}")
+        assert run.complete
+        assert not [message for message in run.warnings
+                    if "per-repetition file" in message]
+
+
+def test_a_discard_the_platform_refuses_reaches_the_operator(rig, monkeypatch):
+    """The whole of task 57 at the layer a person reads. `raw_kept = True` says nothing
+    about whether keeping the file was asked for, so the warning is the only place the
+    failure lands; it names both files because the directory now holds two where the
+    method promised one, and the operator has to know which is the complete one.
+    """
+    method = make_method(keep_raw=False)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    real_remove = os.remove
+
+    def refuse(path, *args, **kwargs):
+        if str(path).endswith(".uimf"):
+            raise PermissionError(13, "the process cannot access the file")
+        return real_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr("clockwork.acq.uimf.os.remove", refuse)
+    seen = []
+    run = rig.acquire(method, boxes, progress=seen.append)
+
+    assert run.complete
+    assert run.raw_kept and os.path.isfile(run.raw_path)
+    warning = [message for message in run.warnings
+               if "could not be removed" in message]
+    assert len(warning) == 1, run.warnings
+    assert "PermissionError" in warning[0]
+    assert os.path.basename(run.raw_path) in warning[0]
+    assert os.path.basename(run.summed_path) in warning[0]
+    assert [event.message for event in seen
+            if isinstance(event, acq.Warned)
+            and "could not be removed" in event.message] == warning, (
+        "the run log is where a trainee meets this, so it goes out as a Warned too"
+    )
 
 
 # --- the golden methods -------------------------------------------------------------------

@@ -894,6 +894,13 @@ class Run:
     frames: tuple[FrameRecord, ...]
     folds: tuple[FoldRecord, ...]
     warnings: tuple[str, ...]
+    """What the operator should know and nothing stopped for.
+
+    The method's own warnings, and -- since a `keep_raw = false` whose raw file is still
+    on disk is the one outcome nothing else in this record distinguishes -- the line
+    `run_acquisition` adds when the discard the method asked for did not happen
+    (lab record, task 57).
+    """
     seconds: float
     replicate: bool = False
     stopped_early: str | None = None
@@ -2018,7 +2025,53 @@ def run_acquisition(
             console.stop_acquire()
     # Read off the directory rather than predicted: `keep_raw` removes the raw file only
     # once a fold has written the companion that replaces it.
-    return dataclasses.replace(run, raw_kept=os.path.isfile(run.raw_path))
+    kept = os.path.isfile(run.raw_path)
+    keep_raw = (recording.keep_raw if recording is not None
+                else method.acquisition.keep_raw)
+    warnings = list(run.warnings)
+    if kept and not keep_raw:
+        # Nothing here lies about the directory -- `raw_kept` and `Run.text` are stats
+        # rather than predictions -- but `raw_kept = True` reads identically whether the
+        # method asked for the file or asked for it to go and did not get its way. This
+        # is the one place anybody is told the request was not honoured (lab record,
+        # task 57).
+        warnings.append(_undiscarded(
+            run, recording.discard_error if recording is not None else None))
+        report(Warned(warnings[-1]))
+    return dataclasses.replace(run, raw_kept=kept, warnings=tuple(warnings))
+
+
+def _undiscarded(run: Run, error: str | None) -> str:
+    """Why the per-repetition file outlived a method that asked to discard it.
+
+    **Names the file that survived, not only the step that failed**, and for more than
+    politeness: this is a line the operator has to act on. The directory holds two files
+    where the method promised one, one of them complete and one of them the by-product,
+    and a sentence saying only that a removal failed would leave them to work out which
+    is which. So it says which to keep and which to delete by hand.
+
+    Worth knowing behind it, although it is not this case: a `keep_raw = false` run whose
+    removal *succeeds* costs more than its raw file, because a mainspring following the
+    run unticks `Live` the moment that file goes -- deliberately, a poll that failed
+    being a state the operator has to act on -- and the run-to-run tracking task 58 exists
+    to provide ends with it. Here the file did not go, so the viewer is still following a
+    file the method wanted rid of, which is the other reason to name it.
+
+    Two ways in, and they want different sentences. `error` is set where the removal was
+    attempted and refused, which on Windows means something had the file open. `None`
+    means it was never attempted: no method frame folded, so no companion exists for the
+    raw file to have been replaced by, and keeping it is deliberate.
+    """
+    raw = os.path.basename(run.raw_path)
+    summed = os.path.basename(run.summed_path)
+    if error is None:
+        return (f"the method asked to discard the per-repetition file, but this run "
+                f"folded no method frame, so there is no {summed} for it to have been "
+                f"replaced by and {raw} was kept instead")
+    return (f"the method asked to discard the per-repetition file and it could not be "
+            f"removed ({error}), so {raw} is still here; on Windows that is what a "
+            f"viewer holding the file open looks like. {summed} is the complete file "
+            f"and the one to keep. Delete {raw} by hand once nothing is reading it")
 
 
 def _vertical_warnings(

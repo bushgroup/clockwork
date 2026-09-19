@@ -272,7 +272,9 @@ class MainWindow(QMainWindow):
         self.keep_raw.setChecked(True)
         self.keep_raw.setToolTip(
             "On, the unsummed file is kept beside the companion. Off, it is deleted "
-            "once a fold has written the companion that replaces it.")
+            "once a fold has written the companion that replaces it; if something has "
+            "that file open and the delete is refused, the run log says so and says "
+            "which file to keep.")
         self.enable_box = QComboBox()
         self.enable_box.setToolTip(
             "Which box drives the digitizer's enable line, and on which digital "

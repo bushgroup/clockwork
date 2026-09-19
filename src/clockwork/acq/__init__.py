@@ -151,6 +151,8 @@ from .stream import (
 )
 from .uimf import (
     PROVENANCE_KEYS,
+    RAW_DISCARD_DEADLINE_S,
+    RAW_DISCARD_PAUSE_S,
     RAW_SUFFIX,
     SA220P_DETECTOR_BITS,
     SUMMED_SUFFIX,
@@ -257,6 +259,8 @@ __all__ = [
     "PhaseSent",
     "Prepared",
     "QUEUE_MESSAGES",
+    "RAW_DISCARD_DEADLINE_S",
+    "RAW_DISCARD_PAUSE_S",
     "RAW_SUFFIX",
     "ROW_SETTLE_S",
     "Recording",

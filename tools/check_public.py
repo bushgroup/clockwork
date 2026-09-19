@@ -752,6 +752,41 @@ def main() -> int:
                             UimfFile(raw).frame_params(repetition).marked_complete,
                         )
                     rows = recording.fold(1)
+
+                # `keep_raw = false` under a reader that has the file open (lab
+                # record, task 57). The scene is an ordinary one since the run in
+                # progress is published: a mainspring with `Live` ticked follows the
+                # raw file and holds it for the length of each query, and on Windows a
+                # file another handle has open cannot be deleted. The handle here is
+                # this process's own, which is the same refusal from the filesystem's
+                # point of view and needs no viewer, no console and no box.
+                discarding = method_module.from_dict({
+                    **document,
+                    "acquisition": {**document["acquisition"], "accumulations": 1,
+                                    "keep_raw": False,
+                                    "file_stem": "selfcheck-discard"},
+                })
+                held = acq.Recording.create(directory, discarding, geometry,
+                                            instrument=machine)
+                with held.frame(1, 1) as request:
+                    acq.run_frame(console, stream, request, timeout=10.0)
+                held.fold(1)
+                with open(held.raw_path, "rb"):
+                    held.close()
+                if os.path.isfile(held.raw_path):
+                    check_true(
+                        "a raw file something holds open outlives `keep_raw = false`, "
+                        "and the recording says why rather than leaving it looking "
+                        f"like a file the method asked to keep ({held.discard_error})",
+                        held.discard_error is not None
+                        and os.path.isfile(held.summed_path),
+                    )
+                else:
+                    skip("a raw file something holds open outlives `keep_raw = false`, "
+                         "and the recording says why",
+                         "this platform deletes a file that is open, so the refusal "
+                         "cannot be provoked here; it is a Windows fact and the "
+                         "instrument PCs are Windows")
                 console.stop_acquire()
 
         check_true(f"the fold wrote a summed companion ({rows} rows)",
@@ -834,6 +869,20 @@ def main() -> int:
             check_true("while a recording that did not publish leaves the pointer "
                        "alone, a file not being a run",
                        quiet.live_pointer is None and read_live_pointer() is None)
+
+        # Every writer publishes to one pointer file, so a close has to ask whether
+        # what is standing there is still its own run before taking it away (lab
+        # record, task 57).
+        first = acq.Recording.create(directory, recipe, geometry, stem="pointer-first",
+                                     publish=True)
+        second = acq.Recording.create(directory, recipe, geometry, stem="pointer-second",
+                                      publish=True)
+        first.close()
+        standing = read_live_pointer()
+        check_true("and a close withdraws the pointer only while it still names its own "
+                   "run, so a finished acquisition cannot take a later one's away",
+                   standing is not None and standing.path == second.raw_path)
+        second.close()
 
     section("one whole acquisition")
     # Task 23's loop, which is the section above and the two before it composed: the

@@ -17,8 +17,10 @@ Two files come out of one acquisition (lab record, task 02).
 The raw file keeps the plain name because it is the one that exists first, grows during
 the run and can be watched live (Matt, 2026-09-10). The companion is today's file shape,
 which is what trainees and PNNL's tools open, and `keep_raw = false` in the method leaves
-only it behind. A recording made with `publish=True` names the raw file in mainspring's
-run pointer for as long as it is open, which is how a viewer already running finds the
+only it behind -- or says why it could not, `Recording.discard_error` being what a close
+that was refused the removal leaves behind for the run to warn about (lab record,
+task 57). A recording made with `publish=True` names the raw file in mainspring's run
+pointer for as long as it is open, which is how a viewer already running finds the
 acquisition without being pointed at it (lab record, task 58).
 
 **Two phases per frame.** `Recording.begin_frame` writes the frame's parameters and hands
@@ -50,7 +52,11 @@ import time
 from collections.abc import Callable, Iterator
 
 import numpy as np
-from mainspring.interface import clear_live_pointer, write_live_pointer
+from mainspring.interface import (
+    clear_live_pointer,
+    read_live_pointer,
+    write_live_pointer,
+)
 from mainspring.uimf import (
     FrameSpec,
     GlobalSpec,
@@ -67,6 +73,8 @@ from .wire import ConsoleInfo, FrameRequest, TofWidth
 
 __all__ = [
     "PROVENANCE_KEYS",
+    "RAW_DISCARD_DEADLINE_S",
+    "RAW_DISCARD_PAUSE_S",
     "RAW_SUFFIX",
     "SA220P_DETECTOR_BITS",
     "SUMMED_SUFFIX",
@@ -310,6 +318,40 @@ def _scan_rows(frame: SparseFrame) -> Iterator[tuple[int, np.ndarray, np.ndarray
 # --- one acquisition's files ----------------------------------------------------------
 
 
+RAW_DISCARD_DEADLINE_S = 0.25
+"""How long `close` keeps trying to remove a raw file the method asked to discard.
+
+Windows refuses to delete a file another process holds open, and on an ordinary run
+another process does hold it: a mainspring pointed at this acquisition reads the raw
+file about once a second and keeps it open for the length of one query (lab record,
+task 58). So the removal does not have to wait for a window to be closed, it has to
+miss a poll, and the bound that matters is milliseconds rather than seconds.
+
+Measured against a real viewer following a real file (lab record, task 57): at
+mainspring's own one-second poll the first attempt succeeded, 1.9 ms in; at a fiftieth
+of that interval it took two attempts and 4.2 ms. A quarter of a second is many times
+the window the removal has to miss, and short enough that nobody watches a run end on
+it. Past the deadline the failure is recorded and the run warns, which is the answer
+for the cases a deadline cannot fix -- two viewers on one file, or a query longer than
+this -- and is why the retry does not simply get longer.
+"""
+
+RAW_DISCARD_PAUSE_S = 0.005
+"""What `close` waits between those attempts: shorter than any query it is waiting out."""
+
+
+def _same_file(one: str, other: str) -> bool:
+    """Whether two paths name one file, neither of which has to exist.
+
+    `os.path.samefile` is the better comparison and needs both ends present, which is
+    exactly what cannot be assumed here: the question is asked of a run pointer's path
+    at the moment the file it names may already have gone. Case-folded, the pointer
+    being written and read on Windows.
+    """
+    return (os.path.normcase(os.path.abspath(one))
+            == os.path.normcase(os.path.abspath(other)))
+
+
 class Recording:
     """The raw file and its summed companion, through one acquisition.
 
@@ -362,6 +404,9 @@ class Recording:
         # file away from where the write put it even if the environment has moved under
         # a long run (`mainspring.interface.live_pointer_path` reads a variable).
         self._pointer: str | None = None
+        # Why the raw file is still here although the method asked for it to go, or
+        # None if that question never arose. Written only by `_discard_raw`.
+        self._discard_error: str | None = None
 
     @classmethod
     def create(
@@ -496,6 +541,23 @@ class Recording:
         whether anything out there is currently being told to follow this file.
         """
         return self._pointer
+
+    @property
+    def discard_error(self) -> str | None:
+        """Why the per-repetition file is still here although `keep_raw` is false.
+
+        `None` wherever there is nothing to say: a method that keeps its raw file, a run
+        that folded nothing and so had no companion for the raw file to be replaced by,
+        and a removal that worked. Set only by one that was attempted, retried to
+        `RAW_DISCARD_DEADLINE_S` and still refused -- on Windows, by a viewer following
+        this run with the file open.
+
+        Read rather than raised because a recording is closing when it is written: a run
+        that acquired cleanly should not end on an exception over a housekeeping step.
+        `clockwork.acq.loop` is what turns it into the run's warning (lab record,
+        task 57).
+        """
+        return self._discard_error
 
     def frames_of(self, method_frame: int) -> list[int]:
         """The raw frame numbers one method frame produced, in acquisition order."""
@@ -766,6 +828,12 @@ class Recording:
         a pointer still standing while `keep_raw = false` deletes the file it names is
         an instruction to follow a file this process is in the act of taking away
         (lab record, task 58).
+
+        **A removal that fails is retried briefly and then recorded, never raised.** The
+        reason it fails is a reader holding the file, and a reader lets go by itself;
+        what outlasts `RAW_DISCARD_DEADLINE_S` lands in `discard_error` and reaches the
+        operator as the run's warning rather than as an exception thrown by a file that
+        had already been written correctly (lab record, task 57).
         """
         if self._closed:
             return
@@ -773,12 +841,52 @@ class Recording:
         self._raw.close()
         if self._summed is not None:
             self._summed.close()
-        if self._pointer is not None:
-            clear_live_pointer(self._pointer)
-            self._pointer = None
+        self._withdraw_pointer()
         if not self.keep_raw and self._folded:
-            with contextlib.suppress(OSError):
+            self._discard_raw()
+
+    def _withdraw_pointer(self) -> None:
+        """Take this recording's run pointer away, if the one standing is still ours.
+
+        The read back is the whole of it. `self._pointer` is *where* this recording
+        published, and every writer publishes to one file, so a pointer found there may
+        by now be a later run's: a first recording closed after a second has been
+        created would otherwise take away a pointer that is currently correct and leave
+        the live run unfollowable. Unreachable while acquisitions are sequential on one
+        worker thread, which they are, and two lines to close (lab record, task 57).
+        """
+        pointer, self._pointer = self._pointer, None
+        if pointer is None:
+            return
+        standing = read_live_pointer(pointer)
+        if standing is not None and _same_file(standing.path, self._raw.path):
+            clear_live_pointer(pointer)
+
+    def _discard_raw(self) -> None:
+        """Remove the per-repetition file, or record why it would not go.
+
+        Retried rather than attempted once, because what stops it on Windows is a
+        viewer holding the file for the length of one query and that is a state which
+        ends on its own: `RAW_DISCARD_DEADLINE_S`. `FileNotFoundError` is success --
+        something else removed it, which is the outcome asked for.
+        """
+        deadline = time.perf_counter() + RAW_DISCARD_DEADLINE_S
+        while True:
+            try:
                 os.remove(self._raw.path)
+            except FileNotFoundError:
+                return
+            except OSError as exc:
+                if time.perf_counter() >= deadline:
+                    # `strerror` rather than `str(exc)`: the whole of an OSError's text
+                    # is the reason plus the path, and the sentence the run warns with
+                    # names the path itself.
+                    detail = exc.strerror or str(exc)
+                    self._discard_error = f"{type(exc).__name__}: {detail}"
+                    return
+                time.sleep(RAW_DISCARD_PAUSE_S)
+            else:
+                return
 
     def __enter__(self) -> Recording:
         return self

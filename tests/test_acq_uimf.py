@@ -426,6 +426,114 @@ def test_a_run_that_folded_nothing_keeps_its_raw_file_anyway(tmp_path):
         recording.begin_frame(1, 1)
         recording.end_frame(complete=False)
     assert os.path.isfile(raw)
+    assert recording.discard_error is None, (
+        "nothing was attempted, so there is no failure to report: the file was kept on "
+        "purpose"
+    )
+
+
+def test_a_successful_discard_reports_no_error(tmp_path):
+    method = make_method(accumulations=2, keep_raw=False)
+    with FakeConsole() as fake, DataStream(fake.data_endpoint) as stream, \
+            Console(fake.command_endpoint) as console:
+        geometry = make_geometry(fake)
+        console.configure(offset_v=0.25)
+        start_chain(console, stream, settle=1.0, quiet=0.05)
+        with Recording.create(tmp_path, method, geometry) as recording:
+            raw = recording.raw_path
+            acquire(recording, console, stream, method)
+        console.stop_acquire()
+    assert not os.path.exists(raw)
+    assert recording.discard_error is None
+
+
+def test_a_discard_the_platform_refuses_is_recorded_and_does_not_raise(
+        tmp_path, monkeypatch):
+    """The failure this task exists for, forced rather than provoked.
+
+    On Windows a viewer holding the raw file open makes `os.remove` raise
+    `PermissionError`, which is an `OSError` and used to be suppressed whole: the file
+    stayed, nothing was raised and nothing was said. Forced here with a stand-in
+    `os.remove` so that the recording's half is the same assertion on every platform;
+    the real thing, a file genuinely held open, is the Windows-only test below and the
+    self-check, both of which can only run where the platform refuses.
+    """
+    method = make_method(accumulations=2, keep_raw=False)
+    attempts = []
+    real_remove = os.remove
+
+    def refuse(path, *args, **kwargs):
+        if str(path).endswith(".uimf"):
+            attempts.append(str(path))
+            raise PermissionError(13, "the process cannot access the file")
+        return real_remove(path, *args, **kwargs)
+
+    with FakeConsole() as fake, DataStream(fake.data_endpoint) as stream, \
+            Console(fake.command_endpoint) as console:
+        geometry = make_geometry(fake)
+        console.configure(offset_v=0.25)
+        start_chain(console, stream, settle=1.0, quiet=0.05)
+        with Recording.create(tmp_path, method, geometry) as recording:
+            raw = recording.raw_path
+            acquire(recording, console, stream, method)
+            monkeypatch.setattr("clockwork.acq.uimf.os.remove", refuse)
+        console.stop_acquire()
+
+    assert os.path.isfile(raw), "the removal was refused, so the file is still here"
+    assert len(attempts) > 1, "a removal that failed is retried, not attempted once"
+    assert recording.discard_error is not None
+    assert "PermissionError" in recording.discard_error
+
+
+def test_a_discard_retried_into_success_reports_nothing(tmp_path, monkeypatch):
+    """The reader lets go, which is the normal case and why the retry is there at all
+    (lab record, task 57: measured at one and two attempts against a real viewer)."""
+    method = make_method(accumulations=2, keep_raw=False)
+    real_remove = os.remove
+    still_to_refuse = [1]
+
+    def relent(path, *args, **kwargs):
+        if str(path).endswith(".uimf") and still_to_refuse:
+            still_to_refuse.pop()
+            raise PermissionError(13, "the process cannot access the file")
+        return real_remove(path, *args, **kwargs)
+
+    with FakeConsole() as fake, DataStream(fake.data_endpoint) as stream, \
+            Console(fake.command_endpoint) as console:
+        geometry = make_geometry(fake)
+        console.configure(offset_v=0.25)
+        start_chain(console, stream, settle=1.0, quiet=0.05)
+        with Recording.create(tmp_path, method, geometry) as recording:
+            raw = recording.raw_path
+            acquire(recording, console, stream, method)
+            monkeypatch.setattr("clockwork.acq.uimf.os.remove", relent)
+        console.stop_acquire()
+
+    assert not os.path.exists(raw)
+    assert recording.discard_error is None
+
+
+@pytest.mark.skipif(os.name != "nt",
+                    reason="only Windows refuses to delete a file that is open")
+def test_a_reader_holding_the_raw_file_open_is_the_real_failure(tmp_path):
+    """The same thing again without a stand-in, which is the scene the task describes:
+    a viewer reading the run holds the file, and the close cannot take it away."""
+    method = make_method(accumulations=2, keep_raw=False)
+    with FakeConsole() as fake, DataStream(fake.data_endpoint) as stream, \
+            Console(fake.command_endpoint) as console:
+        geometry = make_geometry(fake)
+        console.configure(offset_v=0.25)
+        start_chain(console, stream, settle=1.0, quiet=0.05)
+        recording = Recording.create(tmp_path, method, geometry)
+        raw = recording.raw_path
+        acquire(recording, console, stream, method)
+        with open(raw, "rb"):
+            recording.close()
+        console.stop_acquire()
+
+    assert os.path.isfile(raw)
+    assert recording.discard_error is not None
+    assert os.path.isfile(recording.summed_path), "the companion is complete regardless"
 
 
 # --- the run in progress (lab record, task 58) -----------------------------------------
@@ -507,3 +615,26 @@ def test_the_pointer_is_withdrawn_before_keep_raw_removes_the_file(tmp_path, mon
     assert dict(removals)[raw] is None, (
         "the pointer was still standing when the file it named was deleted"
     )
+
+
+def test_a_close_does_not_withdraw_a_pointer_that_names_a_later_run(tmp_path):
+    """Every writer publishes one pointer, so `self._pointer is not None` is not enough
+    to say the pointer standing there is this recording's (lab record, task 57).
+
+    Unreachable while acquisitions are sequential on one worker thread, which they are;
+    checked because the guard is two lines and the failure it prevents -- a finished run
+    taking the live run's pointer away -- is invisible from inside clockwork.
+    """
+    with FakeConsole() as fake:
+        geometry = make_geometry(fake)
+    first = Recording.create(tmp_path, make_method(), geometry, stem="first",
+                             publish=True)
+    second = Recording.create(tmp_path, make_method(), geometry, stem="second",
+                              publish=True)
+    first.close()
+    named = read_live_pointer()
+    assert named is not None and named.path == second.raw_path, (
+        "the first run's close took away the second run's pointer"
+    )
+    second.close()
+    assert read_live_pointer() is None
