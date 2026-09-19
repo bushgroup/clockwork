@@ -14,6 +14,11 @@ Two files come out of one acquisition (lab record, task 02).
     <stem>.summed.uimf    the summed companion: one frame per method frame,
                           `Accumulations` = A, written here by the fold
 
+`.summed.uimf` is `SUMMED_SUFFIX`, imported from `mainspring.uimf` and re-exported here
+rather than retyped (lab record, task 59): mainspring names the same string for the
+viewer's own reason to look for a companion, and a spelling kept in one place cannot
+disagree with itself.
+
 The raw file keeps the plain name because it is the one that exists first, grows during
 the run and can be watched live (Matt, 2026-09-10). The companion is today's file shape,
 which is what trainees and PNNL's tools open, and `keep_raw = false` in the method leaves
@@ -58,6 +63,7 @@ from mainspring.interface import (
     write_live_pointer,
 )
 from mainspring.uimf import (
+    SUMMED_SUFFIX,
     FrameSpec,
     GlobalSpec,
     SparseFrame,
@@ -87,7 +93,6 @@ __all__ = [
 ]
 
 RAW_SUFFIX = ".uimf"
-SUMMED_SUFFIX = ".summed.uimf"
 
 PROVENANCE_KEYS: tuple[tuple[ParamDef, str], ...] = (
     (ParamDef(CLIENT_PARAM_ID_BASE + 1, "ClockworkMethodHash", "System.String",
@@ -184,7 +189,14 @@ def raw_path(directory: str | os.PathLike[str], stem: str) -> str:
 
 
 def summed_path(raw: str | os.PathLike[str]) -> str:
-    """The fold's companion beside a raw file: `<stem>.summed.uimf`."""
+    """The fold's companion beside a raw file: `<stem>.summed.uimf`.
+
+    Builds the name the fold is about to write, rather than asking
+    `mainspring.uimf.summed_companion` whether one already exists: that answers the
+    viewer's question, "which companion is on disk beside this path", and raises on a
+    raw path it does not recognise, where this one never has to ask (lab record,
+    task 59).
+    """
     text = os.fspath(raw)
     if not text.endswith(RAW_SUFFIX):
         raise ValueError(f"{text!r} is not a {RAW_SUFFIX} path")

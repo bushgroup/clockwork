@@ -23,6 +23,7 @@ from mainspring.uimf import UimfFile
 
 import clockwork
 from clockwork.acq import (
+    SUMMED_SUFFIX,
     Console,
     DataStream,
     FakeConsole,
@@ -96,6 +97,12 @@ def test_the_raw_file_keeps_the_plain_name_and_the_fold_writes_beside_it(tmp_pat
 def test_summed_path_refuses_something_that_is_not_a_uimf_path():
     with pytest.raises(ValueError):
         summed_path("260910_BK_001.sqlite")
+
+
+def test_summed_suffix_is_mainspring_s_own():
+    from mainspring.uimf import SUMMED_SUFFIX as mainspring_summed_suffix
+
+    assert SUMMED_SUFFIX is mainspring_summed_suffix
 
 
 # --- the axis ------------------------------------------------------------------------

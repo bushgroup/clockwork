@@ -681,11 +681,23 @@ def main() -> int:
     import datetime as _dt
     import tempfile
 
-    from mainspring.uimf import UimfFile
+    from mainspring.uimf import SUMMED_SUFFIX, UimfFile
 
     from clockwork import instrument as instrument_module
     from clockwork import method as method_module
     from clockwork import mips as mips_module
+
+    # The one name of the three the code repo's own rule names -- writer names,
+    # parameter constants, launch words -- that was still retyped rather than imported,
+    # until task 59. `is` rather than `==`: the point is that clockwork's module binds
+    # the same object mainspring exports, not a second string that happens to match it
+    # today (lab record, task 59).
+    check_true(
+        "the summed suffix is mainspring's own, imported rather than retyped, and "
+        "summed_path builds the companion's name on it",
+        acq.SUMMED_SUFFIX is SUMMED_SUFFIX
+        and acq.summed_path("stem" + acq.RAW_SUFFIX) == "stem" + SUMMED_SUFFIX,
+    )
 
     # An instrument document the way SLIMPHONY's reads: a calibration, so the file has a
     # mass axis and `CalibrationDone` is 1, and the window the acquisition ran through
