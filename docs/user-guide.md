@@ -126,6 +126,12 @@ sequencer's own table and asks for one frame of half a million scans. In the sec
 caption reads `repetition 1 of 1` for the whole minute the frame takes, and the bar is the only
 thing that moves.
 
+**Copy**, beside Clear above the log, puts every line on the clipboard as text, so what
+happened on this machine can be pasted into a message rather than described. Collapsed groups
+are copied open and a warning is marked with a leading `!`, since text carries no colour. The log
+itself is not written to a file: the send log and the transcript beside the data are the record
+of a run, and the log in the window is clockwork's own account of it.
+
 No estimate of the time remaining is shown. The cost of a repetition depends on how much of the
 detector's signal survives zero suppression, so the first repetition does not predict the
 hundredth.
@@ -204,6 +210,12 @@ answers. Escalate with the transcript attached when the question is about the wi
 timing fault, a chunk boundary, a reply that does not match what the send log shows; it is the
 forensic record the send log was filtered from, so the two files of one run can never disagree
 about what happened.
+
+One further file sits outside any run. When something goes wrong inside the window itself,
+the traceback is appended to `%LOCALAPPDATA%\clockwork\errors.log` and the run log says so and
+names the path, because the installed clockwork opens no console window and has nowhere else to
+print one. **Help > About** names the same path. Attach that file when reporting a button that
+did nothing.
 
 ## Opening the result in mainspring
 

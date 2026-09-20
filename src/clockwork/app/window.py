@@ -31,7 +31,7 @@ import os
 import time
 from dataclasses import replace
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -48,6 +48,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QVBoxLayout,
@@ -72,6 +74,7 @@ from ..method import (
     is_comment,
 )
 from ..method.text import PaneResult, render_pane, split_trainee_file, start_order
+from . import errors
 from .boxstate import Reading
 from .console_panel import ConsoleBar, ConsoleSettings
 from .launch import (
@@ -130,6 +133,16 @@ counter.
 
 class MainWindow(QMainWindow):
     """Everything a trainee sees. One worker below it, one method held in the panes."""
+
+    error_seen = Signal(str)
+    """A traceback has been written to the errors log, and this is the line to say.
+
+    A signal rather than a direct call because `threading.excepthook` fires on the
+    thread that raised: the worker's. Adding a tree item from there would be touching
+    widgets off the UI thread, which is the one thing this window does not do. An
+    auto-connected signal queues it onto the UI thread, which is the same route the
+    mailbox's own events take.
+    """
 
     def __init__(self, *, fake: bool = False) -> None:
         super().__init__()
@@ -223,6 +236,12 @@ class MainWindow(QMainWindow):
         self._build()
         self._connect()
         self._restore()
+        # After `_build`, since the line goes in the run panel. `main` installed the
+        # hooks before this window existed, so anything raised on the way up here is
+        # already in the file; this is what puts the next one in front of the person
+        # watching, rather than only in a file nobody has been told to read (task 61).
+        self._stop_reporting = errors.reporting_to(self.error_seen.emit)
+        self.error_seen.connect(self._say_error)
         self._drain_timer = QTimer(self)
         self._drain_timer.setInterval(DRAIN_MS)
         self._drain_timer.timeout.connect(self._drain)
@@ -273,8 +292,8 @@ class MainWindow(QMainWindow):
         bottom_column.addWidget(self.problems)
         bottom_column.addWidget(self.run_panel, 1)
         whole.addWidget(bottom)
-        whole.setStretchFactor(0, 3)
-        whole.setStretchFactor(1, 2)
+        whole.setStretchFactor(0, 2)
+        whole.setStretchFactor(1, 1)
         self.setCentralWidget(whole)
 
         # The queue is a dock rather than a fourth splitter pane: one method at a time
@@ -339,6 +358,7 @@ class MainWindow(QMainWindow):
 
         acquisition = QGroupBox("Acquisition")
         form = QFormLayout(acquisition)
+        _tighten(form)
         form.addRow("Method frames", self.frames)
         form.addRow("Scans", self.scans)
         form.addRow("Accumulations", self.accumulations)
@@ -379,7 +399,7 @@ class MainWindow(QMainWindow):
         self.conditions = QPlainTextEdit()
         self.conditions.setPlaceholderText(
             "sample, MCP voltage, pusher period, collision energy…")
-        self.conditions.setMaximumHeight(72)
+        self.conditions.setMaximumHeight(56)
         self.conditions.setToolTip(
             "The part of the experiment no getter reads. Stamped into every file this "
             "method writes and into the header of its send log. Everything else in "
@@ -387,6 +407,7 @@ class MainWindow(QMainWindow):
 
         files = QGroupBox("Files")
         files_form = QFormLayout(files)
+        _tighten(files_form)
         files_form.addRow("Output directory", out_row)
         files_form.addRow("Initials", self.initials)
         files_form.addRow("Name", _row(self.stem, rename))
@@ -407,6 +428,7 @@ class MainWindow(QMainWindow):
 
         document = QGroupBox("Instrument")
         document_form = QFormLayout(document)
+        _tighten(document_form)
         document_form.addRow("Document", _row(self.instrument_field, browse_instrument))
         document_form.addRow("", self.instrument_status)
 
@@ -452,12 +474,17 @@ class MainWindow(QMainWindow):
         ):
             button.setToolTip(tip)
 
+        # Eight rows of one button became five rows, which is 75 px of the column's
+        # minimum height and the difference between a scroll bar that appears on the
+        # instrument's monitor and one that does not (task 61). The order is still the
+        # order the day is worked in, read left to right and then down, and **Acquire
+        # keeps a row to itself** with its spinner: it is the button the window is for,
+        # and the three above it are the three that prepare it.
         buttons = QWidget()
         grid = QVBoxLayout(buttons)
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.addWidget(self.find_button)
-        grid.addWidget(self.setup_button)
-        grid.addWidget(self.arm_button)
+        grid.setSpacing(4)
+        grid.addWidget(_row(self.find_button, self.setup_button, self.arm_button))
         # The label goes with the widget. It used to sit in the Files group, a form row
         # whose field was over here beside the button that consumes it, and the sitting
         # of 2026-09-17 spent a day looking at the word "Replicates" with nothing next to
@@ -465,19 +492,47 @@ class MainWindow(QMainWindow):
         # one thing and cannot be separated again.
         self.replicates.setPrefix("replicates: ")
         grid.addWidget(_row(self.acquire_button, self.replicates))
-        grid.addWidget(self.replicate_button)
-        grid.addWidget(self.stop_button)
+        grid.addWidget(_row(self.replicate_button, self.stop_button))
         grid.addWidget(_row(self.mainspring_button, self.log_button))
         grid.addWidget(self.open_on_acquire)
 
         panel = QWidget()
         column = QVBoxLayout(panel)
+        column.setSpacing(6)
         column.addWidget(acquisition)
         column.addWidget(files)
         column.addWidget(document)
         column.addWidget(buttons)
         column.addStretch(1)
-        return panel
+
+        # **This column does not get to decide how tall the window is** (task 61). A
+        # `QSplitter` cannot shrink a child below its minimum, so while the column's
+        # minimum was the sum of its four groups -- 711 px offscreen, more under
+        # Windows' own fonts -- a window maximized on the instrument's 1536 x 912
+        # working area was taller than the screen, and a maximized window that
+        # overflows is clipped rather than scrolled: the run-log pane and the status
+        # bar were below the bottom edge, and a trainee on MASSIMO read "nothing in the
+        # run log" off a pane that was there and off-screen.
+        #
+        # The scroll area is the structural half and the row above is the cosmetic
+        # one, and both are wanted. Trimming the column makes it fit on the monitors
+        # the lab has, so nothing scrolls in practice; the scroll area makes the fit
+        # unconditional, so the next group box added here costs a scroll bar on a small
+        # screen instead of a clipped status bar. Its own minimum is one group's worth
+        # of height, which is enough to see that there is more and reach it.
+        frame = QScrollArea()
+        frame.setWidget(panel)
+        frame.setWidgetResizable(True)
+        frame.setFrameShape(QScrollArea.Shape.NoFrame)
+        frame.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        frame.setMinimumHeight(acquisition.minimumSizeHint().height())
+        # Height is the only dimension being given away. With no horizontal bar a
+        # viewport narrower than the column would clip it sideways instead, so the
+        # column's own minimum width is kept as the scroll area's -- the window is as
+        # hard to squeeze horizontally as it was before this change.
+        frame.setMinimumWidth(panel.minimumSizeHint().width())
+        frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        return frame
 
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -1506,12 +1561,25 @@ class MainWindow(QMainWindow):
             f"{clockwork.built_commit() or 'unknown commit'}\n\n"
             "Control software for SLIMPHONY: MIPS pulse sequences, SA220P "
             "acquisition, UIMF output.\n\n"
-            "Data is viewed in mainspring; clockwork draws nothing.")
+            "Data is viewed in mainspring; clockwork draws nothing.\n\n"
+            f"Anything that goes wrong inside the window is written to\n"
+            f"{errors.errors_log_path()}")
 
     def _forget_geometry(self) -> None:
         self.settings.reset_geometry()
         self.statusBar().showMessage(
             "the window position is forgotten; it takes effect at the next launch")
+
+    def _say_error(self, line: str) -> None:
+        """One warn line for a traceback the errors log has just taken.
+
+        Not a dialog. A slot that raised has already returned and the window is still
+        usable, so the thing to do is say what happened and where it is written and
+        let the trainee decide whether this run is spoilt -- a modal box over a running
+        acquisition would be worse than the exception.
+        """
+        self.run_panel.say(line, warn=True)
+        self.statusBar().showMessage(line)
 
     def _complain(self, title: str, detail: str) -> None:
         QMessageBox.warning(self, title, detail)
@@ -1520,6 +1588,7 @@ class MainWindow(QMainWindow):
     # -- shutdown ------------------------------------------------------------
 
     def closeEvent(self, event) -> None:  # noqa: N802, ANN001 -- Qt's name
+        self._stop_reporting()
         self.settings.geometry = self.saveGeometry()
         self.settings.initials = clean_initials(self.initials.text())
         self.settings.output_dir = self.output_dir.text().strip()
@@ -1549,6 +1618,17 @@ def _names_something(entry: BoxMethod, result: PaneResult) -> bool:
         [command for command in entry.setup + entry.load + entry.arm
          if not is_comment(command)]
         or entry.dc_bias or entry.rf or result.start or result.reset)
+
+
+def _tighten(form: QFormLayout) -> None:
+    """Take the slack out of a form in the side column.
+
+    Qt's default spacing is generous for a dialog and profligate for a column of three
+    stacked group boxes that has to fit beside a run log on a 912 px working area
+    (task 61). Four pixels between rows still reads as separate rows.
+    """
+    form.setVerticalSpacing(4)
+    form.setContentsMargins(9, 6, 9, 6)
 
 
 def _row(*widgets: QWidget) -> QWidget:

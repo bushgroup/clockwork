@@ -12,9 +12,11 @@ the tests that assert the seam cost nothing for it.
     settings.py       what is remembered between launches
     naming.py         `YYMMDD_INITIALS_NNN`, scanned off the output directory
     launch.py         handing a file to mainspring, and the logs to an editor
+    errors.py         where a traceback goes in a build with no stderr to print it to
 
-`naming.py` and `launch.py` import no Qt: what a run is called and how a file is opened
-are questions a test can ask without a window.
+`naming.py`, `launch.py` and `errors.py` import no Qt: what a run is called, how a file
+is opened and where a traceback goes are questions a test can ask without a window, and
+the last of them has to be answerable before `QApplication` exists.
 
 Three arguments. `--fake` builds the whole window over `FakeBox` and `FakeConsole`, so
 every path above the wire runs with no instrument on the bench; `--self-check` is the
@@ -248,6 +250,13 @@ def main(argv: list[str] | None = None) -> int:
         if report_path is not None:
             print(f"self-check report written to {report_path}")
         return code
+
+    # Before the window, so an exception raised while it is being built is written
+    # down too. A windowed build has no stderr for PySide6's own report of what a slot
+    # raised, and without this the slot returns and nothing anywhere says why (task 61).
+    from . import errors
+
+    errors.install()
 
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication

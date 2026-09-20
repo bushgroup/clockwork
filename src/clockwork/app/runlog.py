@@ -55,6 +55,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QHBoxLayout,
     QLabel,
     QProgressBar,
@@ -82,6 +83,7 @@ from ..acq import (
     StateRead,
     Warned,
 )
+from ..transcript import UNPROMPTED
 
 __all__ = ["LEFT_AS_FOUND", "NEVER_GROUPED", "RunPanel", "is_left_as_found",
            "names_it_elsewhere"]
@@ -202,6 +204,13 @@ class RunPanel(QWidget):
             "Empty the log. The transcript and the send log beside the file keep "
             "everything, so nothing is lost by clearing this.")
         self.clear_button.clicked.connect(self.clear)
+        self.copy_button = QPushButton("Copy")
+        self.copy_button.setToolTip(
+            "Put the whole log on the clipboard as text, so what happened on this "
+            "machine can be pasted into a message rather than described. Collapsed "
+            "groups are copied open, and a warning is marked with the send log's own "
+            "! since text carries no colour.")
+        self.copy_button.clicked.connect(self.copy)
 
         self.log = QTreeWidget()
         self.log.setColumnCount(2)
@@ -216,6 +225,7 @@ class RunPanel(QWidget):
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
         top.addWidget(self.caption, 1)
+        top.addWidget(self.copy_button)
         top.addWidget(self.clear_button)
 
         layout = QVBoxLayout(self)
@@ -243,6 +253,43 @@ class RunPanel(QWidget):
         self.bar.setRange(0, 1)
         self.bar.setValue(1 if self.progress.of else 0)
         self.caption.setText(what)
+
+    def as_text(self) -> str:
+        """Every line of the log, in order, as `time<TAB>text`.
+
+        One line per item and children after their parent, so a collapsed group of
+        `left as found` lines copies out whole -- a trainee who copies the log has not
+        necessarily clicked the groups open, and the lines inside one are exactly the
+        lines somebody reading the paste will want.
+
+        **A warn line is marked `!` and nothing else is.** The colouring is the only
+        thing that distinguishes one on screen and text carries no colour, so the mark
+        is the send log's own `UNPROMPTED`, which means the same thing there: a line
+        the run raised rather than one it was asked for. A group's children inherit it
+        rather than being asked themselves, since they are the warning the group's own
+        line is counting.
+        """
+        lines: list[str] = []
+        for index in range(self.log.topLevelItemCount()):
+            item = self.log.topLevelItem(index)
+            warn = bool(item.data(0, _IS_WARNING))
+            lines.append(_as_line(item, warn))
+            for child in range(item.childCount()):
+                lines.append(_as_line(item.child(child), warn))
+        return "\n".join(lines)
+
+    def copy(self) -> None:
+        """The whole log onto the clipboard, for pasting into a message.
+
+        The run log is not written anywhere -- `say` only adds a tree item -- which is
+        why one clean machine's run could not be brought back and had to be described
+        from memory (lab record, task 61). This is the smallest thing that makes those
+        lines portable; a log that writes itself to a file is a bigger question and is
+        not this.
+        """
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(self.as_text())
 
     def say(self, text: str, *, warn: bool = False) -> QTreeWidgetItem:
         """One line of the window's own. Returns it, for a caller that will update it."""
@@ -371,7 +418,28 @@ class RunPanel(QWidget):
         self.log.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtBottom)
 
 
+_IS_WARNING = int(Qt.ItemDataRole.UserRole) + 1
+"""Where a line records that it is a warning, for the clipboard to read back.
+
+The brush is the other way to ask and is the wrong one: `_warn_colour` answers two
+different colours depending on the palette, so a reader would have to know which theme
+the line was written under.
+"""
+
+
+def _as_line(item: QTreeWidgetItem, warn: bool) -> str:
+    """One tree item as `time<TAB>text`, with `!` on a warning.
+
+    A child carries no time of its own -- it is stamped by the group above it -- and
+    its empty first column copies out as one, so the tab is always there and a paste is
+    two columns whatever was in it.
+    """
+    mark = f"{UNPROMPTED} " if warn else ""
+    return f"{item.text(0).strip()}\t{mark}{item.text(1)}"
+
+
 def _colour(item: QTreeWidgetItem, colour: QColor) -> None:
+    item.setData(0, _IS_WARNING, True)
     brush = QBrush(colour)
     font = QFont(item.font(1))
     font.setBold(True)

@@ -23,6 +23,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 import sys
+import threading
 
 import pytest
 
@@ -55,7 +56,7 @@ from clockwork.acq.loop import (  # noqa: E402
     declared_differences,
 )
 from clockwork.acq.process import ConsoleConfig, ConsoleProcess  # noqa: E402
-from clockwork.app import naming, queuepanel, runqueue  # noqa: E402
+from clockwork.app import errors, naming, queuepanel, runqueue  # noqa: E402
 from clockwork.app.boxstate import (  # noqa: E402
     AGREES,
     DIFFERS,
@@ -81,6 +82,7 @@ from clockwork.app.methodlib import method_diff  # noqa: E402
 from clockwork.app.panes import MARGIN_TAGS, BoxPane  # noqa: E402
 from clockwork.app.queuepanel import QueuePanel  # noqa: E402
 from clockwork.app.runlog import (  # noqa: E402
+    _IS_WARNING,
     RunPanel,
     is_left_as_found,
     names_it_elsewhere,
@@ -439,6 +441,204 @@ def test_left_as_found_is_recognised_and_the_lines_beside_it_are_not():
         "table TBLRDY, where they do not convert")
 
 
+# --- a windowed build keeps its tracebacks ---------------------------------------
+
+
+@pytest.fixture
+def errors_log(tmp_path, monkeypatch):
+    """`%LOCALAPPDATA%` pointed at the test's own directory, and the hooks restored.
+
+    `install` replaces two process-wide hooks, so a test that left them in place would
+    hand every later test's stray exception to this file.
+
+    **pytest-qt's own hook is stood down first, deliberately.** It exists to fail a test
+    whose Qt event loop swallowed an exception, which is exactly the thing these tests
+    raise on purpose; chaining to it would make every one of them fail with the
+    exception it was written to catch. Standing it down leaves `sys.__excepthook__`
+    underneath, which is the hook a real build chains to and the one the console half
+    of this is about.
+    """
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    before = (sys.excepthook, threading.excepthook)
+    sys.excepthook = sys.__excepthook__
+    errors.install()
+    yield errors.errors_log_path()
+    sys.excepthook, threading.excepthook = before
+
+
+def test_an_exception_inside_a_queued_slot_is_written_down(qtbot, errors_log):
+    """Task 60's `console=False` is why this exists.
+
+    A windowed build has `sys.stderr is None`; PySide6 reports what a slot raised
+    through `sys.excepthook`, whose default writes to that `None` and returns, and the
+    slot returns as though nothing happened. Run 011 on the clean machine wrote no line
+    about mainspring at all and nothing on the machine could say whether that was an
+    unticked box or an exception (lab record, tasks 55 and 61).
+
+    A real queued slot, not a direct call: the hook is only reached through Qt's own
+    dispatch, so calling the function would prove nothing about the path that failed.
+    """
+    from PySide6.QtCore import QTimer
+
+    def raises() -> None:
+        raise RuntimeError("the association resolver fell over")
+
+    QTimer.singleShot(0, raises)
+    qtbot.waitUntil(lambda: os.path.isfile(errors_log), timeout=5_000)
+
+    written = open(errors_log, encoding="utf-8").read()
+    assert "RuntimeError: the association resolver fell over" in written
+    assert "def raises" in written or "raise RuntimeError" in written
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_an_exception_on_a_thread_is_written_down_too(qtbot, errors_log):
+    """`sys.excepthook` never sees what escapes the top of a thread's `run`, and the
+    work is on a thread: the send, the acquisition and the fold all are."""
+    def raises() -> None:
+        raise ValueError("the fold could not open the companion")
+
+    thread = threading.Thread(target=raises, name="worker")
+    thread.start()
+    thread.join(5)
+    qtbot.waitUntil(lambda: os.path.isfile(errors_log), timeout=5_000)
+
+    written = open(errors_log, encoding="utf-8").read()
+    assert "ValueError: the fold could not open the companion" in written
+    assert "on thread worker" in written
+
+
+def test_the_window_says_where_the_traceback_went(qtbot, errors_log, scratch_settings):
+    """The file is no use to a trainee who has not been told to look in it, so the run
+    log gets one warn line naming it and the status bar says the same."""
+    made = MainWindow(fake=True)
+    qtbot.addWidget(made)
+    try:
+        from PySide6.QtCore import QTimer
+
+        def raises() -> None:
+            raise RuntimeError("something went bang")
+
+        QTimer.singleShot(0, raises)
+        qtbot.waitUntil(lambda: made.run_panel.log.topLevelItemCount() > 0,
+                        timeout=5_000)
+        line = made.run_panel.log.topLevelItem(0)
+        assert "something went bang" in line.text(1)
+        assert errors_log in line.text(1)
+        assert line.data(0, _IS_WARNING)
+        assert "something went bang" in made.statusBar().currentMessage()
+    finally:
+        made.close()
+        made.worker.shutdown()
+        made.worker.wait(10_000)
+
+
+def test_a_quit_is_not_an_error(qtbot, errors_log):
+    """A file called errors.log that collects "the program was asked to quit" is a file
+    nobody reads. `SystemExit` and `KeyboardInterrupt` go straight to the hook that was
+    there before."""
+    sys.excepthook(SystemExit, SystemExit(0), None)
+    assert not os.path.isfile(errors_log)
+
+
+def test_the_console_still_gets_the_traceback(qtbot, errors_log, capsys):
+    """The previous hook is called, not replaced: a checkout has a perfectly good
+    stderr and a developer watching it should not have to open a file."""
+    sys.excepthook(RuntimeError, RuntimeError("both ways"), None)
+    assert "both ways" in open(errors_log, encoding="utf-8").read()
+    assert "both ways" in capsys.readouterr().err
+
+
+# --- the window fits the instrument's screen -------------------------------------
+
+WORKING_AREA = (1536, 912)
+"""MASSTRO's monitor as Windows reports it to a window: 1920 x 1080 at 125 % scaling,
+`Screen.WorkingArea` 1536 x 912 logical pixels with the taskbar taken off. MASSIMO's is
+larger and was still not large enough before task 61."""
+
+TALLEST = 700
+"""What `minimumSizeHint().height()` may be, with margin against the 912 above.
+
+Offscreen at 9 pt the window measures a good deal less than this, and that slack is
+deliberate twice over: these tests run under a smaller font than Windows gives, so the
+figure here is a lower bound on the real one, and a margin of 200 px means the number
+that fails is still a number a trainee could have lived with. The point is the
+direction of travel -- it was 907 before task 61, against a 912 px screen, and the
+window was clipped: the run-log pane and the status bar were below the bottom edge of a
+maximized window and a trainee read "nothing in the run log" off a pane that was there
+and off-screen.
+
+If a group box added to the side column breaks this line, the column is not what should
+give: put the new control where it belongs and let the scroll area do its job.
+"""
+
+
+def test_the_window_is_shorter_than_the_screen_it_runs_on(qtbot):
+    """The requirement, pinned (lab record, task 61, and the window note's screen
+    bullet).
+
+    A `QSplitter` cannot shrink a child below its minimum, so while the side column's
+    minimum was the sum of its four group boxes the window had a floor taller than the
+    instrument's working area -- and a maximized window that overflows is clipped, not
+    scrolled.
+    """
+    made = MainWindow(fake=True)
+    qtbot.addWidget(made)
+    try:
+        assert made.minimumSizeHint().height() < TALLEST
+    finally:
+        made.worker.shutdown()
+        made.worker.wait(10_000)
+
+
+def test_the_run_log_and_the_status_bar_are_on_screen_when_maximized(qtbot):
+    """The thing the height is a proxy for, asserted directly.
+
+    Not `minimumSizeHint` this time but the laid-out window at the instrument's own
+    size: the run log has real height and the status bar's bottom edge is inside the
+    window rather than under it.
+    """
+    made = MainWindow(fake=True)
+    qtbot.addWidget(made)
+    try:
+        made.resize(*WORKING_AREA)
+        made.show()
+        qtbot.waitExposed(made)
+        run_panel = made.centralWidget().widget(1)
+        assert run_panel.height() > 150
+        assert made.statusBar().geometry().bottom() <= made.height()
+        assert made.statusBar().isVisible()
+    finally:
+        made.close()
+        made.worker.shutdown()
+        made.worker.wait(10_000)
+
+
+def test_every_control_in_the_side_column_stays_reachable(qtbot):
+    """The scroll area is the structural half of task 61's step 1, and this is what it
+    buys: on a screen far too small for the column, the controls are still there to be
+    scrolled to rather than clipped away."""
+    from PySide6.QtWidgets import QScrollArea
+
+    made = MainWindow(fake=True)
+    qtbot.addWidget(made)
+    try:
+        made.resize(900, 420)
+        made.show()
+        qtbot.waitExposed(made)
+        column = made.centralWidget().widget(0).widget(1)
+        assert isinstance(column, QScrollArea)
+        assert column.verticalScrollBar().maximum() > 0
+        # The checkbox at the very bottom of the column, the furthest control from the
+        # top and the one run 011 turned on.
+        assert made.open_on_acquire.parent() is not None
+        assert column.widget().isAncestorOf(made.open_on_acquire)
+    finally:
+        made.close()
+        made.worker.shutdown()
+        made.worker.wait(10_000)
+
+
 def test_ten_left_as_found_lines_collapse_to_one_row_per_box(qtbot):
     panel = RunPanel()
     qtbot.addWidget(panel)
@@ -449,6 +649,61 @@ def test_ten_left_as_found_lines_collapse_to_one_row_per_box(qtbot):
     assert panel.log.topLevelItemCount() == 2
     assert panel.log.topLevelItem(0).childCount() == 5
     assert "auklet: 5 settings left as found" in panel.log.topLevelItem(0).text(1)
+
+
+def test_copy_puts_the_whole_log_on_the_clipboard(qtbot):
+    """Matt at the bench, 2026-09-19: "next to Clear, there needs to be a Copy button
+    to copy the run log."
+
+    The run log is not written anywhere, which is why one clean machine's run had to be
+    described from memory rather than pasted (task 61). Tab-separated `time<TAB>text`,
+    one line per item and in order.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    panel = RunPanel()
+    qtbot.addWidget(panel)
+    panel.say("the console answered in 5.4 s")
+    panel.say("TBLCMPLT was never seen on auklet", warn=True)
+
+    panel.copy()
+    lines = QApplication.clipboard().text().splitlines()
+    assert len(lines) == 2
+    assert lines[0].split("\t")[1] == "the console answered in 5.4 s"
+    assert lines[1].split("\t")[1] == "! TBLCMPLT was never seen on auklet"
+    # The time column is there and is a number, so a paste is two columns and the
+    # order of events survives the trip into a message.
+    assert float(lines[0].split("\t")[0]) >= 0
+
+
+def test_a_collapsed_group_copies_out_open(qtbot):
+    """A trainee who copies the log has not necessarily clicked the groups open, and
+    the lines inside one are exactly what somebody reading the paste wants. The group's
+    own line is a warning, so its children inherit the mark."""
+    panel = RunPanel()
+    qtbot.addWidget(panel)
+    for index in range(3):
+        panel.show(Warned(f"auklet SETTING{index} is left as found on module 1: x"))
+
+    lines = panel.as_text().splitlines()
+    assert len(lines) == 4
+    assert "auklet: 3 settings left as found" in lines[0]
+    assert all(line.split("\t")[1].startswith("! auklet SETTING") for line in lines[1:])
+    # A child carries no time of its own; the tab is still there so the paste stays
+    # two columns.
+    assert lines[1].startswith("\t")
+
+
+def test_the_warning_mark_is_recorded_rather_than_read_off_the_colour(qtbot):
+    """`_warn_colour` answers two different colours depending on the palette, so the
+    brush cannot say whether a line was a warning without knowing the theme it was
+    written under. The line records it instead."""
+    panel = RunPanel()
+    qtbot.addWidget(panel)
+    plain = panel.say("a line")
+    warned = panel.say("another", warn=True)
+    assert not plain.data(0, _IS_WARNING)
+    assert warned.data(0, _IS_WARNING)
 
 
 def test_a_setting_the_method_names_elsewhere_gets_its_own_open_group(qtbot):
@@ -605,7 +860,7 @@ def in_table_mode(box: Box) -> Box:
 
     `SMOD,TBL` is refused with no table loaded, and what these tests need is the
     consequence rather than the command: the 100 ms service task stops, so the monitor
-    array freezes wherever it was and `GTBLSTA` stops answering `IDLE` (Â§8.2).
+    array freezes wherever it was and `GTBLSTA` stops answering `IDLE` (§8.2).
     """
     box.transport.mode = "TBL"
     box.transport.status = "READY"
@@ -760,7 +1015,7 @@ def test_a_monitor_read_in_table_mode_is_not_shown_as_a_number():
 
 
 def test_gtblfrq_is_not_shown_as_a_frequency_under_an_external_clock():
-    """Wire format Â§4: `TableFreq()` prints an uninitialised local under `EXT`.
+    """Wire format §4: `TableFreq()` prints an uninitialised local under `EXT`.
 
     No getter reports the clock source, so the method's own `STBLCLK` is the only thing
     that says which of the two a number is.
