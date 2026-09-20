@@ -21,8 +21,18 @@ Two vendor products have to be on the machine first, in this order:
 
 A machine already used to bring the SA220P up has both. Nothing about the clockwork installer
 checks for either: launching clockwork with the driver missing is a start_console failure, not a
-refusal at install time, and what the acquisition console prints when it cannot open the card is
-worth reading once before it happens for the first time on an acquisition day.
+refusal at install time. On a machine that has had neither install, the acquisition console
+executable writes nothing at all and exits on its own, so a console that appears to do nothing is
+the symptom of a skipped driver install rather than of a fault in clockwork.
+
+**mainspring** is the third install, and it is the one that can wait. clockwork acquires and writes
+its files without it, and what needs it is reading the result, so a machine that will only ever run
+the instrument can be left without one. Install **1.6.0 or later** where a run is to be watched
+while it is being acquired: every version registers itself for `.uimf` and answers *Open in
+mainspring*, and 1.6.0 is the version that added the run pointer the live view rides on. Order does
+not matter. clockwork reads the `.uimf` registration at the moment the button is pressed rather
+than at the moment it is installed, so a mainspring installed afterwards is picked up by a
+clockwork window that is already open, with nothing to restart and nothing to configure.
 
 ## Installing clockwork
 
@@ -198,10 +208,11 @@ about what happened.
 ## Opening the result in mainspring
 
 **Open in mainspring** opens the last run's file: the summed companion if the run kept one, the
-raw per-repetition file otherwise. mainspring's own installer registers itself for `.uimf`, which
-is what clockwork tries first; where that registration is not in force, set mainspring's path in
-this window's settings and the button uses that instead. mainspring is the only viewer clockwork
-carries an opinion about. Nothing here plots data.
+raw per-repetition file otherwise. mainspring's own installer registers itself for `.uimf`, and
+that registration is what clockwork resolves, so a per-user install of mainspring answers the
+button with nothing further to set. Where the button reports that nothing is registered for
+`.uimf`, the repair is to reinstall mainspring rather than to configure clockwork. mainspring is
+the only viewer clockwork carries an opinion about. Nothing here plots data.
 
 The button is live during a run as well, from the moment that run's raw file exists. Pressed
 then, it opens the file the console is filling, with mainspring following it and showing the view
@@ -210,8 +221,8 @@ fills for the whole run and a sum of finished frames would stay empty until the 
 rolling sum of the newest finished frames under `per_repetition`, where a frame finishes every few
 hundred milliseconds. The tooltip says which of the two files the button will open. Carrying those
 options needs the program rather than the document, so clockwork resolves the `.uimf` association
-to the command registered behind it and runs that command on the file; a machine with no
-association falls back to the configured mainspring path, and a failure names both attempts.
+to the command registered behind it and runs that command on the file. Where no association
+answers, the status bar says so and names what was tried, and the run carries on regardless.
 
 **Open mainspring on Acquire**, the checkbox under those two buttons, does the same without the
 click. It is off until you tick it, and it is remembered per machine. It opens one viewer for the
