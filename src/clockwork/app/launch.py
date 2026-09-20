@@ -254,11 +254,20 @@ def _assoc_query(extension: str) -> str:
     fills in the length, the second fills in the string. Every failure is the same
     answer here -- there is no association -- because the caller's next step does not
     depend on which of them it was.
+
+    **`ASSOCF_INIT_IGNOREUNKNOWN` is why an unregistered extension fails here rather
+    than answering.** Without it the shell falls back to its `Unknown` class and
+    reports `OpenWith.exe "%1"` -- the "How do you want to open this file?" dialog --
+    which is not an association, and a caller told it had one would launch that dialog
+    with `--follow --show ...` appended, tell a trainee mainspring had opened, and
+    never reach the configured path that was the remedy. Measured on the lab's
+    machines (lab record, task 55): with the flag an extension nothing owns fails with
+    `ERROR_NO_ASSOCIATION` and a registered one still answers with its exe.
     """
     import ctypes
     from ctypes import wintypes
 
-    assocf_none = 0
+    assocf_init_ignoreunknown = 0x400
     assocstr_command = 1
     try:
         query = ctypes.WinDLL("shlwapi").AssocQueryStringW
@@ -268,11 +277,12 @@ def _assoc_query(extension: str) -> str:
             wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
         ]
         size = wintypes.DWORD(0)
-        query(assocf_none, assocstr_command, extension, None, None, ctypes.byref(size))
+        query(assocf_init_ignoreunknown, assocstr_command, extension, None, None,
+              ctypes.byref(size))
         if not size.value:
             return ""
         buffer = ctypes.create_unicode_buffer(size.value)
-        if query(assocf_none, assocstr_command, extension, None, buffer,
+        if query(assocf_init_ignoreunknown, assocstr_command, extension, None, buffer,
                  ctypes.byref(size)) != 0:
             return ""
         return buffer.value or ""

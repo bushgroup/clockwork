@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import sys
 
 import pytest
 
@@ -64,6 +65,7 @@ from clockwork.app.boxstate import (  # noqa: E402
 )
 from clockwork.app.launch import (  # noqa: E402
     SHOW_FOR_MODE,
+    association_command,
     open_data_file,
     open_data_file_with_options,
     open_with,
@@ -344,6 +346,38 @@ def test_a_machine_with_neither_route_names_both_attempts(tmp_path):
     assert "cannot find the file" in result.problem
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="the shell's association table")
+def test_an_extension_nothing_owns_resolves_to_no_association():
+    """`ASSOCF_INIT_IGNOREUNKNOWN`, measured rather than assumed (lab record, task 55).
+
+    Without the flag the shell answers for an unowned extension with its `Unknown`
+    class -- `OpenWith.exe "%1"`, the "How do you want to open this file?" dialog --
+    and the caller then reports success, appends `--follow --show ...` to a dialog and
+    never reaches the configured path. This is the real resolver against the real
+    registry, because a stub cannot tell whether the flag is passed.
+    """
+    assert association_command(".zzclockworkprobe") == ""
+
+
+def test_an_openwith_answer_is_taken_at_face_value_here(tmp_path):
+    """The `Unknown` class is refused where it is resolved and nowhere else.
+
+    There is no second guard downstream reading the command back and rejecting
+    `OpenWith.exe` by name: a resolver that answers with it is believed. That keeps one
+    place responsible, and it is why the test above is the one that fails if the flag
+    is ever dropped -- this one would go on passing.
+    """
+    path = a_file(tmp_path)
+    lines: list[list[str]] = []
+    result = open_data_file_with_options(
+        path, ("--follow",),
+        resolve=lambda _: r'C:\WINDOWS\system32\OpenWith.exe "%1"',
+        spawn=lines.append,
+    )
+    assert result and result.how == "the file association (OpenWith.exe)"
+    assert lines == [[r"C:\WINDOWS\system32\OpenWith.exe", path, "--follow"]]
+
+
 def test_the_show_word_is_mainspring_s_own_and_covers_every_repetition_mode():
     """The words are imported, never retyped, and a mode added to `clockwork.method`
     without an answer here should fail on this line rather than launch a viewer into
@@ -571,7 +605,7 @@ def in_table_mode(box: Box) -> Box:
 
     `SMOD,TBL` is refused with no table loaded, and what these tests need is the
     consequence rather than the command: the 100 ms service task stops, so the monitor
-    array freezes wherever it was and `GTBLSTA` stops answering `IDLE` (§8.2).
+    array freezes wherever it was and `GTBLSTA` stops answering `IDLE` (Â§8.2).
     """
     box.transport.mode = "TBL"
     box.transport.status = "READY"
@@ -726,7 +760,7 @@ def test_a_monitor_read_in_table_mode_is_not_shown_as_a_number():
 
 
 def test_gtblfrq_is_not_shown_as_a_frequency_under_an_external_clock():
-    """Wire format §4: `TableFreq()` prints an uninitialised local under `EXT`.
+    """Wire format Â§4: `TableFreq()` prints an uninitialised local under `EXT`.
 
     No getter reports the clock source, so the method's own `STBLCLK` is the only thing
     that says which of the two a number is.
