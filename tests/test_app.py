@@ -95,6 +95,7 @@ from clockwork.method.text import render_pane  # noqa: E402
 from clockwork.mips import (  # noqa: E402
     Box,
     FakeBox,
+    Silent,
     discover,
     read_sequencer,
     read_state,
@@ -1110,11 +1111,43 @@ def test_discovery_keeps_the_boxes_that_answered_and_reports_the_ports_that_did_
             raise OSError("could not open port COM9")
         return Box(transport=FakeBox(), name=port)
 
-    found = discover(ports=["COM3", "COM9"], opener=opener)
-    assert list(found.boxes) and found.silent == (("COM9", "could not open port COM9"),)
+    found = discover(ports=["COM3", "COM9"], opener=opener, reopen_attempts=1)
+    assert list(found.boxes)
+    assert found.silent == (Silent("COM9", True, "could not open port COM9"),)
     entry = found.found[0]
     assert entry.port == "COM3" and entry.box is not None
     found.close()
+
+
+def test_a_port_mid_teardown_is_retried_rather_than_reported_silent():
+    """A close right before a rescan can leave a Windows CDC port refusing to
+    reopen for a moment (lab record, task 62): the trainee's own workaround was
+    pressing `Find boxes` a second time. `discover` should not need that."""
+    calls: dict[str, int] = {}
+    slept: list[float] = []
+
+    def opener(port, **_):
+        calls[port] = calls.get(port, 0) + 1
+        if port == "COM9" and calls[port] < 3:
+            raise OSError(22, "A device which does not exist was specified.")
+        return Box(transport=FakeBox(name=port), name=port)
+
+    found = discover(ports=["COM3", "COM9"], opener=opener, sleep=slept.append)
+    assert not found.silent
+    assert set(found.boxes) == {"COM3", "COM9"}
+    assert calls["COM9"] == 3
+    assert len(slept) == 2
+    found.close()
+
+
+def test_a_port_that_never_reopens_is_reported_as_could_not_open_not_silent():
+    def opener(port, **_):
+        raise OSError(2, "The system cannot find the file specified.")
+
+    found = discover(ports=["COM7"], opener=opener, reopen_attempts=2, sleep=lambda _: None)
+    assert found.silent == (Silent("COM7", True,
+                                    "[Errno 2] The system cannot find the file specified."),)
+    assert found.text.startswith("0 box(es), 1 port(s) could not open")
 
 
 def test_two_boxes_with_one_name_are_reported_and_neither_is_addressable():

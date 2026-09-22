@@ -559,8 +559,8 @@ class Worker(QThread):
         self.listings = {name: listing for name, listing in self.listings.items()
                          if name in self.boxes}
         self.said.emit(f"{found.text}")
-        for port, why in found.silent:
-            self.said.emit(f"{port}: {why}")
+        for entry in found.silent:
+            self.said.emit(entry.text)
         for port, why in found.unusable:
             self.said.emit(f"{port}: {why}")
         self.discovered.emit(found)

@@ -62,6 +62,7 @@ from .discovery import (
     Discovery,
     Found,
     PortInfo,
+    Silent,
     discover,
     mips_ports,
 )
@@ -151,6 +152,7 @@ __all__ = [
     "ResponseReader",
     "RfReading",
     "SerialTransport",
+    "Silent",
     "Table",
     "TableEvent",
     "TableLoad",
