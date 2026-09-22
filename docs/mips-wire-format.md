@@ -829,6 +829,73 @@ latch, and the same command then leaves the line where it was for as
 long as the table sits there, which is the reading the row above
 records.
 
+### Leaving table mode is deferred, and the next command pays for it
+
+`SMOD,LOC` acknowledges before it acts. `SetTableMode()` sends the ACK
+and sets a `LOCrequest` flag, and the work happens where the table
+engine notices the flag: the inner loop of `ProcessTables()` breaks at
+its next pass, the outer loop breaks, and the function unwinds through
+its cleanup and returns. The box reads no serial input during that
+unwind, so a command sent behind the `SMOD,LOC` waits in the input ring
+buffer until it finishes. The cost therefore lands on the wrong
+command. A host sees a 3 ms `SMOD,LOC` followed by a slow second
+command, where what the second command waited for was the tail of the
+first.
+
+**Measured at about 0.92 s, on two boxes and two days, whatever the
+second command is.** `SDIO,A,0` answered in 905, 915, 922 and 933 ms on
+the bench; `STBLDAT` answered in 919 ms and `SMOD,TBL` in 918 ms on the
+instrument; and in every case the command behind that one answered in
+about 3 ms (lab record, tasks 26 and 63). Nothing in the unwind sleeps.
+The only `delay()` in `Table.cpp` is the table-mode service loop's
+`STBLDLY`, 3 ms by default.
+
+The unwind's expensive act is the front panel. Entering table mode
+draws a popup over the active menu or dialog, and leaving restores the
+pointers and redraws whichever was displaced. The controller drives a
+320 by 240 ILI9340 over SPI at 4 MHz, which is the
+`SPI.setClockDivider(21)` in `MIPS.cpp` against the Due's 84 MHz master
+clock, one word at a time with a busy-wait on each and characters a
+pixel at a time, so a screen of text costs hundreds of milliseconds.
+The same effect at a smaller size is on record: the gap between the
+`SMOD,TBL` ACK and the `TBLRDY` behind it covers the popup, the ramp
+clock and the timer setup and nothing else, and it was 195 to 215 ms
+over five runs of 2026-09-21. Both calls sit behind
+`if(!DisableDisplay)`, `DSPOFF,TRUE` sets that flag, and the flag
+reaches the SPI writes themselves, since `disable` short-circuits
+`spiwrite()` and `spiwrite16()` in the controller's own copy of
+`Adafruit_ILI9340`. A host that does not need the front panel can
+switch the redraw off. Note that the attribution to the redraw is read
+off the source and the arithmetic rather than measured, where the
+0.92 s itself is measured: one `DSPOFF,TRUE` and one repeated mode
+round trip would settle it.
+
+### Leaving table mode restores the host's digital outputs, not the table's
+
+The last act of `ProcessTables()` before it returns is
+`SetImageRegs()`, which writes `DigitialOutputs[]` into the image
+bytes, pushes them to the shift registers and pulses `LDAC`.
+`DigitialOutputs[]` is the array the host's own commands maintain:
+`SDIO_Serial()` calls `UpdateDigitialOutputArray()` after every write,
+and so does the front panel's Digital IO dialog, whose entries are
+backed by that array with `SetImageRegs` as their callback. The table
+engine's DIO branch calls neither. Its events reach the image bytes,
+through the same `SDIO_Set_Image()` the host uses, and the hardware,
+but never that array. So leaving table mode reinstates whatever the
+host or the front panel last commanded and discards the state the table
+left.
+
+For a line the host has never driven, that is a return to low, which is
+what makes a bare `SMOD,LOC` and `SMOD,TBL` round trip appear to lower
+a line a table raised. **A line the host has ever raised by command
+comes back high.** A host that relies on the round trip alone to lower
+a line is relying on never having raised it, and one `SDIO,<channel>,1`
+sent at any point in the session, for a measurement or to open an
+instrument's acquisition chain, is enough to invert the result.
+`SMOD,LOC`, `SDIO,<channel>,0`, `SMOD,TBL` sets the array as well as
+the image and holds either way, which is the second reason for the
+sequence the section above recommends.
+
 **The latch is the loop boundary, not any table event.** On a scope
 triggered on DIOA's rise, with DIOB on a second channel and the send
 time scattered uniformly across the period over 60 cycles, DIOB's edge

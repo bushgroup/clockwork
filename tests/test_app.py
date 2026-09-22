@@ -1198,8 +1198,9 @@ def test_acquire_is_greyed_out_until_the_boxes_are_armed_with_this_method(
     assert window.acquire_button.isEnabled(), window.problems.text()
 
     # Into the `setup` block, which is what a send puts on the wire. A changed `reset`
-    # would not invalidate the arming and should not: it is walked at replicate time,
-    # not at arm time, and `wire_fingerprint` covers the three phases a send delivers.
+    # would not invalidate the arming and should not: it is walked by the run, ahead of
+    # its first frame, not at arm time, and `wire_fingerprint` covers the three phases a
+    # send delivers.
     window.panes[BOX].set_text("SDCB,1,12.0\n\n" + window.panes[BOX].text())
     window._refresh_actions()
     assert not window.acquire_button.isEnabled()

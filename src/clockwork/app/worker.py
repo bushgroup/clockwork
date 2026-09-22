@@ -173,10 +173,16 @@ class Send(Job):
 class Acquire(Job):
     """A whole series: one acquisition, then `replicates - 1` technical replicates.
 
-    Each replicate walks the method's `reset` list and does the same again into a file
-    of its own, with **the same `Snapshot`** the first run was stamped with -- a
-    replicate re-sends neither `setup` nor `load`, so the boxes hold what the first run
-    left them holding and reading them again would record one measurement twice.
+    Each replicate does the same again into a file of its own, with **the same
+    `Snapshot`** the first run was stamped with -- a replicate re-sends neither `setup`
+    nor `load`, so the boxes hold what the first run left them holding and reading them
+    again would record one measurement twice.
+
+    **Every run in the series re-arms the rack before its own first frame**, the
+    replicates and the first alike, which is `run_acquisition`'s own doing and not this
+    job's: a run that sends the boxes nothing -- a replicate, or a second press of
+    Acquire on panes the boxes already match -- would otherwise begin behind whatever
+    the previous run's table left on the enable line (lab record, task 63).
 
     The stems are worked out one at a time rather than up front, so a file a trainee
     drops into the directory between two replicates still moves the counter.

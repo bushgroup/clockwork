@@ -7,12 +7,19 @@ architecture note put together:
 
     send_phases(method, boxes)                 setup, load, arm -- nothing starts yet
     run_acquisition(method, boxes=..., ...)    the files, the frames, the fold
-    run_acquisition(..., replicate=True)       the reset list, then the same again
+    run_acquisition(..., replicate=True)       the same again, into a file of its own
 
 Both calls block, both are meant for a worker thread, and neither imports Qt. A window
 wraps them one per button and shows what the progress callback reports; a bench script
 calls them in a row. Nothing above this layer should hold a second copy of the sequence,
 which is why this exists at all (lab record, task 23).
+
+**An acquisition re-arms the rack before its own first frame** and does not ask to be
+told whether it needs to: the method's `reset` list and the declared enable line low by
+command, which is `_ready_the_rack`. So the second of two `run_acquisition` calls with
+no `send_phases` between them is as good as the first, whether it is a replicate, a
+second press of the same button or the next line of a bench script (lab record,
+task 63). `replicate` is a statement about the record and no longer one about the wire.
 
 **The order per console frame is not a style.** `acquire frame` goes to the console
 first, with the digitizer's enable still low, and the method's `start` list is walked
@@ -960,7 +967,7 @@ def refusals(method: Method) -> list[str]:
     exactly like an enable lead that has fallen off (lab record, task 05).
 
     A method that says which line the enable is on lifts it, because the loop can then
-    lower the line itself between method frames (`_lower_enable`) and the trainee's
+    lower the line itself between method frames (`_ready_the_rack`) and the trainee's
     table is acquirable as written -- which is what the lab record's task 26 exists for,
     and what Matt chose on 2026-09-11 when he took the refusal as a stopgap. A method
     that does not say is still refused: nothing in this package knows which output
@@ -1024,7 +1031,7 @@ def enable_witness(method: Method) -> str | None:
     * a method that does not declare `acquisition.enable`, since which output carries the
       gate is a fact about the cabling that nothing else in the package knows;
     * `single_frame`, whose table completes once per method frame rather than once per
-      repetition, and whose gate the loop lowers itself between frames (`_lower_enable`);
+      repetition, and whose gate the loop lowers itself between frames (`_ready_the_rack`);
     * a method whose one `STBLDAT` belongs to a box other than the one `enable` names, or
       which loads none, or loads several, since then which table drives the line cannot be
       told from the strings;
@@ -1358,6 +1365,17 @@ def _enable_steps(enable: Enable) -> tuple[Step, ...]:
     that has to hold at a particular instant. Hence the round trip through local mode,
     which the day also showed leaves the table loaded and re-armable (lab record,
     task 26; `docs/mips-wire-format.md` section 4).
+
+    **The `SDIO` is what lowers the line, and the `SMOD,LOC` around it is not enough on
+    its own.** Leaving table mode ends in `SetImageRegs()`, which reinstates the digital
+    outputs the *host* last commanded and discards what the table left: the table engine
+    writes the image bytes but never `DigitialOutputs[]`, which only a host `SDIO` and
+    the front panel maintain. For a line nothing has ever raised by command that is a
+    return to low, which is why a bare `SMOD,LOC` / `SMOD,TBL` round trip looks like it
+    lowers the enable. One `SDIO,<channel>,1` anywhere in the session inverts it, and
+    raising the enable by hand is exactly what a cold instrument invites. So the
+    explicit low is the whole point of the three steps rather than a belt on top of
+    braces (`docs/mips-wire-format.md` section 4; lab record, task 63).
 
     Built through `dio_command` rather than written out, because the firmware aliases
     the digital *inputs* `Q`-`X` onto outputs `I`-`P` and acknowledges them, so a
@@ -1864,12 +1882,19 @@ def run_acquisition(
     per repetition with the start list walked into each one, the fold after each method
     frame, and `keep_raw` at the close.
 
-    **A technical replicate is `replicate=True` with a new `stem`.** It walks the
-    method's `reset` list first and then does exactly the same again, re-sending neither
+    **Every run re-arms before its own first frame**: the method's `reset` list and then
+    the declared enable line low by command, which is `_ready_the_rack`. So this call
+    does not have to be told whether the boxes are holding a spent table, and a second
+    acquisition on a rack nothing was re-sent to is as good as the first (lab record,
+    task 63).
+
+    **A technical replicate is `replicate=True` with a new `stem`.** It re-sends neither
     `setup` nor `load`, because on this instrument a reset returns the box to local mode
-    and arms it again and leaves the table where it was. Two runs given the same stem
-    collide rather than overwrite, which is deliberate: the second acquisition of an
-    afternoon should not quietly replace the first.
+    and arms it again and leaves the table where it was; what `replicate` now says is
+    what the record means by it -- the same snapshot, its own file, its own log header --
+    and not what goes on the wire, which is the same for every run. Two runs given the
+    same stem collide rather than overwrite, which is deliberate: the second acquisition
+    of an afternoon should not quietly replace the first.
 
     **Who opens the acquisition chain closes it.** Pass `width` -- the `TofWidth` a
     `start_chain` already returned -- and the caller keeps the chain and owes the
@@ -2272,9 +2297,6 @@ class _Loop:
             acquisition.frames, acquisition.console_frames,
             acquisition.frame_length, self.frame_timeout,
         ))
-        if replicate:
-            self._walk(self.method.reset, "reset")
-
         # One worker, so folds stay in order and only ever one reads the raw file while
         # the console writes it. A fold of the last method frame is joined below rather
         # than waited on here, which is what "overlapping the next frame" means.
@@ -2387,7 +2409,7 @@ class _Loop:
 
     def _one_frame(self, method_frame: int, repetition: int) -> None:
         acquisition = self.method.acquisition
-        self._lower_enable(method_frame, repetition)
+        self._ready_the_rack(method_frame, repetition)
         request = self.recording.begin_frame(method_frame, repetition)
         self.report(FrameBegun(method_frame, repetition, request.frame_number,
                                acquisition.console_frames))
@@ -2419,8 +2441,7 @@ class _Loop:
                 # within a method frame and starts again at 1 for the next one, while
                 # the table that has to be re-armed was spent by the previous method
                 # frame's last repetition. A run's own first frame is excluded because
-                # `send_phases` armed the box, and a replicate's because `run` has just
-                # walked the same reset list.
+                # `_ready_the_rack` has just walked the same reset list for it.
                 self._walk(self.method.reset, "reset")
             began_list = time.perf_counter()
             self._walk(self.method.start, "start", gap=self.start_step_gap)
@@ -2640,15 +2661,8 @@ class _Loop:
                 trailing += 1
                 on_batch(event)
 
-    def _lower_enable(self, method_frame: int, repetition: int) -> None:
-        """Put the digitizer's gate down by command, before the frame is asked for.
-
-        Only under `single_frame`, and only between method frames. That mode's table
-        loops on the box and raises the enable once, so every frame after the run's
-        first would meet a gate the previous frame left high; `per_repetition`'s table
-        lowers the line itself one batch past its last counted scan, and a round trip
-        through local mode per repetition would cost a hundred of them per method frame
-        against a dead time the lab record's task 34 is trying to cut.
+    def _ready_the_rack(self, method_frame: int, repetition: int) -> None:
+        """Put the boxes in the state a frame may begin from, before it is asked for.
 
         **Before `acquire frame` and not inside the release.** The invariant is that the
         gate is low when the console is asked for the frame, so lowering it a few
@@ -2656,16 +2670,65 @@ class _Loop:
         counts -- a batch short of publishing anything, and so invisible to both of
         the gate checks that watch `acquire frame`.
 
-        It also re-arms the box, which is the same `SMOD,LOC` / `SMOD,TBL` a replicate's
-        reset list makes, so a `single_frame` table spent by the previous method frame
-        is ready for the next `TBLSTRT` without `rearm_with_reset` as well.
+        **The run's own first frame is prepared too, whatever the caller did before it,
+        and that is a decision rather than belt and braces** (Matt, 2026-09-21; lab
+        record, task 63). It used to be excluded on the reasoning that `send_phases` had
+        just armed the box, and that reasoning holds only for a run that sent phases: a
+        *second* plain acquisition sends none, because the panes already match the boxes,
+        and so began behind whatever the previous run's table had left on the enable
+        line. What this method needs to know is whether the table in the box is spent,
+        which is a question about the past that only the caller can answer and therefore
+        one a caller can answer wrongly. So it is not asked. The rack is *made* ready
+        instead, and `DIOA is low at every acquire frame` holds by construction rather
+        than by an assumption about what happened before this call.
+
+        Two things happen, in this order:
+
+        * **The method's `reset` list**, which is the trainee's own words for what one
+          run of this method needs before another -- walked first, and in the order
+          written, because the strings are theirs.
+        * **The enable line low by command**, where `acquisition.enable` says which line
+          it is: `_enable_steps`, last, so that the invariant's own commands cannot be
+          undone by the list above. It is the stronger of the two for two reasons. It is
+          the only one that works for a method whose `reset` list is empty and whose
+          table raises the enable and never lowers it, which is the golden
+          detection-response shape. And a `reset` list that is the bare mode round trip
+          does not lower the line by itself: leaving table mode reinstates the digital
+          outputs the *host* last commanded, so it lowers the enable only on a box
+          nothing has ever raised it on (`_enable_steps`, and section 4 of the wire
+          format).
+
+        **What the first frame costs is two round trips through local mode, and the
+        round trip is the whole cost.** The first command after `SMOD,LOC` answers in
+        about 0.9 s and
+        every command behind it in about 3 ms, measured six times over two boxes and two
+        days -- `SDIO,A,0` at 905-933 ms on the bench (task 26), `STBLDAT` at 919 ms and
+        `SMOD,TBL` at 918 ms on the instrument (task 63). So a reset list that is the
+        bare mode round trip costs ~1.12 s whether or not an `SDIO` is inside it, and
+        walking both lists costs about 2.2 s on the CLOCK method, against a frame of
+        64.5 s. Both are walked anyway rather than one chosen: the `reset` list is the
+        trainee's and is not this loop's to skip, and the `SDIO` is the only one of the
+        two that works for a method whose `reset` list is empty.
+
+        Later frames are unchanged: the enable steps only, under `single_frame` only.
+        That mode's table loops on the box and raises the enable once, so every frame
+        after the first would meet a gate the previous frame left high;
+        `per_repetition`'s table lowers the line itself one batch past its last counted
+        scan, and a round trip through local mode per repetition would cost a hundred of
+        them per method frame against a dead time the lab record's task 34 is trying to
+        cut.
         """
         acquisition = self.method.acquisition
-        if (acquisition.enable is None
-                or acquisition.repetition_mode != "single_frame"
-                or (method_frame, repetition) == (1, 1)):
+        if (method_frame, repetition) == (1, 1):
+            # The run's own first frame, which is the only one the reset list belongs
+            # to: what a previous run left behind is not this method's table's business.
+            self._walk(self.method.reset, "reset")
+        elif acquisition.repetition_mode != "single_frame":
+            # Every later frame of a `per_repetition` method, whose table brings the
+            # line down itself.
             return
-        self._walk(_enable_steps(acquisition.enable), "enable")
+        if acquisition.enable is not None:
+            self._walk(_enable_steps(acquisition.enable), "enable")
 
     def _check_first_gate(self, method_frame: int, repetition: int) -> None:
         """Hold the run's first frame open long enough to catch a gate that is not shut.
@@ -2693,6 +2756,12 @@ class _Loop:
         behind an ungated chain -- are all in place before the run's first frame and none
         of them arrives part way through one. A check that passes here has ruled out all
         three.
+
+        Since task 63 the second of those three is also *prevented*, by the enable steps
+        `_ready_the_rack` walks ahead of this frame, which makes this dwell the evidence
+        that the prevention worked on this rack rather than only that nothing was wrong.
+        Both are worth having: the command is what a method with a declared enable has,
+        and the dwell is what every method has.
 
         It marks itself done only when it passes, so a gate that is open fails frame
         after frame until `abort_after` ends the run, which is the right end for a

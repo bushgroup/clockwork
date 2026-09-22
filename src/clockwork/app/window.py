@@ -460,9 +460,11 @@ class MainWindow(QMainWindow):
             (self.arm_button, "send_phases(setup=False): the table and the mode change "
                               "only, for boxes that have had their setup since "
                               "power-up."),
-            (self.acquire_button, "The first acquisition, then the method's reset list "
-                                  "and a replicate for each further count, one file "
-                                  "each."),
+            (self.acquire_button, "The first acquisition, then a replicate for each "
+                                  "further count, one file each. Every one of them "
+                                  "re-arms the boxes and puts the digitizer's enable "
+                                  "down first, so a second press is as good as the "
+                                  "first."),
             (self.replicate_button, "One more acquisition off the last one's readback: "
                                     "the reset list, then the same again."),
             (self.stop_button, "End the series after the current repetition and its "

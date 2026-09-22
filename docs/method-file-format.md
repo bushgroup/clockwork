@@ -241,11 +241,19 @@ and a box that has not reached that halt when the first edge arrives misses the 
 repetition. Putting the two `TARBTRG` commands ahead of `TBLSTRT`, as the example does, is what
 guarantees they are waiting.
 
-A technical replicate walks `reset` and then `start` again, and sends neither `setup` nor `load`.
-On the boxes this lab runs, `reset` returns the sequencer box to local mode and arms it again,
-which leaves its table loaded and costs one round trip rather than a table upload. Note that
-`SMOD,LOC` on a box that is already local answers with error 3; `clockwork.mips` treats that as
-success, so a `reset` is safe to send whatever state the box is in.
+Every acquisition walks `reset` before its own first frame, and then `start` for each frame after
+that. On the boxes this lab runs, `reset` returns the sequencer box to local mode and arms it
+again, which leaves its table loaded and costs one round trip rather than a table upload. A
+technical replicate is an acquisition that sends neither `setup` nor `load`, so `reset` and
+`start` are the whole of what it puts on the wire.
+
+The reason `reset` runs ahead of a first frame and not only ahead of a replicate's is that an
+acquisition cannot see what happened before it started. A second acquisition of the same method
+sends the boxes nothing, because the table they are holding is already the one the method asks
+for, and a table that has run to completion leaves the digitizer's enable wherever its last event
+put it. Walking `reset` first makes the state a frame begins in the same for every acquisition.
+Note that `SMOD,LOC` on a box that is already local answers with error 3; `clockwork.mips` treats
+that as success, so a `reset` is safe to send whatever state the box is in.
 
 `reset` may be empty or absent, which is the right shape for a method with nothing to repeat. An
 empty `start` is rejected, because a method with nothing in its start list never begins.

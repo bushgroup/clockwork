@@ -441,8 +441,9 @@ def test_a_per_repetition_table_that_drops_the_enable_at_the_wrong_tick_is_refus
 
 
 def test_a_per_repetition_table_that_never_drops_the_enable_is_refused_past_one_frame():
-    """`_lower_enable` is `single_frame`'s alone, so under `per_repetition` a table that
-    leaves the gate high leaves it high into the next repetition's `acquire frame`."""
+    """The between-frames lowering is `single_frame`'s alone, so under `per_repetition`
+    a table that leaves the gate high leaves it high into the next repetition's
+    `acquire frame`."""
     never = single_frame_table(SCANS, 1)
     boxes = (dataclasses.replace(make_method().boxes[0], load=(never,)),)
     one = dataclasses.replace(make_method(accumulations=1, frames=1), boxes=boxes)
@@ -910,6 +911,51 @@ def test_a_replicate_walks_the_reset_list_and_re_sends_no_table(rig):
     assert not any(phase == "setup" for phase, _ in phases)
 
 
+def test_a_second_plain_acquisition_re_arms_the_rack_the_way_a_replicate_does(rig):
+    """Task 63, and the run this loop let start wrong: `260921_BF_005`.
+
+    Four consecutive runs of the CLOCK method on 2026-09-21; the second was refused by
+    the gate guard 3.3 s in, and its send log is the whole of why. It sent the boxes
+    **nothing at all** -- the panes already matched them, so the window re-sent no
+    phases -- and it carried none of the header a replicate's log carries, so it was a
+    second plain Acquire on a rack still armed from the run before it. The loop walked
+    the reset list `if replicate`, that run was not one, and nothing re-armed the table
+    or put the enable down; it began behind what the previous table had left there.
+
+    So the assertion is that the second of two runs with no `send_phases` between them
+    puts the same strings on the wire as the first, which is what makes a second press
+    of Acquire as good as the first. The gate itself cannot be rehearsed from the box
+    side -- nothing joins a stand-in box's DIOA to the stand-in card and no `FakeBox`
+    runs a table -- so a green run here says the strings went and says nothing about the
+    line. That half is the bench's (lab record, tasks 44 and 63).
+    """
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+
+    first: list[acq.Event] = []
+    second: list[acq.Event] = []
+    assert rig.acquire(method, boxes, progress=first.append).complete
+    # No `send_phases` between the two, which is the case: a second Acquire on panes the
+    # boxes already match re-sends nothing, and neither run is a replicate.
+    assert rig.acquire(method, boxes, stem="260911_TEST_002",
+                       progress=second.append).complete
+
+    def walked(seen):
+        return [(event.phase, event.command) for event in seen
+                if isinstance(event, PhaseSent) and event.phase in ("reset", "enable")]
+
+    expected = [("reset", "SMOD,LOC"), ("reset", "SMOD,TBL"),
+                ("enable", "SMOD,LOC"), ("enable", "SDIO,A,0"),
+                ("enable", "SMOD,TBL")]
+    assert walked(second) == expected
+    assert walked(first) == expected, (
+        "the first run re-arms too: which run this is cannot be the condition, because "
+        "the loop cannot see what happened before it was called")
+    assert not any(event.command.startswith("STBLDAT") for event in second
+                   if isinstance(event, PhaseSent)), "the table stays loaded"
+
+
 def test_a_replicate_that_reuses_a_stem_collides_rather_than_overwriting(rig):
     method = make_method()
     boxes = make_boxes(BOX)
@@ -940,7 +986,8 @@ def test_a_software_triggered_box_takes_the_start_list_alone_every_repetition(ri
 
     A `SW` box stays in table mode across `TBLCMPLT` (wire format section 1, measured on
     two boxes), so the start list alone carries every repetition after the first and the
-    reset list is never walked.
+    reset list is walked once -- ahead of the run's own first frame, which is task 63's
+    re-arm and not a repetition's -- and never again.
     """
     method = software_triggered()
     boxes = boxes_for(method)
@@ -950,8 +997,10 @@ def test_a_software_triggered_box_takes_the_start_list_alone_every_repetition(ri
     assert run.complete
     assert all(record.acquired for record in run.frames)
     assert boxes[BOX].transport.mode == "TBL"
-    assert not [event for event in seen
-                if isinstance(event, PhaseSent) and event.phase == "reset"]
+    resets = [event for event in seen
+              if isinstance(event, PhaseSent) and event.phase == "reset"]
+    assert [event.command for event in resets] == ["SMOD,LOC", "SMOD,TBL"], (
+        f"one reset walk for the run, not one per repetition of {ACCUMULATIONS}")
 
 
 def test_a_box_whose_table_does_not_re_arm_fails_its_frames_rather_than_hanging(rig):
@@ -984,10 +1033,13 @@ def test_a_box_whose_table_does_not_re_arm_fails_its_frames_rather_than_hanging(
     assert "TBLSTRT" in run.frames[1].detail
 
 
-def test_rearm_with_reset_re_arms_before_every_console_frame_but_the_run_s_first(rig):
+def test_rearm_with_reset_re_arms_before_every_console_frame(rig):
     """Including the first repetition of the second method frame, which is the one a
     repetition counter misses: `repetition` starts again at 1 for each method frame while
     the table it has to re-arm was spent by the previous frame's last repetition.
+
+    The run's own first frame is re-armed too, by `_ready_the_rack` rather than by this
+    fallback, so the count is every console frame and not every console frame but one.
     """
     method = software_triggered(frames=2)
     boxes = boxes_for(method)
@@ -1000,22 +1052,29 @@ def test_rearm_with_reset_re_arms_before_every_console_frame_but_the_run_s_first
               if isinstance(event, PhaseSent) and event.phase == "reset"]
     starts = [event for event in seen
               if isinstance(event, PhaseSent) and event.phase == "start"]
-    # Two commands per reset, one before every console frame except the run's first.
+    # Two commands per reset, one before every console frame: the fallback's, plus the
+    # run's own first from `_ready_the_rack`, which the fallback therefore skips.
     assert len(starts) == 2 * ACCUMULATIONS
-    assert len(resets) == 2 * (2 * ACCUMULATIONS - 1)
+    assert len(resets) == 2 * (2 * ACCUMULATIONS)
 
 
 def test_rearm_with_reset_is_off_unless_asked_for(rig):
     """It is a fallback unlocked by a bench answer, not the loop's own opinion, so a box
-    that does re-arm is never made to pay for one that does not."""
+    that does re-arm is never made to pay for one that does not.
+
+    The one reset walk left is the run's own, before its first frame, which every run
+    does whether or not the fallback is on (task 63). Four console frames here, so a
+    fallback that was on would show four.
+    """
     method = make_method(frames=2)
     boxes = make_boxes(BOX)
     send_phases(method, boxes)
     seen: list[acq.Event] = []
     run = rig.acquire(method, boxes, progress=seen.append)
     assert run.complete
-    assert not [event for event in seen
-                if isinstance(event, PhaseSent) and event.phase == "reset"]
+    resets = [event for event in seen
+              if isinstance(event, PhaseSent) and event.phase == "reset"]
+    assert [event.command for event in resets] == ["SMOD,LOC", "SMOD,TBL"]
 
 
 # --- failures --------------------------------------------------------------------------
@@ -1328,19 +1387,22 @@ def test_single_frame_with_more_than_one_frame_acquires_once_the_gate_line_is_na
     assert run.complete and len(run.frames) == 2 and len(run.folds) == 2
 
 
-def test_the_gate_line_is_lowered_between_method_frames_and_not_before_the_first(rig):
-    """Three commands, in local mode, before the frame is asked for -- and none of it
-    ahead of the run's own first frame, whose gate is the dwell's business.
+def test_the_gate_line_is_lowered_before_every_frame_including_the_run_s_first(rig):
+    """Three commands, in local mode, before the frame is asked for -- and since
+    task 63 before the run's own first frame as well, after the method's reset list.
 
-    The order is the whole invariant and the only part of it that cannot be recovered
-    from the file afterwards: the gate has to be down when the console is told to
-    acquire, not a moment after.
+    The run's first frame used to be excluded, on the reasoning that `send_phases` had
+    just armed the box. That holds only for a run that sent phases, and a second plain
+    acquisition sends none: it began behind whatever the previous run's table had left
+    on the enable line, which is `260921_BF_005`. The order is the whole invariant and
+    the only part of it that cannot be recovered from the file afterwards: the gate has
+    to be down when the console is told to acquire, not a moment after.
     """
     log: list[str] = []
 
     def watch(event):
-        if isinstance(event, PhaseSent) and event.phase == "enable":
-            log.append(event.command)
+        if isinstance(event, PhaseSent) and event.phase in ("reset", "enable"):
+            log.append(f"{event.phase} {event.command}")
         if isinstance(event, FrameBegun):
             log.append(f"frame {event.method_frame}")
 
@@ -1348,20 +1410,36 @@ def test_the_gate_line_is_lowered_between_method_frames_and_not_before_the_first
                          enable={"box": BOX, "channel": "A"})
     boxes = make_boxes(BOX)
     send_phases(method, boxes)
-    # The state the previous method frame leaves behind: a table that looped on the box
-    # and raised the enable at its tick 0, with nothing in it to lower the line again.
+    # The state a previous run of this method leaves behind, and the state the previous
+    # method frame leaves behind, which are the same state: a table that looped on the
+    # box and raised the enable at its tick 0, with nothing in it to lower the line
+    # again. Set here so that the run starts in it, as the second Acquire of 2026-09-21
+    # did.
     boxes[BOX].transport.dio_image["A"] = True
     boxes[BOX].transport.dio_pins["A"] = True
     run = rig.acquire(method, boxes, progress=watch)
 
     assert run.complete
-    assert log == ["frame 1", "SMOD,LOC", "SDIO,A,0", "SMOD,TBL", "frame 2"]
+    assert log == [
+        # The method's own words first, then the invariant's, so that the trainee's
+        # strings cannot undo the lowering.
+        "reset SMOD,LOC", "reset SMOD,TBL",
+        "enable SMOD,LOC", "enable SDIO,A,0", "enable SMOD,TBL",
+        "frame 1",
+        "enable SMOD,LOC", "enable SDIO,A,0", "enable SMOD,TBL",
+        "frame 2",
+    ]
     assert boxes[BOX].transport.dio_pins["A"] is False
 
 
-def test_per_repetition_lowers_nothing_by_command(rig):
+def test_per_repetition_lowers_the_gate_once_and_not_per_repetition(rig):
     """Its table drops the enable a batch past its last counted scan, and a round trip
-    through local mode per repetition would be a hundred of them per method frame."""
+    through local mode per repetition would be a hundred of them per method frame.
+
+    Once, though, and not never: the run's first frame is lowered by command whatever
+    the mode, because what the previous run left on the line is not this method's
+    table's business (task 63).
+    """
     sent: list[str] = []
     method = make_method(frames=2, accumulations=2,
                          enable={"box": BOX, "channel": "A"})
@@ -1371,7 +1449,10 @@ def test_per_repetition_lowers_nothing_by_command(rig):
                       progress=lambda event: sent.append(event.command)
                       if isinstance(event, PhaseSent) and event.phase == "enable"
                       else None)
-    assert run.complete and sent == []
+    assert run.complete
+    assert sent == ["SMOD,LOC", "SDIO,A,0", "SMOD,TBL"], (
+        "the four console frames of this run lowered the gate by command once, before "
+        "the first of them")
 
 
 def test_a_gate_line_on_a_digital_input_is_refused_before_anything_is_sent():

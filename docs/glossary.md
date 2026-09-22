@@ -210,7 +210,8 @@ Three terms carry more than one sense and are given both in one entry: *table*, 
   compression table sent once per acquisition; `arm` is what puts the box in table mode.
 - **Start sequence, reset sequence.** The two ordered cross-box lists in a method, written as
   `[box, command]` pairs. `start` releases an acquisition and its order is part of the experiment;
-  `reset` is what a technical replicate sends first, in place of `load`.
+  `reset` is what every acquisition sends before its first frame, in place of `load`, and returns
+  the sequencer box to local mode and arms it again.
 - **Repetition mode.** Whether each ion mobility experiment is its own acquisition console frame
   (`per_repetition`) or a whole method frame is one long frame (`single_frame`). It sets the
   console's `frame_length` and how often the start sequence runs.

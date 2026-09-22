@@ -96,9 +96,11 @@ typed by hand: the state panel below is where a value already on a box is read b
    box was holding before, after setup and once armed. Run this once per box after it powers up.
 2. **Load and arm.** The table and the mode change only, skipping setup. Use this on a box that
    already had its setup sent this session and only needs its next table loaded.
-3. **Acquire.** Runs the first acquisition, then the method's reset list and one replicate for each
-   further count in the Replicates field, each into its own file, on one worker thread so the
-   window stays responsive throughout.
+3. **Acquire.** Runs the first acquisition, then one replicate for each further count in the
+   Replicates field, each into its own file, on one worker thread so the window stays responsive
+   throughout. Every one of them walks the method's reset list and puts the digitizer's enable
+   down before its first frame, which costs a couple of seconds and is what makes a second press of
+   Acquire as good as the first.
 
 **Acquire is greyed out until the boxes agree with the method in the panes.** clockwork keeps a
 fingerprint of what the last Send setup or Load and arm actually put on each box, and Acquire is
@@ -151,8 +153,8 @@ use in the output directory, so two people acquiring into the same folder never 
 editable before Acquire starts, and the **Next** button beside it re-reads the directory on
 demand, which matters if a file landed there from somewhere else since the window opened.
 
-**Replicates** is a count of technical replicates, run unattended after the first acquisition: the
-method's reset list, then the same acquisition again, into a file of its own each time. A
+**Replicates** is a count of technical replicates, run unattended after the first acquisition,
+each the same acquisition again into a file of its own. A
 **Conditions** note, typed once, is stamped into every file a run writes and into its send log's
 header. It is the one part of the record no getter can read back: sample, MCP voltage, pusher
 period, collision energy, whatever the day's method does not already state as a setting.

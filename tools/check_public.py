@@ -1209,18 +1209,35 @@ def main() -> int:
                     read_live_pointer() is None,
                 )
 
+                # A second run with no `send_phases` between it and the first, which is
+                # every acquisition after the first press: a replicate, a second press
+                # of the same button, or the next line of a bench script. All three
+                # re-arm the rack before their own first frame, which is what a second
+                # plain Acquire did not do on 2026-09-21 (lab record, task 63).
+                walked: list[tuple[str, str]] = []
                 replicate = acq.run_acquisition(
                     recipe, boxes=boxes, console=console, stream=stream,
                     directory=directory,
                     post_trigger_samples=fake.post_trigger_samples,
                     stem="selfcheck-loop-2", replicate=True, silence=0.3,
                     gate_dwell=dwell,
+                    progress=lambda event: walked.append((event.phase, event.command))
+                    if isinstance(event, acq.PhaseSent)
+                    and event.phase in ("reset", "enable") else None,
                 )
                 check_true(
-                    "a replicate sends the reset list and acquires again into a new "
+                    "a second acquisition on the same rack acquires again into a new "
                     f"file ({os.path.basename(replicate.raw_path)})",
                     replicate.complete and replicate.replicate
                     and os.path.isfile(run.raw_path),
+                )
+                check_true(
+                    "and re-armed the rack first -- the method's reset list, then the "
+                    "declared enable line down by command -- rather than starting "
+                    "behind whatever the previous run's table left on it",
+                    walked == [("reset", "SMOD,LOC"), ("reset", "SMOD,TBL"),
+                               ("enable", "SMOD,LOC"), ("enable", "SDIO,A,0"),
+                               ("enable", "SMOD,TBL")],
                 )
 
                 # The one failure that produces a full frame of plausible data at the
@@ -1335,10 +1352,12 @@ def main() -> int:
                 )
                 check_true(
                     "having put the box in local mode, cleared the line and armed it "
-                    "again between the two",
+                    "again ahead of each of the two -- the run's own first frame "
+                    "included, since what a previous run left on the line is not this "
+                    "table's business",
                     [event.command for event in lowered
                      if isinstance(event, acq.PhaseSent) and event.phase == "enable"]
-                    == ["SMOD,LOC", "SDIO,A,0", "SMOD,TBL"]
+                    == ["SMOD,LOC", "SDIO,A,0", "SMOD,TBL"] * 2
                     and gated["box1"].transport.dio_pins["A"] is False,
                 )
                 console.stop_acquire()
@@ -1606,10 +1625,17 @@ def main() -> int:
             f"({os.path.basename(path)}, {len(lines)} lines)",
             logged.complete and os.path.isfile(os.path.join(directory, stem + ".uimf")),
         )
+        # `SMOD,TBL` is the arm phase, and it is also in the reset list and in the
+        # enable steps the run walks ahead of its own first frame, so it goes three
+        # times in a log that holds a send and an acquisition (lab record, task 63).
+        # The "once" rule is about the strings only a send delivers; the order rule
+        # still covers all three, since the arm's copy is the first of the three.
+        once = [string for string in strings if string != "SMOD,TBL"]
         check_true(
-            "and holds every string the method sent, whole, once, and in the order "
-            "they went",
-            [len(where(string)) for string in strings] == [1] * len(strings)
+            "and holds every string the method sent, whole, once for the strings only a "
+            "send delivers, and in the order they went",
+            [len(where(string)) for string in once] == [1] * len(once)
+            and len(where("SMOD,TBL")) == 3
             and [where(string)[0] for string in strings]
             == sorted(where(string)[0] for string in strings),
         )
