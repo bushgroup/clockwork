@@ -1738,6 +1738,16 @@ def main() -> int:
         "a port that will not open is a row in the scan and not the end of it",
         silent.found == () and len(silent.silent) == 1,
     )
+    first = discover(ports=["COM-A"], opener=lambda port, **_: Box(
+        transport=FakeBox(name="MIPS-A"), name=port))
+    again = discover(ports=["COM-A"], opener=refuses,
+                     held={entry.port: entry.box for entry in first.found if entry.box})
+    check_true(
+        "a rescan asks the boxes it holds over their own handles and reopens none, "
+        "since a close resets the box behind it (lab record, task 62)",
+        again.boxes == first.boxes and not again.silent,
+    )
+    again.close()
     ports = mips_ports(strict=False)
     if ports:
         check_true(

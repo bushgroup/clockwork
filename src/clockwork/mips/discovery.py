@@ -19,6 +19,18 @@ the ports it opened still open, wrapped as `Box` objects the caller owns: a box 
 answered is kept, and only a port that did not answer is closed. A caller that wants
 the identities and nothing else passes `keep=False` and accepts the cost.
 
+**A rescan is handed the boxes already open, and asks them over their own handles.**
+The reset is not instant: the Due leaves the bus and comes back as a new device node
+(`docs/mips-wire-format.md` §1, which says open once and keep it), so a rescan that
+closed its boxes and reopened them met whichever board had not finished
+re-enumerating. On the instrument, the launch scan found all three boxes every time
+and every `Find boxes` press after it found two, the missing port alternating, with a
+quarter-second of retries in place (lab record, task 62). Waiting inside a scan only
+races a re-enumeration the scan itself caused, so `discover` takes `held` and never
+closes a box that still answers. What a rescan is *for*, then,
+is two things: confirming the boxes it holds (and picking up an `SNAME` since), and
+opening the ports nothing holds, which is a box switched on since the last scan.
+
 The two classes of candidate are separated because they fail differently. A
 **MIPS-class** port is one whose USB identity says so -- vendor 0x2341 (the Due's
 Arduino vendor id) or an `iProduct` of `MIPS` -- and a scan of those is cheap and
@@ -35,13 +47,15 @@ before it has answered `GNAME`, so the cost is a timeout and not a disturbance.
     for entry in found.silent:
         print(entry.text)
 
+    again = discover(held={entry.port: entry.box for entry in found.found if entry.box})
+
 Filled by the lab record's task 50.
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from .box import DEFAULT_TIMEOUT_S, Box, MipsError
@@ -50,8 +64,6 @@ __all__ = [
     "DISCOVERY_TIMEOUT_S",
     "MIPS_PRODUCT",
     "MIPS_VENDOR_ID",
-    "REOPEN_ATTEMPTS",
-    "REOPEN_DELAY_S",
     "Discovery",
     "Found",
     "PortInfo",
@@ -85,27 +97,6 @@ sized for the one case that needs it: a box that has just been dropped out of ta
 mode answers its next string after about 1.1 s (lab record, task 37). Below that a
 scan run straight after an acquisition would report a live box as absent.
 """
-
-REOPEN_ATTEMPTS = 5
-"""How many times a port that refuses to open is retried before it counts as
-could-not-open.
-
-Windows does not always make a USB CDC port reusable the instant its handle is
-closed: a scan that follows one that closed every box can meet `CreateFile`
-failing on a device node mid-teardown, and the very next scan succeeds because
-the teardown finished meanwhile. That is what a trainee pressing `Find boxes`
-twice in a row was actually working around (lab record, task 62). Retrying
-inside one scan costs a first scan nothing -- every port that is going to open
-does so on the first attempt -- and spares a genuinely absent port only a few
-hundred milliseconds.
-"""
-
-REOPEN_DELAY_S = 0.05
-"""The pause between reopen attempts. `REOPEN_ATTEMPTS` of these is a few
-hundred milliseconds, chosen with no measurement of how long a Windows CDC
-teardown actually takes -- the lab record carries what the bench settles it
-to."""
-
 
 @dataclass(frozen=True, slots=True)
 class PortInfo:
@@ -151,11 +142,17 @@ class Silent:
     """One candidate port that did not become a box, and why.
 
     `could_not_open` is the fact `discover`'s old, single-word "silent" used to
-    flatten away: a port that refused to open -- retried `REOPEN_ATTEMPTS` times
-    and still no `CreateFile` -- has nothing to do with a box at all and cannot be
+    flatten away: a port that refused to open -- no `CreateFile` -- cannot be
     called "off or absent", while a port that opened and stayed quiet through
     `GNAME` is exactly that. A window says something different for each (lab
     record, task 62).
+
+    A port refuses to open for one of two reasons a trainee can do something
+    about: another program holds it (MIPS_QT6's terminal is the usual one), or
+    the device node is absent for the second or two a reset box takes to come
+    back. pyserial reports both as one exception type with the Windows error only
+    in its text, so the line names both remedies rather than guessing between
+    them.
     """
 
     port: str
@@ -169,7 +166,8 @@ class Silent:
         """One line a trainee can act on; the exception's own text stays the
         parenthetical, not the whole line."""
         if self.could_not_open:
-            return f"{self.port}: could not open the port ({self.why})"
+            return (f"{self.port}: could not open the port ({self.why}); close any "
+                    "other program using it, or wait a few seconds and Find boxes again")
         return f"{self.port}: opened but nothing answered -- off or absent ({self.why})"
 
 
@@ -234,7 +232,8 @@ class Discovery:
         return tuple(rows)
 
     def close(self) -> None:
-        """Close every box this scan opened. For a caller that kept none of them."""
+        """Close every box in the result, held ones included. For a caller that
+        keeps none of them -- and resets every one it closes."""
         for entry in self.found:
             if entry.box is not None:
                 entry.box.close()
@@ -301,12 +300,10 @@ def discover(
     *,
     strict: bool = True,
     keep: bool = True,
+    held: Mapping[str, Box] | None = None,
     timeout: float = DISCOVERY_TIMEOUT_S,
     opener: Callable[..., Box] = Box.open,
     clock: Callable[[], float] = time.perf_counter,
-    reopen_attempts: int = REOPEN_ATTEMPTS,
-    reopen_delay: float = REOPEN_DELAY_S,
-    sleep: Callable[[float], None] = time.sleep,
 ) -> Discovery:
     """Ask every candidate port what box is behind it.
 
@@ -315,24 +312,33 @@ def discover(
     it answered -- see the module docstring for why closing it would be the wrong
     thing to do to a box.
 
+    **`held` is the boxes a caller already has open, keyed by port**, and a rescan
+    passes every one of them, the unaddressable ones included. A held box is asked
+    over its own handle and never reopened while it answers, so a rescan resets
+    nothing; it comes back in `found` with the same `Box`, renamed if `GNAME` has
+    changed. A held box that no longer answers is closed and its port opened afresh
+    in the same scan, which is what reaches a box that was power-cycled and is back
+    as a new device node, its old handle dead. A held port the scan would not have
+    asked is asked anyway: a rescan does not drop a box it holds by leaving it out.
+    Every held box ends up either in `found` or closed, so a caller replaces its
+    whole set with the result and has nothing left over to close.
+
+    `keep=False` closes the boxes this scan opened and leaves held ones open, since
+    those were never this call's to reset.
+
     Nothing here writes a setting, changes a mode or sends anything but two getters,
     so a scan on a machine whose boxes are mid-experiment costs each of them two
     round trips and disturbs none of them. It is still the wrong moment to run one:
     a box in table mode is busy, and the window runs a scan on launch and on demand
     and never during a run.
 
-    **A port that refuses to open is retried before it counts as silent.** A close
-    right before this call -- which is every rescan, since a caller closes its old
-    boxes first -- can leave a Windows CDC port mid-teardown, and opening it again
-    within milliseconds fails with an `OSError` that has nothing to do with a box
-    being off (lab record, task 62). `reopen_attempts` and `reopen_delay` are that
-    retry's shape; a port that is going to open at all almost always does so on the
-    first or second attempt, so a normal scan pays nothing and only a port that is
-    genuinely gone pays the last one's timeout in addition to the retries.
+    **A port that refuses to open is not retried.** The one refusal a retry was
+    meant for, a port that had just been closed, is a USB re-enumeration measured
+    in seconds and not a handle mid-teardown, and `held` removes the close that
+    caused it (lab record, task 62).
 
     `opener` is the injection point the tests drive: anything with `Box.open`'s
-    signature, so a stand-in rack is the same code path as a real one. `sleep` is
-    the same for the retry pause.
+    signature, so a stand-in rack is the same code path as a real one.
 
     Raises nothing. Every failure is a row in `silent` with the reason it gave,
     because the one thing a discovery must not do is refuse to report the boxes it
@@ -349,33 +355,47 @@ def discover(
             for item in ports
         ]
         skipped = ()
+    holding = dict(held or {})
+    asked = {info.port for info in candidates}
+    candidates += [PortInfo(port=port, mips_class=True)
+                   for port in holding if port not in asked]
 
     found: list[Found] = []
     silent: list[Silent] = []
     for info in candidates:
-        box, open_error = _open_with_retries(
-            opener, info.port, min(timeout, DEFAULT_TIMEOUT_S),
-            attempts=reopen_attempts, delay=reopen_delay, sleep=sleep)
-        if open_error is not None:
+        box = holding.pop(info.port, None)
+        if box is not None:
+            answer = _identify(box)
+            if not isinstance(answer, Exception):
+                box.name = answer[0] or info.port
+                found.append(Found(name=answer[0], port=info.port, version=answer[1],
+                                   box=box))
+                continue
+            # Quiet over its own handle: switched off, unplugged, or reset and back
+            # as a new device node. The close may reset a box that was merely slow,
+            # and the fresh open below then meets it mid-enumeration and says so;
+            # that is one scan's cost, against a held box nobody could ever reach
+            # again.
+            _shut(box)
+        try:
+            box = opener(info.port, timeout=min(timeout, DEFAULT_TIMEOUT_S))
+        except (MipsError, OSError, ValueError) as exc:
             # A port that never opened cannot be "off or absent" -- that word is
             # for a box that had its chance to answer and did not. See `Silent`.
             silent.append(Silent(info.port, could_not_open=True,
-                                 why=str(open_error) or "no reply"))
+                                 why=str(exc) or "no reply"))
             continue
-        assert box is not None
-        try:
-            with box.summarised():
-                name = box.box_name().strip()
-                version = box.version().strip()
-        except (MipsError, OSError, ValueError) as exc:
+        answer = _identify(box)
+        if isinstance(answer, Exception):
             # Every reason a box does not answer lands here and is a row, not a
             # raise: the box is off, another process holds the port, or what
             # answered is not a box at all. Which of those it was is the
             # exception's to say and not this function's to guess.
             _shut(box)
             silent.append(Silent(info.port, could_not_open=False,
-                                 why=str(exc) or "no reply"))
+                                 why=str(answer) or "no reply"))
             continue
+        name, version = answer
         box.name = name or info.port
         found.append(Found(name=name, port=info.port, version=version,
                            box=box if keep else None))
@@ -393,33 +413,13 @@ def discover(
                      seconds=clock() - started, _boxes=boxes)
 
 
-def _open_with_retries(
-    opener: Callable[..., Box],
-    port: str,
-    timeout: float,
-    *,
-    attempts: int,
-    delay: float,
-    sleep: Callable[[float], None],
-) -> tuple[Box | None, Exception | None]:
-    """Open `port`, retrying only the failure a mid-teardown CDC device gives.
-
-    A `MipsError` or `ValueError` out of `opener` means something about the
-    call itself was wrong -- a bad argument, not a device that will come back
-    -- so those are not retried. Only `OSError`, what pyserial raises when
-    `CreateFile` itself fails, gets another try.
-    """
-    last: Exception | None = None
-    for attempt in range(attempts):
-        try:
-            return opener(port, timeout=timeout), None
-        except OSError as exc:
-            last = exc
-            if attempt + 1 < attempts:
-                sleep(delay)
-        except (MipsError, ValueError) as exc:
-            return None, exc
-    return None, last
+def _identify(box: Box) -> tuple[str, str] | Exception:
+    """`(GNAME, GVER)`, stripped, or the exception that stopped them."""
+    try:
+        with box.summarised():
+            return box.box_name().strip(), box.version().strip()
+    except (MipsError, OSError, ValueError) as exc:
+        return exc
 
 
 def _shut(box: Box) -> None:

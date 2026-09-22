@@ -21,7 +21,9 @@ rather than dropped, not so that two can overlap.
 **The boxes are opened once and kept.** Closing a port drops DTR, which makes the
 firmware reset its own USB port and re-enumerate, so a window that opened a box per send
 would reset the rack on every button (lab record, task 37). `discover` hands back open
-boxes and this thread holds them until the window closes.
+boxes and this thread holds them until the window closes, through every rescan: `Find
+boxes` hands the open ones back to `discover` rather than closing them first (lab
+record, task 62).
 
 What crosses the seam is frozen: a job going in, a dataclass or a `Run` coming back.
 Nothing above this line holds a `Box` or a `Console`, and nothing in it holds a widget.
@@ -436,6 +438,12 @@ class Worker(QThread):
         """Open boxes, keyed by `GNAME`. Owned by this thread; nothing else closes
         one."""
 
+        self._held: dict[str, Box] = {}
+        """Every box the last scan left open, keyed by port: `boxes` and the ones a
+        method cannot address (no name, or a name two boxes answer to). The next
+        scan is handed all of them, since closing one resets it (lab record, task
+        62) and leaving one out would keep its port busy with nothing holding it."""
+
         self.listings: dict[str, frozenset[str]] = {}
         """The `GCMDS` cache, kept for the session. Three boxes cost about five
         seconds of listing on the first send and 0.3 s on every one after
@@ -538,8 +546,8 @@ class Worker(QThread):
     # -- the boxes -----------------------------------------------------------
 
     def _discover(self, job: Discover) -> Discovery:
-        self._close_boxes()
         if self.fake:
+            self._close_boxes()
             if job.method is None:
                 self.said.emit("--fake: open a method and the rack is built from it")
                 found = Discovery()
@@ -560,7 +568,12 @@ class Worker(QThread):
             self.discovered.emit(found)
             return found
 
-        found = discover(ports=job.ports)
+        # The open boxes go back in rather than being closed first: a close resets the
+        # Due, it leaves the bus to re-enumerate, and a rescan that closed and reopened
+        # found one box fewer on every press (lab record, task 62).
+        found = discover(ports=job.ports, held=self._held)
+        self._held = {entry.port: entry.box for entry in found.found
+                      if entry.box is not None}
         self.boxes = found.boxes
         self.listings = {name: listing for name, listing in self.listings.items()
                          if name in self.boxes}
@@ -934,12 +947,14 @@ class Worker(QThread):
                 + ". Find boxes again, or check they are powered on.")
 
     def _close_boxes(self) -> None:
-        for box in self.boxes.values():
+        opened = {id(box): box for box in (*self.boxes.values(), *self._held.values())}
+        for box in opened.values():
             try:
                 box.close()
             except Exception:  # noqa: BLE001 -- a close that fails has nothing to fail
                 pass
         self.boxes = {}
+        self._held = {}
 
     def _close_everything(self) -> None:
         self._close_boxes()

@@ -1111,7 +1111,7 @@ def test_discovery_keeps_the_boxes_that_answered_and_reports_the_ports_that_did_
             raise OSError("could not open port COM9")
         return Box(transport=FakeBox(), name=port)
 
-    found = discover(ports=["COM3", "COM9"], opener=opener, reopen_attempts=1)
+    found = discover(ports=["COM3", "COM9"], opener=opener)
     assert list(found.boxes)
     assert found.silent == (Silent("COM9", True, "could not open port COM9"),)
     entry = found.found[0]
@@ -1119,35 +1119,149 @@ def test_discovery_keeps_the_boxes_that_answered_and_reports_the_ports_that_did_
     found.close()
 
 
-def test_a_port_mid_teardown_is_retried_rather_than_reported_silent():
-    """A close right before a rescan can leave a Windows CDC port refusing to
-    reopen for a moment (lab record, task 62): the trainee's own workaround was
-    pressing `Find boxes` a second time. `discover` should not need that."""
-    calls: dict[str, int] = {}
-    slept: list[float] = []
+class ResettingRack:
+    """An `opener` whose boxes behave the way the rack's did (lab record, task 62).
+
+    Closing a box's port resets the Due behind it, and a port opened again before it
+    has finished re-enumerating is not there: `FileNotFoundError` out of `CreateFile`.
+    The stand-in does not model how long that lasts, only that it outlasts the scan
+    that caused it, which is the part a rescan has to survive.
+    """
+
+    def __init__(self) -> None:
+        self.opens: dict[str, int] = {}
+        self.resetting: set[str] = set()
+
+    def __call__(self, port, **_):
+        if port in self.resetting:
+            raise OSError(2, "The system cannot find the file specified.")
+        self.opens[port] = self.opens.get(port, 0) + 1
+        transport = FakeBox(name=port)
+        closing = transport.close
+
+        def close() -> None:
+            closing()
+            self.resetting.add(port)
+
+        transport.close = close
+        return Box(transport=transport, name=port)
+
+
+def held_by(found) -> dict:
+    return {entry.port: entry.box for entry in found.found if entry.box is not None}
+
+
+def test_a_rescan_asks_the_boxes_it_holds_and_reopens_none_of_them():
+    """The defect the rack showed: the launch scan found all three boxes and every
+    `Find boxes` after it found two, because a rescan closed what it held -- which
+    resets each box -- and reopened it straight away."""
+    rack = ResettingRack()
+    first = discover(ports=["COM5", "COM6", "COM7"], opener=rack)
+    assert set(first.boxes) == {"COM5", "COM6", "COM7"}
+    for _ in range(5):
+        again = discover(ports=["COM5", "COM6", "COM7"], opener=rack, held=held_by(first))
+        assert not again.silent
+        assert again.boxes == first.boxes
+        first = again
+    assert rack.opens == {"COM5": 1, "COM6": 1, "COM7": 1}
+    assert not rack.resetting
+    first.close()
+
+
+def test_closing_and_reopening_is_what_loses_a_box():
+    """The same rack scanned the old way, closing first: the reset the close causes is
+    what the next open meets. Kept so that the stand-in above is known to model the
+    fault, and not merely to be a rack that never fails."""
+    rack = ResettingRack()
+    first = discover(ports=["COM5", "COM6"], opener=rack)
+    first.close()
+    again = discover(ports=["COM5", "COM6"], opener=rack)
+    assert not again.boxes
+    assert all(entry.could_not_open for entry in again.silent)
+
+
+def test_a_held_box_is_asked_even_where_the_scan_would_not_have_asked_its_port():
+    rack = ResettingRack()
+    first = discover(ports=["COM5", "COM6"], opener=rack)
+    again = discover(ports=["COM6"], opener=rack, held=held_by(first))
+    assert set(again.boxes) == {"COM5", "COM6"}
+    assert rack.opens == {"COM5": 1, "COM6": 1}
+    again.close()
+
+
+def test_a_held_box_that_stopped_answering_is_closed_and_its_port_opened_afresh():
+    """A box power-cycled since the last scan is back as a new device node, and the
+    handle held on the old one is dead. The fresh open is the only way to reach it."""
+    opens: list[str] = []
 
     def opener(port, **_):
-        calls[port] = calls.get(port, 0) + 1
-        if port == "COM9" and calls[port] < 3:
-            raise OSError(22, "A device which does not exist was specified.")
+        opens.append(port)
         return Box(transport=FakeBox(name=port), name=port)
 
-    found = discover(ports=["COM3", "COM9"], opener=opener, sleep=slept.append)
-    assert not found.silent
-    assert set(found.boxes) == {"COM3", "COM9"}
-    assert calls["COM9"] == 3
-    assert len(slept) == 2
-    found.close()
+    first = discover(ports=["COM5"], opener=opener)
+    dead = first.boxes["COM5"]
+    dead.transport.close()
+    again = discover(ports=["COM5"], opener=opener, held=held_by(first))
+    assert opens == ["COM5", "COM5"]
+    assert again.boxes["COM5"] is not dead
+    again.close()
 
 
-def test_a_port_that_never_reopens_is_reported_as_could_not_open_not_silent():
+def test_a_held_box_that_was_renamed_comes_back_under_its_new_name():
+    first = discover(ports=["COM5"],
+                     opener=lambda port, **_: Box(transport=FakeBox(name="old"), name=port))
+    box = first.boxes["old"]
+    box.transport.name = "new"
+    again = discover(ports=["COM5"], opener=lambda port, **_: pytest.fail("reopened"),
+                     held=held_by(first))
+    assert again.boxes == {"new": box} and box.name == "new"
+    again.close()
+
+
+def test_keep_false_leaves_a_held_box_open():
+    rack = ResettingRack()
+    first = discover(ports=["COM5"], opener=rack)
+    again = discover(ports=["COM5", "COM6"], opener=rack, held=held_by(first), keep=False)
+    assert again.boxes == first.boxes
+    assert rack.resetting == {"COM6"}
+    again.close()
+
+
+def test_a_port_that_will_not_open_is_reported_as_could_not_open_not_silent():
     def opener(port, **_):
         raise OSError(2, "The system cannot find the file specified.")
 
-    found = discover(ports=["COM7"], opener=opener, reopen_attempts=2, sleep=lambda _: None)
+    found = discover(ports=["COM7"], opener=opener)
     assert found.silent == (Silent("COM7", True,
                                     "[Errno 2] The system cannot find the file specified."),)
     assert found.text.startswith("0 box(es), 1 port(s) could not open")
+    assert "wait a few seconds and Find boxes again" in found.silent[0].text
+
+
+def test_the_worker_hands_its_open_boxes_to_the_next_scan(qtbot, monkeypatch):
+    """`Find boxes` on the worker, pressed five times against a rack that resets on a
+    close: five identical scans, and each port opened once. On the rack, closing first,
+    this lost one box on every press (lab record, task 62)."""
+    from functools import partial
+
+    from clockwork.app import worker as worker_module
+
+    rack = ResettingRack()
+    monkeypatch.setattr(worker_module, "discover", partial(discover, opener=rack))
+    worker = worker_module.Worker()
+    try:
+        results = []
+        for _ in range(5):
+            with qtbot.waitSignal(worker.finished_job, timeout=10_000) as blocker:
+                worker.submit(worker_module.Discover(ports=("COM5", "COM6", "COM7")))
+            results.append(blocker.args[1])
+        assert [sorted(found.boxes) for found in results] == [["COM5", "COM6", "COM7"]] * 5
+        assert all(not found.silent for found in results)
+        assert rack.opens == {"COM5": 1, "COM6": 1, "COM7": 1}
+    finally:
+        worker.shutdown()
+        worker.wait(10_000)
+    assert rack.resetting == {"COM5", "COM6", "COM7"}
 
 
 def test_two_boxes_with_one_name_are_reported_and_neither_is_addressable():
