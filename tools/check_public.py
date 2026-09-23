@@ -217,7 +217,8 @@ def declared_versions() -> dict[str, str]:
 
 LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method",
                 "clockwork.method.template", "clockwork.instrument", "clockwork.transcript",
-                "clockwork.naming", "clockwork.owner", "clockwork.owner.wire")
+                "clockwork.naming", "clockwork.owner", "clockwork.owner.wire",
+                "clockwork.summary")
 QT_PREFIXES = ("PySide6", "PyQt", "pyqtgraph", "shiboken")
 
 # --- opaque lab references ------------------------------------------------------------
@@ -1681,6 +1682,111 @@ def main() -> int:
                     and gated["box1"].transport.dio_pins["A"] is False,
                 )
                 console.stop_acquire()
+
+    section("reading a file back")
+    # Task 72: `clockwork.summary`, the numbers an agent's tools hand back instead of a
+    # plot. The stand-in's invented spectrum repeats every sixteen scans, so a run of A
+    # repetitions holds exactly A copies of one, in both files; the raw file and its
+    # companion must then give the same number to every question but saturation.
+    import json as _json
+
+    import numpy as np
+    from mainspring.uimf import FrameSpec, GlobalSpec, SparseFrame, UimfWriter
+
+    from clockwork import summary
+
+    with tempfile.TemporaryDirectory() as directory:
+        boxes = {"box1": mips_module.Box(transport=mips_module.FakeBox(), name="box1")}
+        acq.send_phases(recipe, boxes)
+        with acq.FakeConsole() as fake:
+            fake.frame_hold_s = 0.05
+            with acq.DataStream(fake.data_endpoint) as stream, \
+                    acq.Console(fake.command_endpoint) as console:
+                console.configure(offset_v=0.251)
+                read_run = acq.run_acquisition(
+                    recipe, boxes=boxes, console=console, stream=stream,
+                    directory=directory, instrument=machine,
+                    post_trigger_samples=fake.post_trigger_samples,
+                    stem="selfcheck-read", silence=0.3, gate_dwell=dwell,
+                )
+                console.stop_acquire()
+            one = [fake._scan_spectrum(scan) for scan in range(scans)]
+        raw_summary = summary.summarize(read_run.raw_path)
+        summed_summary = summary.summarize(read_run.summed_path)
+        per_scan = [accumulations * sum(values) for _bins, values in one]
+        check_true(
+            "a stand-in acquisition reads back as exactly A copies of the spectrum it "
+            f"invented, in both files ({summed_summary['total_counts']} counts)",
+            read_run.complete
+            and raw_summary["total_counts"] == summed_summary["total_counts"] == sum(per_scan)
+            and raw_summary["tic_profile"]["values"] == per_scan
+            and summed_summary["tic_profile"]["values"] == per_scan,
+        )
+        check_true(
+            "and each file says which of the pair it is and where the other one is",
+            (raw_summary["file"], summed_summary["file"]) == ("raw", "summed")
+            and raw_summary["companion"] == os.path.abspath(read_run.summed_path)
+            and summed_summary["companion"] == os.path.abspath(read_run.raw_path),
+        )
+        check_true(
+            "and saturation is exact in the raw file and an upper bound in the companion",
+            raw_summary["saturation"]["bound"] == "exact"
+            and summed_summary["saturation"]["bound"] == "upper"
+            and raw_summary["saturation"]["points_at_ceiling"] == 0,
+        )
+        tallest = one[3][0][1]
+        calibration = UimfFile(read_run.raw_path).frame_params(1).calibration(
+            UimfFile(read_run.raw_path).global_params().bin_width_ns)
+        window = [float(calibration.mz(tallest - 0.5)), float(calibration.mz(tallest + 0.5))]
+        answers = [(summary.windowed(path, {"tall": window})["windows"]["tall"]["intensity"],
+                    summary.atd(path, window)["profile"])
+                   for path in (read_run.raw_path, read_run.summed_path)]
+        check_true(
+            "and one m/z window gives the same intensity and the same arrival-time "
+            f"distribution in both ({answers[0][0]})",
+            answers[0] == answers[1]
+            and answers[0][0] == accumulations * one[3][1][1] * (scans // 16),
+        )
+        check_true(
+            "and every answer is plain JSON, small enough for a tool result "
+            f"({len(_json.dumps(raw_summary))} bytes for the summary)",
+            len(_json.dumps(raw_summary)) < 8000,
+        )
+
+        uncalibrated = os.path.join(directory, "uncalibrated.uimf")
+        with UimfWriter(uncalibrated, GlobalSpec(bins=64)) as writer:
+            number = writer.add_frame(FrameSpec(scans=4))
+            writer.write_sparse_frame(number, SparseFrame.from_scans(
+                frame=number, scans=4, bins=64,
+                points={1: (np.asarray([10], dtype=np.int32),
+                            np.asarray([5], dtype=np.int32))}))
+            writer.finalise_frame(number)
+        try:
+            summary.windowed(uncalibrated, "bradykinin-clock")
+            refused = ""
+        except summary.SummaryError as exc:
+            refused = str(exc)
+        check_true(
+            "a file that says CalibrationDone 0 is refused m/z windows with a sentence, "
+            "and still summarised",
+            "CalibrationDone 0" in refused
+            and summary.summarize(uncalibrated)["total_counts"] == 5,
+        )
+
+    golden = clockwork.lab_dir("golden")
+    golden_file = (os.path.join(golden, "bradykinin-clock", "260825_BK_025.uimf")
+                   if golden else None)
+    if golden_file is None or not os.path.isfile(golden_file):
+        skip("the golden CLOCK file reproduces task 09's water-loss and fragment ratios",
+             "the golden experiments are lab material; a public clone has none")
+    else:
+        ratios = summary.windowed(golden_file, "bradykinin-clock")["ratios"]
+        check_true(
+            "the golden CLOCK file reproduces task 09's water-loss and fragment ratios "
+            f"({ratios['water_loss']:.3f}, {ratios['fragments']:.3f})",
+            (round(ratios["water_loss"], 3), round(ratios["fragments"], 3))
+            == (0.504, 1.182),
+        )
 
     section("the console process")
     # Task 49. Nothing here launches an executable except the last check, which is

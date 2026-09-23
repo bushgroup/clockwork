@@ -80,6 +80,9 @@ from ..method.template import Rendered, camel_case
 from .wire import ConsoleInfo, FrameRequest, TofWidth
 
 __all__ = [
+    "KNOB_PREFIX",
+    "LABEL_PREFIX",
+    "MARK_PREFIX",
     "PROVENANCE_KEYS",
     "Provenance",
     "RAW_DISCARD_DEADLINE_S",
@@ -231,6 +234,14 @@ a different ID in two files**. That is safe because every reader keys `Global_Pa
 by name, mainspring's and UIMF-Library's alike, and an ID has only to be unique within
 its file. Below this, `CLIENT_PARAM_ID_BASE + 1` to `+ 99` are clockwork's fixed keys
 (lab record, task 66).
+"""
+
+KNOB_PREFIX = "ClockworkKnob"
+LABEL_PREFIX = "ClockworkLabel"
+MARK_PREFIX = "ClockworkMark"
+"""How a per-template parameter's name begins: `<prefix><CamelName>`, a mark's with `Ms` or
+`Scan` after it. Named once so that `clockwork.summary`, which types these back from their
+names alone, spells them as `provenance_globals` writes them.
 """
 
 
@@ -1129,7 +1140,7 @@ def provenance_globals(provenance: Provenance) -> dict[ParamDef, object]:
             knob = template.knob(name) if template is not None else None
             unit = knob.unit if knob is not None else ""
             words = knob.description if knob is not None else ""
-            declare(f"ClockworkKnob{camel_case(name)}", "System.Double",
+            declare(f"{KNOB_PREFIX}{camel_case(name)}", "System.Double",
                     f"Template knob {name} as this run rendered it, "
                     + (f"in {unit}" if unit else "a pure number")
                     + (f": {words}" if words else ""),
@@ -1140,18 +1151,18 @@ def provenance_globals(provenance: Provenance) -> dict[ParamDef, object]:
             if not value:
                 continue
             words = described.get(name, "")
-            declare(f"ClockworkLabel{camel_case(name)}", "System.String",
+            declare(f"{LABEL_PREFIX}{camel_case(name)}", "System.String",
                     f"Template label {name}, as the operator gave it"
                     + (f": {words}" if words else ""),
                     value)
         for mark in rendered.marks:
             word = camel_case(mark.name)
             words = f": {mark.description}" if mark.description else ""
-            declare(f"ClockworkMark{word}Ms", "System.Double",
+            declare(f"{MARK_PREFIX}{word}Ms", "System.Double",
                     f"Template mark {mark.name}, in ms from tick 0 of one ion mobility "
                     f"experiment{words}",
                     float(mark.ms))
-            declare(f"ClockworkMark{word}Scan", "System.Int32",
+            declare(f"{MARK_PREFIX}{word}Scan", "System.Int32",
                     f"Template mark {mark.name} as an expected ScanNum, "
                     "round(ms * 1000 / ClockworkTickUs) counted from 0, on the convention "
                     "that a sequencer event at tick n falls in record n; whether it "
