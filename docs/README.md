@@ -10,6 +10,10 @@
 - [**Method file and provenance**](method-file-format.md). The flat TOML document a trainee loads
   to run an experiment: each box's strings in three phases, the ordered sequence that starts and
   restarts them, and the stamp that traces every acquisition back to the method that produced it.
+- [**Method template**](template-file-format.md). A method with holes in its strings and the
+  knobs that fill them: the range each knob may take, the arithmetic that carries one knob across
+  boxes and clock domains, and the rendering that produces an ordinary method before anything is
+  sent.
 - [**Instrument file**](instrument-file-format.md). The flat TOML document beside the method that
   records what a file states about the machine rather than the experiment: the m/z calibration and
   its two forms, and the full scale and channel offset the digitizer acquired through.

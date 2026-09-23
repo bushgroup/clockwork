@@ -23,6 +23,10 @@ them:
 digitizer, which is the one instrument fact the acquisition loop cannot infer
 from the strings (see `Enable`).
 
+A *template* (`clockwork.method.template`) is a method with `{name}` holes in its
+strings and the knobs that fill them; it renders to a `Method` of this module, and
+`from_dict` refuses one handed to it directly.
+
 Schema 1, which stored one flat `strings` list per box and had no start list, is
 rejected rather than mapped onto this shape (lab record, task 14): it predates
 the first real experiment on record and no method written against it can express
@@ -565,6 +569,14 @@ def from_dict(data: dict) -> Method:
     that are safe to make silently are made and reported in `Method.warnings`
     instead.
     """
+    if "template_schema" in data:
+        # One sentence rather than a line per template key: a library directory holds
+        # both kinds of document, and what a reader of this one needs is which it is.
+        raise MethodError([
+            "this document is a method template, not a method: it has holes to fill and is "
+            "rendered by clockwork.method.template before anything is sent"
+        ])
+
     problems: list[str] = []
     warnings: list[str] = []
 

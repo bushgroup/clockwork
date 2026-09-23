@@ -89,6 +89,8 @@ record behind it.
   AqMD3 acquisition console, derived from its source.
 - [`docs/method-file-format.md`](docs/method-file-format.md): the flat TOML method a trainee
   loads, and the stamp that traces an acquisition back to it.
+- [`docs/template-file-format.md`](docs/template-file-format.md): a method with holes in its
+  strings and the knobs that fill them, rendered to an ordinary method before anything is sent.
 - [`docs/instrument-file-format.md`](docs/instrument-file-format.md): the flat TOML document
   beside the method that records the machine's own calibration and vertical settings.
 - [`docs/glossary.md`](docs/glossary.md): what the terms mean.

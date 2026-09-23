@@ -4,7 +4,9 @@ A method is what a trainee loads to run an experiment: the per-box command strin
 MIPS box, the acquisition settings, the order in which the boxes are started, and the map from box
 name to serial port. It replaces pasting strings into a terminal box by box and remembering which
 of them start anything. Clockwork stores it as a flat [TOML](https://toml.io) document and reads it
-with `clockwork.method`.
+with `clockwork.method`. A method with holes in its strings and the knobs that fill them is a
+template, [`template-file-format.md`](template-file-format.md); rendering one produces the
+document described here.
 
 ## Document
 

@@ -72,7 +72,7 @@ def declared_versions() -> dict[str, str]:
 
 
 LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method",
-                "clockwork.instrument", "clockwork.transcript")
+                "clockwork.method.template", "clockwork.instrument", "clockwork.transcript")
 QT_PREFIXES = ("PySide6", "PyQt", "pyqtgraph", "shiboken")
 
 # --- opaque lab references ------------------------------------------------------------
@@ -348,6 +348,102 @@ def main() -> int:
             "a schema-1 method document is rejected, saying why",
             "not supported" in str(exc),
         )
+
+    section("method templates")
+    # A template is a method with holes in its strings and the knobs that fill them
+    # (docs/template-file-format.md). The sample above with two holes cut in box1's table:
+    # rendered at its defaults it must be that method, string for string and by hash, which
+    # is the anchoring test every template written from an existing method gets.
+    from clockwork.acq import loop as acq_loop
+    from clockwork.method import template as templates
+
+    template_sample = (
+        "template_schema = 1\nrenders = 2\n\n"
+        'start = [["box2", "TARBTRG"], ["box1", "TBLSTRT"]]\n'
+        'reset = [["box1", "SMOD,LOC"], ["box1", "SMOD,TBL"]]\n\n'
+        "[knobs]\n"
+        'cycles = { default = 1, min = 1, max = 100, unit = "" }\n'
+        'length_ms = { default = 10.0, min = 1.0, max = 100.0, unit = "ms" }\n\n'
+        "[labels]\nsample = { required = true }\n\n"
+        "[constants]\ntick_us = 100.0\n\n"
+        '[derive]\nend_tick = "round(length_ms * 1000 / tick_us)"\n\n'
+        '[marks]\nend = { ms = "end_tick * tick_us / 1000", '
+        'description = "the table ends; an event at tick n is taken to fall in record n" }\n\n'
+        '[metadata]\nname = "check_public-sample"\ncreated = 2026-09-06\n\n'
+        "[acquisition]\nframes = 1\nscans = 100\naccumulations = 10\n"
+        'repetition_mode = "per_repetition"\nkeep_raw = true\n'
+        'file_stem = "check_public-sample"\n\n'
+        '[[boxes]]\nname = "box1"\nport = "COM3"\nsetup = ["STBLCLK,EXT"]\n'
+        'load = ["STBLDAT;0:[A:{cycles},{end_tick}:];"]\narm = ["SMOD,TBL"]\n\n'
+        '[[boxes]]\nname = "box2"\nport = "COM4"\nsetup = ["SWFREQ,1,15000"]\n'
+    )
+    t = templates.loads_template(template_sample)
+    rendered = templates.render(t, labels={"sample": "check"})
+    check_true(
+        "a template renders at its defaults to the method it was written from, by hash",
+        rendered.method == m
+        and method.stamp(rendered.method)["method_hash"] == stamp["method_hash"],
+    )
+    check_true(
+        "its mark is a time and an expected scan (10 ms is scan 100 at a 100 us tick)",
+        rendered.marks[0].ms == 10.0 and rendered.marks[0].scan == 100
+        and rendered.tick_us == 100.0,
+    )
+    turned = templates.render(t, {"length_ms": 12.5, "cycles": 3}, {"sample": "check"})
+    check_true(
+        "turning a knob moves every hole it reaches",
+        turned.method.boxes[0].load == ("STBLDAT;0:[A:3,125:];",)
+        and turned.derived == {"end_tick": 125},
+    )
+    check_true(
+        "the acquisition loop's refusals and cautions do not change on a rendered method",
+        acq_loop.refusals(rendered.method) == acq_loop.refusals(m)
+        and acq_loop.cautions(rendered.method) == acq_loop.cautions(m),
+    )
+    check_true(
+        "a hole's number is written in its shortest form at four decimals",
+        templates.format_number(208.0) == "208" and templates.format_number(16.7628) == "16.7628"
+        and templates.format_number(16.76284) == "16.7628",
+    )
+    try:
+        templates.render(t, {"length_ms": 500.0}, {"sample": "check"})
+        check_true("a knob outside its declared range is refused", False)
+    except templates.TemplateError as exc:
+        check_true(
+            "a knob outside its declared range is refused, naming the range",
+            "outside the range" in str(exc) and "1 to 100 ms" in str(exc),
+        )
+    unrounded = templates.loads_template(
+        template_sample.replace("round(length_ms * 1000 / tick_us)", "length_ms * 1000 / tick_us")
+    )
+    try:
+        templates.render(unrounded, {"length_ms": 12.55}, {"sample": "check"})
+        check_true("a tick count that is not whole is refused", False)
+    except templates.TemplateError as exc:
+        check_true(
+            "a tick count that is not whole is refused, asking for round()",
+            "round() its derivation" in str(exc),
+        )
+    try:
+        templates.loads_template(template_sample.replace("/ tick_us)", "/ period_us)"))
+        check_true("a name nothing defines is refused when the template is loaded", False)
+    except templates.TemplateError as exc:
+        check_true(
+            "a name nothing defines is refused when the template is loaded",
+            "no knob, constant or derivation is named 'period_us'" in str(exc),
+        )
+    try:
+        method.loads(template_sample)
+        check_true("the method loader refuses a template, saying what it is", False)
+    except method.MethodError as exc:
+        check_true(
+            "the method loader refuses a template, saying what it is",
+            "method template" in str(exc),
+        )
+    check_true(
+        "a template's hash does not depend on line endings",
+        templates.loads_template(template_sample.replace("\n", "\r\n")).hash == t.hash,
+    )
 
     section("pane text")
     from clockwork.method import text as pane_text
