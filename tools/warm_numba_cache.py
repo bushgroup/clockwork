@@ -1,13 +1,15 @@
-"""Pre-compile mainspring's decode kernels and seed a cache to bundle into clockwork.exe.
+"""Pre-compile mainspring's UIMF kernels and seed a cache to bundle into clockwork.exe.
 
-clockwork depends on `mainspring[fast]` for the fold's decode (lab record, task 34): a
-fresh process pays 2.5-4.7 s compiling the four decode kernels when no on-disk numba
-cache exists yet, against 0.9-1.4 s once one does (mainspring's task 04). Unlike
-mainspring's own build, that cost lands inside clockwork's first fold rather than at
-window-open, because the decode kernels are first touched on the folding thread, not at
-launch -- but it is the same fix, moved here from `tools/write_commit.py`'s sibling in
-mainspring (task 20, task 07): pay it once, at build time, rather than during the first
-acquisition.
+clockwork depends on `mainspring[fast]` for the fold's decode (lab record, task 34) and,
+since mainspring 1.7.0, for its write too: `UimfWriter.write_scans` encodes the summed
+frame through `decode.encode_frame_blobs`, three more kernels. A fresh process pays
+2.5-4.7 s compiling the four decode kernels when no on-disk numba cache exists yet,
+against 0.9-1.4 s once one does (mainspring's task 04), and the encoders add their own
+compile on top. Unlike mainspring's own build, that cost lands inside clockwork's first
+fold rather than at window-open, because both sets are first touched on the folding
+thread, not at launch -- but it is the same fix, moved here from `tools/write_commit.py`'s
+sibling in mainspring (task 20, task 07): pay it once, at build time, rather than during
+the first acquisition.
 
 Writes compiled kernels for every intensity dtype the format uses (ADC int32, TDC int16,
 FOLDED float32; `mainspring.uimf.decode.INTENSITY_DTYPES`) to
@@ -50,7 +52,18 @@ def main() -> int:
         dtype = decode.dtype_for(type_name)
         bin_index = np.array([0, 3, 500, 4096], dtype=np.int64)
         intensity = np.array([1, 2, 3, 4], dtype=dtype)
-        blob = decode.encode_intensities(bin_index, intensity, dtype)
+        # The encoders with the argument types `write_scans` passes them: an int64 row
+        # pointer and an int64 bin index over a CSR block of several scans, one empty,
+        # with the intensities already in the element type. Anything else would compile
+        # a specialisation the fold never asks for and leave the one it does cold.
+        scan_start = np.array([0, 4, 4, 8], dtype=np.int64)
+        blobs = decode.encode_frame_blobs(
+            scan_start, np.concatenate([bin_index, bin_index]),
+            np.concatenate([intensity, intensity]), dtype, backend="numba",
+        )
+        assert blobs[1] == b"" and blobs[0] == blobs[2]
+        blob = decode.encode_intensities(bin_index, intensity, dtype, backend="pure")
+        assert blob == blobs[0]
         counts, bins_out, values_out = decode.decode_frame_blobs(
             [blob, None, blob], dtype=dtype
         )

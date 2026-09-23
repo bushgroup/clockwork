@@ -403,18 +403,24 @@ produces a hundred in a row, none of which is distinguishable from a good frame 
 file it writes. So the first miss is a `Warned` and the second ends the run.
 """
 
-FOLD_MB_PER_S = 2.1
+FOLD_MB_PER_S = 22.0
 """Roughly how fast a fold reads the raw file, for the estimate `Folding` carries.
 
-One measurement, and it is the only one that matters: 2026-09-17's beam-on
-detection-response run folded 1,310.5 MB in 624.1 s, which is 2.1 MB a second (lab
-record, task 56). The mechanical control of the same shape -- the same hundred
-repetitions of the same twenty thousand scans, with no ion beam -- folded 1.1 MB in
-3.4 s, so a rate read off *it* would be 0.3 MB/s and a rate read off the frame count
-would be neither. What a fold costs is the data in the file.
+Measured on the file that matters: 2026-09-17's beam-on detection-response run, 1,310.5
+MB of raw data. Clockwork folded it in 624.1 s at the time, 2.1 MB a second (lab record,
+task 56), nearly all of it mainspring's pure-Python encoder inside `write_scans`. From
+mainspring 1.7.0 that encoder is compiled, and `Recording.fold` on a copy of the same
+file, on MASSTRO with the numba cache `tools/warm_numba_cache.py` seeds, took 58.7 s and
+53.8 s (22.3 and 24.4 MB/s) and wrote a companion identical in every row to the one of
+2026-09-17 (2026-09-23). The slower of the two is the constant, because an estimate that
+runs short is the worse error for someone deciding whether to wait. The mechanical
+control of the same shape -- the same hundred repetitions of the same twenty thousand
+scans, with no ion beam -- folded 1.1 MB in 3.4 s, so a rate read off *it* would be
+0.3 MB/s and a rate read off the frame count would be neither. What a fold costs is the
+data in the file.
 
 Deliberately coarse, and rendered as "about N minutes" (`_about`). It exists so that a
-trainee meeting ten minutes of silence knows to wait rather than force-quit, which needs
+trainee meeting minutes of silence knows to wait rather than force-quit, which needs
 the order of magnitude and nothing finer; a wrong estimate that is still the right order
 does that job and a spuriously precise one invites a stopwatch.
 """

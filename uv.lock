@@ -60,7 +60,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mainspring", extras = ["fast"], git = "https://github.com/bushgroup/mainspring?tag=v1.6.0" },
+    { name = "mainspring", extras = ["fast"], git = "https://github.com/bushgroup/mainspring?tag=v1.7.0" },
     { name = "numpy", specifier = "~=2.5.2" },
     { name = "protobuf", specifier = "~=7.36" },
     { name = "pyserial", specifier = "~=3.5" },
@@ -147,8 +147,8 @@ wheels = [
 
 [[package]]
 name = "mainspring"
-version = "1.6.0"
-source = { git = "https://github.com/bushgroup/mainspring?tag=v1.6.0#54c3c78aeb8c424dc895fdcfeb60d9b8460c1c40" }
+version = "1.7.0"
+source = { git = "https://github.com/bushgroup/mainspring?tag=v1.7.0#6c9f743dc3af698132e4e63904779827e2c7dc08" }
 dependencies = [
     { name = "numpy" },
     { name = "pyqtgraph" },

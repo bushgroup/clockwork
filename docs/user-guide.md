@@ -140,10 +140,11 @@ hundredth.
 
 **A run is not over when its last repetition ends.** The repetitions are summed into the
 `.summed.uimf` companion afterwards, and the run log says so before it starts: "summing 100
-repetitions (1,310 MB) into the companion, about 10 minutes; the run log is quiet until it is
+repetitions (1,310 MB) into the companion, about a minute; the run log is quiet until it is
 done". Nothing is printed while it runs. The estimate is coarse and it is an estimate, but the
-order of magnitude is right, and a fold of a beam-on detection-response run has taken **624
-seconds**. Do not close the window or kill the process during it. The per-repetition raw file is
+order of magnitude is right: a beam-on detection-response run of that size takes about a minute
+to fold, and a larger file takes proportionally longer. Do not close the window or kill the
+process during it. The per-repetition raw file is
 complete on disk by then, and the companion is what a force-quit would lose.
 
 ## Replicates and naming
