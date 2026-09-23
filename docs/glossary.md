@@ -201,6 +201,14 @@ Three terms carry more than one sense and are given both in one entry: *table*, 
   import Qt, and `clockwork.app` is the PySide6 window on top of them. The seam is what lets a
   script drive one box with no GUI stack installed, and `tests/test_architecture.py` and the
   self-check enforce it.
+- **The owner.** The one object that holds the boxes and the console, `clockwork.owner`. It sits
+  between the three layers and the window, imports no Qt, and takes jobs in and gives numbered
+  progress back, all of it plain data that survives a round trip through JSON. The window's worker
+  thread is an adapter over it. One owner per user may hold the instrument: a second is refused
+  before it opens a port, in a sentence that names the program holding it and its process ID. The
+  lock is `%LOCALAPPDATA%\clockwork\instrument.lock`, released by Windows with the process however
+  that process ends, and Windows' refusal of a second open on a held COM port stays the backstop
+  for any program that does not take the lock.
 - **Method.** The saved experiment a trainee loads: the strings each box needs in three phases, the
   acquisition settings, the order the boxes are started in, and the map from box name to serial
   port, as one flat TOML document. Its shape is

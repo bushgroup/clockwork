@@ -311,6 +311,10 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.queue_dock)
         self.queue_dock.setVisible(False)
 
+        self.lock_label = QLabel()
+        """The one sentence a window refused the instrument lock shows: who holds it."""
+        self.lock_label.setVisible(False)
+        self.statusBar().addPermanentWidget(self.lock_label)
         self.console_bar = ConsoleBar()
         self.statusBar().addPermanentWidget(self.console_bar)
         self.statusBar().showMessage("ready")
@@ -761,13 +765,22 @@ class MainWindow(QMainWindow):
 
         have_console = (self.worker.console is not None
                         and self.worker.console.alive)
+        # Another program owns the instrument (lab record, task 67): every hardware job
+        # would be refused with the lock's sentence, so the buttons that queue one are
+        # grey and the sentence stays in the status bar. Find boxes is left as the retry
+        # -- the owner takes the lock on the next job once the holder has closed.
+        locked = bool(self.worker.refused)
+        self.lock_label.setText(
+            f"{self.worker.refused[:1].upper()}{self.worker.refused[1:]}; then Find "
+            "boxes." if locked else "")
+        self.lock_label.setVisible(locked)
         self.find_button.setEnabled(not busy)
-        self.setup_button.setEnabled(not busy and not problems)
-        self.arm_button.setEnabled(not busy and not problems)
+        self.setup_button.setEnabled(not busy and not problems and not locked)
+        self.arm_button.setEnabled(not busy and not problems and not locked)
         blocking = (problems if method is not None else []) + no_offset + not_armed
-        self.acquire_button.setEnabled(not busy and not blocking)
+        self.acquire_button.setEnabled(not busy and not blocking and not locked)
         self.replicate_button.setEnabled(
-            not busy and not blocking and self.worker.snapshot is not None)
+            not busy and not blocking and not locked and self.worker.snapshot is not None)
         self.stop_button.setEnabled(busy and not self.worker.stopping)
         # Enabled from the moment a run's raw file exists and not from the moment the
         # run ends (task 55), which is why `_live_run` is taken off `RunBegun`. The
@@ -780,8 +793,8 @@ class MainWindow(QMainWindow):
         self.action_read_state.setEnabled(not busy and bool(self.worker.boxes))
         for pane in self.panes.values():
             pane.state.set_busy(busy or not self.worker.boxes)
-        self.action_console.setEnabled(not busy and not have_console)
-        self.queue_panel.set_busy(busy)
+        self.action_console.setEnabled(not busy and not have_console and not locked)
+        self.queue_panel.set_busy(busy or locked)
 
         text: list[str] = []
         if blocking:

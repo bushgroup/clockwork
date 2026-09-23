@@ -1,6 +1,7 @@
 """What every test in this suite needs whether or not it asks for it.
 
-One thing so far: the run pointer goes somewhere of this session's own.
+Two things so far: the run pointer and the instrument lock go somewhere of this
+session's own.
 """
 
 from __future__ import annotations
@@ -9,6 +10,8 @@ import os
 
 import pytest
 from mainspring.interface import LIVE_POINTER_ENV, LIVE_POINTER_NAME
+
+from clockwork.owner.lock import LOCK_ENV, LOCK_NAME
 
 
 @pytest.fixture(autouse=True)
@@ -32,3 +35,17 @@ def isolated_run_pointer(tmp_path_factory, monkeypatch):
         LIVE_POINTER_ENV,
         os.path.join(str(tmp_path_factory.mktemp("live-pointer")), LIVE_POINTER_NAME),
     )
+
+
+@pytest.fixture(autouse=True)
+def isolated_instrument_lock(tmp_path_factory, monkeypatch):
+    """Point the instrument lock at a file of this test's own (lab record, task 67).
+
+    The same reasoning as the run pointer's, with a sharper failure: every owner that is
+    not `--fake` takes the per-user lock as it is built, so a suite run on an instrument
+    PC with the window open would have every such test refused by the trainee's window
+    -- and a suite that took the real lock while a trainee launched the window would
+    refuse the trainee.
+    """
+    monkeypatch.setenv(
+        LOCK_ENV, os.path.join(str(tmp_path_factory.mktemp("instrument-lock")), LOCK_NAME))

@@ -53,6 +53,150 @@ def section(title: str) -> None:
     print("--- " + title + " " + "-" * max(3, 72 - len(title)))
 
 
+def check_owner() -> None:
+    """The owner interface, its wire forms and the instrument lock (lab record, task 67).
+
+    **Every `Event` subclass round-trips through JSON**, found by walking the class tree
+    rather than listed, so an event added to the loop or the owner without a field the
+    codec can carry fails here the day it is written. Then the lock refuses a second
+    owner with the first one's name, and an owner under a held lock refuses its jobs
+    before its scan runs -- which is the property that matters: the refusal comes before
+    any port is opened.
+    """
+    import json
+    import tempfile
+
+    from clockwork.acq import Event
+    from clockwork.method import Method
+    from clockwork.mips import Box, Discovery, FakeBox, Found
+    from clockwork.owner import (
+        Discover,
+        Discovered,
+        InstrumentLock,
+        JobFailed,
+        JobFinished,
+        LocalOwner,
+        LockHeld,
+        wire,
+    )
+    from clockwork.owner.lock import read_holder
+
+    def round_trips(cls: type) -> bool:
+        data = wire.to_wire(wire.example(cls))
+        back = wire.from_wire(json.loads(json.dumps(data)))
+        return type(back) is cls and wire.to_wire(back) == data
+
+    table = wire.wire_types()
+    events = sorted(name for name, cls in table.items() if issubclass(cls, Event))
+    broken: list[str] = []
+    for name in events:
+        try:
+            if not round_trips(table[name]):
+                broken.append(name)
+        except Exception as exc:  # noqa: BLE001 -- reporting, not handling
+            broken.append(f"{name} ({type(exc).__name__}: {exc})")
+    check_true(f"every Event subclass round-trips through JSON ({len(events)} of them)"
+               + (": " + ", ".join(broken) if broken else ""),
+               len(events) > 20 and not broken)
+    others = sorted(name for name, cls in table.items() if not issubclass(cls, Event))
+    broken = []
+    for name in others:
+        try:
+            if not round_trips(table[name]):
+                broken.append(name)
+        except Exception as exc:  # noqa: BLE001
+            broken.append(f"{name} ({type(exc).__name__}: {exc})")
+    check_true(f"every job, result and record round-trips too ({len(others)} of them)"
+               + (": " + ", ".join(broken) if broken else ""), not broken)
+
+    box = Box(transport=FakeBox(), name="box1")
+    carried = wire.to_wire(Discovery(found=(Found(name="box1", port="COM3", box=box),)))
+    back = wire.from_wire(carried)
+    check_true("an open box stays with the owner that opened it: a Discovery crosses "
+               "with its names and ports and without its Box",
+               "box" not in carried["found"][0]
+               and back.found[0].port == "COM3" and back.found[0].box is None)
+    box.close()
+
+    with tempfile.TemporaryDirectory() as scratch:
+        path = os.path.join(scratch, "instrument.lock")
+        first = InstrumentLock("the first holder", path)
+        first.acquire()
+        second = InstrumentLock("the second", path)
+        try:
+            second.acquire()
+            refused = ""
+        except LockHeld as exc:
+            refused = str(exc)
+        check_true(f"a second owner is refused, naming the first ({refused!r})",
+                   "the first holder" in refused and f"pid {os.getpid()}" in refused)
+        first.release()
+        check_true("the record is cleared on release", read_holder(path) is None)
+        second.acquire()
+        check_true("the lock is free again once its holder lets go", second.held)
+        second.release()
+
+        method = wire.example(Method)
+        owner = LocalOwner(fake=True, lock_path=path).start()
+        handle = owner.submit(Discover(method=method))
+        ended = _ended(owner, handle)
+        status = owner.status()
+        check_true(
+            "a --fake owner takes no lock, runs a Discover and reports it as numbered "
+            f"progress ({[type(p.event).__name__ for p in owner.events(handle)]})",
+            isinstance(ended, JobFinished) and status.boxes == ("box1",)
+            and status.holder is None and read_holder(path) is None
+            and any(isinstance(p.event, Discovered) for p in owner.events(handle)))
+        seqs = [p.seq for p in owner.events(handle)]
+        check_true("progress numbers rise, and `after` returns only what is newer",
+                   seqs == sorted(seqs) and owner.events(handle, after=seqs[-1]) == []
+                   and len(owner.events(handle, after=seqs[0])) == len(seqs) - 1)
+        owner.shutdown()
+        owner.join(10)
+
+        scans: list[object] = []
+
+        def scan(**_: object) -> Discovery:
+            scans.append(_)
+            return Discovery()
+
+        holder = InstrumentLock("the clockwork window", path)
+        holder.acquire()
+        owner = LocalOwner(program="clockwork serve", lock_path=path, discover=scan).start()
+        ended = _ended(owner, owner.submit(Discover()))
+        check_true(
+            f"an owner under a held lock refuses its job before the scan runs "
+            f"({owner.refused!r})",
+            isinstance(ended, JobFailed) and ended.message == owner.refused
+            and "the clockwork window" in owner.refused and not scans)
+        holder.release()
+        ended = _ended(owner, owner.submit(Discover()))
+        check_true(
+            "and takes the lock on the next job once the holder has gone",
+            isinstance(ended, JobFinished) and len(scans) == 1 and not owner.refused
+            and owner.status().holder is not None
+            and owner.status().holder.program == "clockwork serve")
+        owner.shutdown()
+        owner.join(10)
+        check_true("an owner that shuts down lets go of the lock",
+                   read_holder(path) is None)
+
+
+def _ended(owner: object, handle: object, timeout: float = 10.0) -> object | None:
+    """The `JobFinished` or `JobFailed` of `handle`, polled for; None on a timeout."""
+    import time as _time
+
+    from clockwork.owner import JobFailed, JobFinished
+
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        for entry in owner.events(handle):  # type: ignore[attr-defined]
+            if isinstance(entry.event, (JobFinished, JobFailed)):
+                return entry.event
+        _time.sleep(0.01)
+    return None
+
+
 def declared_versions() -> dict[str, str]:
     """The version as each file that hand-carries it states it.
 
@@ -72,7 +216,8 @@ def declared_versions() -> dict[str, str]:
 
 
 LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method",
-                "clockwork.method.template", "clockwork.instrument", "clockwork.transcript")
+                "clockwork.method.template", "clockwork.instrument", "clockwork.transcript",
+                "clockwork.naming", "clockwork.owner", "clockwork.owner.wire")
 QT_PREFIXES = ("PySide6", "PyQt", "pyqtgraph", "shiboken")
 
 # --- opaque lab references ------------------------------------------------------------
@@ -1774,6 +1919,9 @@ def main() -> int:
             "written with LF line endings, which is what the repo pins",
             b"\r\n" not in open(path, "rb").read(),
         )
+
+    section("the owner")
+    check_owner()
 
     section("the window")
     # Task 50. Nothing here opens a window: what a clone can establish without a
