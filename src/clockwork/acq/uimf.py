@@ -55,6 +55,7 @@ import os
 import sqlite3
 import time
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 
 import numpy as np
 from mainspring.interface import (
@@ -75,18 +76,25 @@ from mainspring.uimf.writer import CLIENT_PARAM_ID_BASE, ParamDef
 
 from ..instrument import UNCALIBRATED, Instrument
 from ..method import Method, stamp
+from ..method.template import Rendered, camel_case
 from .wire import ConsoleInfo, FrameRequest, TofWidth
 
 __all__ = [
     "PROVENANCE_KEYS",
+    "Provenance",
     "RAW_DISCARD_DEADLINE_S",
     "RAW_DISCARD_PAUSE_S",
     "RAW_SUFFIX",
+    "RENDER_KEYS",
     "SA220P_DETECTOR_BITS",
+    "SERIES_KEYS",
     "SUMMED_SUFFIX",
+    "TEMPLATE_PARAM_ID_BASE",
     "Geometry",
     "Recording",
+    "Series",
     "fold_scans",
+    "provenance_globals",
     "raw_path",
     "stamp_globals",
     "summed_path",
@@ -172,6 +180,100 @@ free text, the one part of an experiment that exists only if somebody typed it. 
 absent until task 40, and a file without them says what strings were sent and nothing
 about what the instrument was set to.
 """
+
+RENDER_KEYS: tuple[ParamDef, ...] = (
+    ParamDef(CLIENT_PARAM_ID_BASE + 10, "ClockworkTemplateHash", "System.String",
+             "SHA-256 of the template document this file's method was rendered from, "
+             "line endings normalized to LF"),
+    ParamDef(CLIENT_PARAM_ID_BASE + 11, "ClockworkTemplateText", "System.String",
+             "The template document this file's method was rendered from, in full"),
+    ParamDef(CLIENT_PARAM_ID_BASE + 12, "ClockworkTickUs", "System.Double",
+             "The pusher period in microseconds the template assumed when it rendered "
+             "this run, which every ClockworkMark...Scan is counted on; the period the "
+             "digitizer measured is AverageTOFLength"),
+)
+"""A rendered run's template, and the pusher period it assumed: hash, text, `tick_us`.
+
+What says where the stamped method came from. The knob values themselves are
+`ClockworkKnob...` parameters of their own, one each (`TEMPLATE_PARAM_ID_BASE`); a
+method rendered from no template writes none of these, and their absence is what says
+the method was written by hand (lab record, task 66).
+"""
+
+SERIES_KEYS: tuple[ParamDef, ...] = (
+    ParamDef(CLIENT_PARAM_ID_BASE + 13, "ClockworkSeriesId", "System.String",
+             "The series this run was acquired in: a planned queue's own id, or the id of "
+             "the request the run served"),
+    ParamDef(CLIENT_PARAM_ID_BASE + 14, "ClockworkSeriesIndex", "System.Int32",
+             "This run's place in its series as planned, counted from 1, before any "
+             "shuffle"),
+    ParamDef(CLIENT_PARAM_ID_BASE + 15, "ClockworkSeriesPosition", "System.Int32",
+             "This run's place in its series as acquired, counted from 1"),
+    ParamDef(CLIENT_PARAM_ID_BASE + 16, "ClockworkSeriesSeed", "System.Int32",
+             "The seed the series' planned order was shuffled under; absent if it was "
+             "acquired in planned order"),
+)
+"""Where a run sat in a series: its id, the planned index, the executed position, the seed.
+
+A randomised queue is only readable afterwards if each file says where it sat. The id is
+whatever the writer of the series calls it, and nothing here assumes the window's queue
+is the only writer: a request served by an agent is a series in the same four keys (lab
+record, task 66). An ad hoc run writes none, and absence means unplanned, never zero.
+"""
+
+TEMPLATE_PARAM_ID_BASE = CLIENT_PARAM_ID_BASE + 100
+"""Where a rendered run's per-template parameters start: knobs, labels, marks.
+
+Their number is the template's, so they cannot have fixed IDs the way the keys above
+do. They are numbered upward from here within each file, in the template's order --
+knobs, then labels, then each mark's `Ms` and `Scan` -- and **the same knob can carry
+a different ID in two files**. That is safe because every reader keys `Global_Params`
+by name, mainspring's and UIMF-Library's alike, and an ID has only to be unique within
+its file. Below this, `CLIENT_PARAM_ID_BASE + 1` to `+ 99` are clockwork's fixed keys
+(lab record, task 66).
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class Series:
+    """Where one run sits in a series, for `Provenance`.
+
+    `index` is its place in the plan and `position` its place in the order acquired,
+    both from 1; `seed` is what the plan was shuffled under, or `None` for a series
+    acquired in planned order. The seed is an `Int32` in the file, so it has to fit one.
+    """
+
+    id: str
+    index: int
+    position: int
+    seed: int | None = None
+
+    def __post_init__(self) -> None:
+        if not self.id:
+            raise ValueError("a series needs an id; an unplanned run has no Series at all")
+        for name in ("index", "position"):
+            if int(getattr(self, name)) < 1:
+                raise ValueError(f"series {name} counts from 1, not {getattr(self, name)}")
+        if self.seed is not None and not 0 <= int(self.seed) < 2**31:
+            raise ValueError(
+                f"series seed {self.seed} does not fit the file's Int32; draw it from "
+                "0 to 2**31 - 1"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class Provenance:
+    """How the method being acquired was made: the render it came from, and its series.
+
+    Either may be absent, and a run with neither stamps exactly what a hand-written method
+    always has. `rendered` must be the render of the method acquired -- a method edited
+    after rendering is a hand-written one, and `Recording.create` refuses a render whose
+    method is not the one it is given.
+    """
+
+    rendered: Rendered | None = None
+    series: Series | None = None
+
 
 SA220P_DETECTOR_BITS = 14
 """What the SA220P digitises to, for `Global_Params`.
@@ -434,6 +536,7 @@ class Recording:
         stem: str | None = None,
         box_state: str = "",
         conditions: str = "",
+        provenance: Provenance | None = None,
         clock: Callable[[], float] = time.perf_counter,
         started: float | None = None,
         overwrite: bool = False,
@@ -460,6 +563,13 @@ class Recording:
         the operator said about the rest of the instrument. `clockwork.acq.loop` produces
         both -- `Snapshot.render()` and the run's conditions note -- and a `Recording`
         made by hand may pass neither, which stamps neither (lab record, task 40).
+
+        `provenance` is how the method was made, where it was rendered from a template
+        or acquired as part of a series: the template's hash and text, a parameter per
+        knob, label and mark, and the series' id, index, position and seed
+        (`provenance_globals`). A method written by hand passes none and stamps none,
+        and a render that is not of `method` is refused before any file exists (lab
+        record, task 66).
 
         `stem` names the files, and defaults to the method's `file_stem`. It is an
         argument rather than a method field because a technical replicate is the same
@@ -517,7 +627,8 @@ class Recording:
             detector_bits=detector_bits,
             extra=stamp_globals(method, instrument=instrument, adc_name=adc_name,
                                 console_version=console_version,
-                                box_state=box_state, conditions=conditions),
+                                box_state=box_state, conditions=conditions,
+                                provenance=provenance),
         )
         writer = UimfWriter(path, globals_, overwrite=overwrite)
         recording = cls.__new__(cls)
@@ -923,7 +1034,8 @@ def stamp_globals(
     console_version: str = "",
     box_state: str = "",
     conditions: str = "",
-) -> dict[str, object]:
+    provenance: Provenance | None = None,
+) -> dict[str | ParamDef, object]:
     """The provenance of one acquisition, as `Global_Params` values.
 
     `clockwork.method.stamp` produces the record -- the method's name, a hash of its
@@ -938,8 +1050,19 @@ def stamp_globals(
     under PNNL's own `AcquisitionMethod`, which every tool that reads UIMF at all reads,
     so a file says whose method made it even to something that has never heard of
     clockwork.
+
+    `provenance` adds how the method was made, where that is more than a document
+    somebody wrote: the template and knobs it was rendered from, and the series it was
+    acquired in (`provenance_globals`). A render that is not of this method is refused,
+    since stamping it would say the file came from a knob setting it did not.
     """
     record = stamp(method, console_version=console_version or None)
+    rendered = provenance.rendered if provenance is not None else None
+    if rendered is not None and stamp(rendered.method)["method_hash"] != record["method_hash"]:
+        raise ValueError(
+            "the render in this provenance is not of the method being acquired: a method "
+            "changed after it was rendered is a hand-written one, and stamps as one"
+        )
     # The vertical settings are not the method's and `stamp()` does not produce them, so
     # they join the record here rather than there. `None` for any of the three is written
     # by nothing: a rig with no configured window states no window (lab record, task 25).
@@ -968,4 +1091,79 @@ def stamp_globals(
         # this is not the truth test it looks like it wants to be.
         if value is not None and value != "":
             values[key] = value
+    if provenance is not None:
+        values.update(provenance_globals(provenance))
+    return values
+
+
+def provenance_globals(provenance: Provenance) -> dict[ParamDef, object]:
+    """A render and a series, as `Global_Params` values keyed by their `ParamDef`.
+
+    **Absence is the record of "not planned", so nothing is written for what is not
+    known**: no render writes no template key, no series no series key, a label the
+    operator left out no label, and a template with no marks no `ClockworkTickUs` unless
+    it declared one. Zero is never a stand-in for missing (lab record, task 66).
+
+    The per-template parameters take IDs upward from `TEMPLATE_PARAM_ID_BASE` in the
+    template's own order, one file at a time. Every knob is a `System.Double`, integer
+    knobs included, so that one column means one kind of number across a project's
+    files; its unit and the template's words for it are the description.
+    """
+    values: dict[ParamDef, object] = {}
+    rendered = provenance.rendered
+    if rendered is not None:
+        hash_key, text_key, tick_key = RENDER_KEYS
+        values[hash_key] = rendered.template_hash
+        values[text_key] = rendered.template_text
+        if rendered.tick_us is not None:
+            values[tick_key] = rendered.tick_us
+        template = rendered.template
+        param_id = TEMPLATE_PARAM_ID_BASE
+
+        def declare(name: str, data_type: str, description: str, value: object) -> None:
+            nonlocal param_id
+            values[ParamDef(param_id, name, data_type, description)] = value
+            param_id += 1
+
+        for name, value in rendered.knobs.items():
+            knob = template.knob(name) if template is not None else None
+            unit = knob.unit if knob is not None else ""
+            words = knob.description if knob is not None else ""
+            declare(f"ClockworkKnob{camel_case(name)}", "System.Double",
+                    f"Template knob {name} as this run rendered it, "
+                    + (f"in {unit}" if unit else "a pure number")
+                    + (f": {words}" if words else ""),
+                    float(value))
+        described = {entry.name: entry.description
+                     for entry in (template.labels if template is not None else ())}
+        for name, value in rendered.labels.items():
+            if not value:
+                continue
+            words = described.get(name, "")
+            declare(f"ClockworkLabel{camel_case(name)}", "System.String",
+                    f"Template label {name}, as the operator gave it"
+                    + (f": {words}" if words else ""),
+                    value)
+        for mark in rendered.marks:
+            word = camel_case(mark.name)
+            words = f": {mark.description}" if mark.description else ""
+            declare(f"ClockworkMark{word}Ms", "System.Double",
+                    f"Template mark {mark.name}, in ms from tick 0 of one ion mobility "
+                    f"experiment{words}",
+                    float(mark.ms))
+            declare(f"ClockworkMark{word}Scan", "System.Int32",
+                    f"Template mark {mark.name} as an expected ScanNum, "
+                    "round(ms * 1000 / ClockworkTickUs) counted from 0, on the convention "
+                    "that a sequencer event at tick n falls in record n; whether it "
+                    "governs record n or n + 1 is not settled on this instrument, so the "
+                    "true scan may be one later",
+                    int(mark.scan))
+    series = provenance.series
+    if series is not None:
+        id_key, index_key, position_key, seed_key = SERIES_KEYS
+        values[id_key] = series.id
+        values[index_key] = int(series.index)
+        values[position_key] = int(series.position)
+        if series.seed is not None:
+            values[seed_key] = int(series.seed)
     return values

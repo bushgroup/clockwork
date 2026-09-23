@@ -156,9 +156,53 @@ saying so, since a library directory holds both kinds of document.
 
 ## What a rendered run records
 
-The rendered method's text and hash are stamped into every file exactly as they are for a
-hand-written method, under the parameters
-[`method-file-format.md`](method-file-format.md#provenance-stamp) lists. The template's hash and
-text, the knob values, the labels, the marks and the assumed pusher period are the next
-addition to that stamp, one typed parameter each, so that a table of a project's files can be
-built from the files alone.
+So that a table of a project's files can be built from the files alone, a rendered run adds
+one typed `Global_Params` parameter for each fact of its making. The rendered method's text and
+hash are stamped exactly as they are for a hand-written method, under the parameters
+[`method-file-format.md`](method-file-format.md#provenance-stamp) lists, and these join them in
+both the raw file and its summed companion:
+
+| Parameter | Type | Content |
+|---|---|---|
+| `ClockworkTemplateHash` | String | SHA-256 of the template document, line endings normalized to LF |
+| `ClockworkTemplateText` | String | The template document, in full |
+| `ClockworkTickUs` | Double | The `tick_us` the render assumed, where the template declares one |
+| `ClockworkKnob<Name>` | Double | One per knob, turned or left at its default |
+| `ClockworkLabel<Name>` | String | One per label given at render time |
+| `ClockworkMark<Name>Ms` | Double | One per mark: its time in milliseconds from tick 0 |
+| `ClockworkMark<Name>Scan` | Int32 | The same mark as an expected `ScanNum`, counted from 0 |
+
+`<Name>` is the template's own name split on underscores, with the first letter of each piece
+capitalized, so the knob `duration_ms` is stamped as `ClockworkKnobDurationMs` and the mark
+`release` as `ClockworkMarkReleaseMs` and `ClockworkMarkReleaseScan`. A template in which two
+knobs, two labels or two marks would be stamped under one name, such as `pulse_ms` and
+`pulseMs`, is refused when it is loaded. Each parameter's description carries what its value
+alone does not: a knob's unit and the template's description of it, a label's description, and
+for an expected scan the tick convention of the [Marks](#marks) section above. Every knob is a
+Double, integer knobs included, so that one column holds one kind of number across a project's
+files.
+
+A run acquired as part of a series also records where it sat, since a series acquired in
+shuffled order can only be read back if each file says so:
+
+| Parameter | Type | Content |
+|---|---|---|
+| `ClockworkSeriesId` | String | The series' id: a planned queue's own, or the id of the request the run served |
+| `ClockworkSeriesIndex` | Int32 | The run's place in the plan, counted from 1, before any shuffle |
+| `ClockworkSeriesPosition` | Int32 | The run's place in the order acquired, counted from 1 |
+| `ClockworkSeriesSeed` | Int32 | The seed the plan was shuffled under, from 0 to 2147483647 |
+
+A parameter with nothing to record is left out rather than written as zero. A hand-written
+method stamps none of the template parameters, a run outside any series stamps none of the
+series parameters, a series acquired in planned order stamps no seed, and a label left empty is
+not stamped. Absence therefore means a method written by hand or a run acquired ad hoc.
+
+A render is stamped only onto the method it rendered. A method edited after rendering is a
+hand-written method, and an acquisition that attaches a render to any other method is refused
+before a file is created.
+
+To read one of these parameters, look it up by name. The fixed parameters have fixed IDs in
+clockwork's block, 2001 to 2099, whereas the per-template parameters are numbered upward from
+2100 within each file, in the template's order of knobs, labels and marks, so one knob can carry
+different IDs in two files. The number is never needed: mainspring reads parameters by name,
+and PNNL's UIMF-Library skips any ID it does not recognize.

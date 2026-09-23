@@ -341,6 +341,30 @@ def test_every_problem_is_reported_not_just_the_first():
     assert len(exc_info.value.problems) == 2
 
 
+@pytest.mark.parametrize("name, word", [
+    ("duration_ms", "DurationMs"), ("bias_hold_v", "BiasHoldV"), ("sample", "Sample"),
+    ("release", "Release"), ("V_bias", "VBias"), ("pulseMs", "PulseMs"), ("a__b_", "AB"),
+])
+def test_a_name_is_stamped_split_on_underscores_and_capitalized(name, word):
+    assert template.camel_case(name) == word
+
+
+def test_two_names_one_file_would_stamp_alike_are_refused_at_load():
+    # A knob and a label stamp under different prefixes, so across kinds is no clash.
+    loads(**{"[labels]": "[labels]\npulseMs = { description = \"no clash\" }"})
+    with pytest.raises(template.TemplateError) as exc_info:
+        loads(**{"cycles = {": "pulseMs = { default = 1, min = 0, max = 2, unit = \"\" }"
+                               "\ncycles = {"})
+    assert "'pulseMs' and 'pulse_ms' would be stamped" in problems_of(exc_info)
+
+
+def test_a_render_carries_its_template_for_the_units_and_descriptions():
+    t = loads()
+    rendered = template.render(t, labels=LABELS)
+    assert rendered.template is t
+    assert rendered.template.knob("pulse_ms").unit == "ms"
+
+
 def test_load_template_reads_a_file_and_normalizes_its_line_endings(tmp_path):
     path = tmp_path / "t.toml"
     path.write_bytes(TEMPLATE.replace("\n", "\r\n").encode("utf-8"))

@@ -1137,6 +1137,85 @@ def main() -> int:
                    standing is not None and standing.path == second.raw_path)
         second.close()
 
+        # How a rendered run's file says what made it (lab record, task 66): the
+        # template's hash and text, one typed parameter per knob, label and mark, the
+        # pusher period the marks were counted on, and a series. The template is the
+        # method-templates section's sample, turned off its defaults so the values read
+        # back are the ones set rather than ones anybody would have guessed.
+        import contextlib as _contextlib
+        import sqlite3 as _sqlite3
+
+        turned_render = templates.render(t, {"length_ms": 12.5}, {"sample": "check"})
+        with acq.Recording.create(
+            directory, turned_render.method, geometry, stem="rendered",
+            provenance=acq.Provenance(
+                rendered=turned_render,
+                series=acq.Series("check-series", index=2, position=5, seed=99)),
+        ) as rendered_recording:
+            pass  # the stamp is written at creation, before any frame
+        rendered_extra = UimfFile(rendered_recording.raw_path).global_params().extra
+        # `closing`, because a connection's own `with` commits and leaves it open, and
+        # Windows will not remove the directory around a file still open.
+        with _contextlib.closing(_sqlite3.connect(rendered_recording.raw_path)) as conn:
+            rendered_types = dict(conn.execute(
+                "SELECT ParamName, ParamDataType FROM Global_Params"))
+            rendered_ids = dict(conn.execute("SELECT ParamName, ParamID FROM Global_Params"))
+        check_true(
+            "a rendered run stamps its template: hash and full text",
+            rendered_extra.get("ClockworkTemplateHash") == t.hash
+            and rendered_extra.get("ClockworkTemplateText") == template_sample,
+        )
+        check_true(
+            "each knob reads back as a Double equal to what was set",
+            rendered_types.get("ClockworkKnobLengthMs") == "System.Double"
+            and float(rendered_extra["ClockworkKnobLengthMs"]) == 12.5
+            and rendered_types.get("ClockworkKnobCycles") == "System.Double"
+            and float(rendered_extra["ClockworkKnobCycles"]) == 1.0,
+        )
+        check_true(
+            "each mark reads back in ms as a Double and as an expected scan as an Int32, "
+            "beside the tick it was counted on (12.5 ms is scan 125 at 100 us)",
+            float(rendered_extra["ClockworkMarkEndMs"]) == 12.5
+            and rendered_types.get("ClockworkMarkEndScan") == "System.Int32"
+            and rendered_extra["ClockworkMarkEndScan"] == "125"
+            and float(rendered_extra["ClockworkTickUs"]) == 100.0,
+        )
+        check_true(
+            "the label and the series are stamped, the seed as an Int32",
+            rendered_extra.get("ClockworkLabelSample") == "check"
+            and (rendered_extra.get("ClockworkSeriesId"),
+                 rendered_extra.get("ClockworkSeriesIndex"),
+                 rendered_extra.get("ClockworkSeriesPosition"),
+                 rendered_extra.get("ClockworkSeriesSeed")) == ("check-series", "2", "5",
+                                                                "99")
+            and rendered_types.get("ClockworkSeriesSeed") == "System.Int32",
+        )
+        check_true(
+            "the per-template parameters number upward from the documented base, and the "
+            "fixed ones sit below it",
+            sorted(rendered_ids[name] for name in rendered_ids
+                   if name.startswith(("ClockworkKnob", "ClockworkLabel", "ClockworkMark")))
+            == list(range(acq.TEMPLATE_PARAM_ID_BASE, acq.TEMPLATE_PARAM_ID_BASE + 5))
+            and all(rendered_ids[key.name] < acq.TEMPLATE_PARAM_ID_BASE
+                    for key in (*acq.RENDER_KEYS, *acq.SERIES_KEYS)),
+        )
+        hand_written = UimfFile(raw).global_params().extra
+        check_true(
+            "a hand-written method's file carries none of them: absence means unplanned",
+            not [name for name in hand_written
+                 if name.startswith(("ClockworkTemplate", "ClockworkKnob", "ClockworkLabel",
+                                     "ClockworkMark", "ClockworkTickUs",
+                                     "ClockworkSeries"))],
+        )
+        try:
+            acq.Recording.create(directory, recipe, geometry, stem="detached",
+                                 provenance=acq.Provenance(rendered=turned_render))
+            check_true("a render of some other method is refused, not stamped", False)
+        except ValueError as exc:
+            check_true("a render of some other method is refused, not stamped",
+                       "hand-written" in str(exc)
+                       and not os.path.exists(acq.raw_path(directory, "detached")))
+
     section("one whole acquisition")
     # Task 23's loop, which is the section above and the two before it composed: the
     # boxes loaded and armed, one console frame per repetition with the start list

@@ -12,6 +12,8 @@ precisely so that this can be asserted as an equality rather than a tolerance.
 
 from __future__ import annotations
 
+import contextlib
+import dataclasses
 import datetime as dt
 import os
 import sqlite3
@@ -20,6 +22,7 @@ import numpy as np
 import pytest
 from mainspring.interface import read_live_pointer, write_live_pointer
 from mainspring.uimf import UimfFile
+from mainspring.uimf.writer import CLIENT_PARAM_ID_BASE
 
 import clockwork
 from clockwork.acq import (
@@ -28,15 +31,26 @@ from clockwork.acq import (
     DataStream,
     FakeConsole,
     Geometry,
+    Provenance,
     Recording,
+    Series,
     fold_scans,
     raw_path,
     run_frame,
     start_chain,
     summed_path,
 )
-from clockwork.acq.uimf import PROVENANCE_KEYS, stamp_globals
+from clockwork.acq.uimf import (
+    PROVENANCE_KEYS,
+    RENDER_KEYS,
+    SERIES_KEYS,
+    TEMPLATE_PARAM_ID_BASE,
+    provenance_globals,
+    stamp_globals,
+)
 from clockwork.method import Method, from_dict
+from clockwork.method import template as templates
+from test_method_template import LABELS, TEMPLATE
 
 SCANS = 32
 """Two of the fake's 16-scan spectrum periods, so a fold has something to add."""
@@ -645,3 +659,155 @@ def test_a_close_does_not_withdraw_a_pointer_that_names_a_later_run(tmp_path):
     )
     second.close()
     assert read_live_pointer() is None
+
+
+# --- how the method was made: template, knobs, labels, marks, series --------------------
+
+
+RENDER_NAMES = ("ClockworkTemplate", "ClockworkKnob", "ClockworkLabel", "ClockworkMark",
+                "ClockworkTickUs", "ClockworkSeries")
+"""The prefixes of every parameter a rendered or planned run adds, and a hand-written ad
+hoc one never writes (lab record, task 66)."""
+
+
+def rendered_fixture(knobs=None, labels=None):
+    """The public fixture template, rendered: three knobs, one label, one mark.
+
+    `cycles = 1` by default here because the fixture's own default of 10 loops the
+    table ten times, which `per_repetition` refuses; the round trip is about the stamp,
+    not about that refusal.
+    """
+    loaded = templates.loads_template(TEMPLATE)
+    return loaded, templates.render(loaded, {"cycles": 1, **(knobs or {})},
+                                    LABELS if labels is None else labels)
+
+
+def global_rows(path) -> dict[str, tuple[int, str, str, str]]:
+    """`Global_Params` as the file holds it: name -> (ID, value, type, description)."""
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        return {
+            name: (int(param_id), value, data_type, description or "")
+            for param_id, name, value, data_type, description in conn.execute(
+                "SELECT ParamID, ParamName, ParamValue, ParamDataType, ParamDescription"
+                " FROM Global_Params"
+            )
+        }
+
+
+def test_a_rendered_run_reads_back_its_knobs_labels_and_marks_typed(tmp_path):
+    """The fake round trip: every knob a Double equal to what was set, every mark's
+    scan an Int32, in both files, read back through mainspring's own reader."""
+    loaded, rendered = rendered_fixture({"pulse_ms": 3.0})
+    method = rendered.method
+    with FakeConsole() as fake:
+        geometry = make_geometry(fake)
+        with DataStream(fake.data_endpoint) as stream, \
+                Console(fake.command_endpoint) as console:
+            start_chain(console, stream, timeout=5.0, settle=0.5, quiet=0.05)
+            recording = Recording.create(tmp_path, method, geometry,
+                                         provenance=Provenance(rendered=rendered))
+            with recording:
+                acquire(recording, console, stream, method)
+            console.stop_acquire()
+
+    for path in (recording.raw_path, recording.summed_path):
+        extra = UimfFile(path).global_params().extra
+        rows = global_rows(path)
+        assert extra["ClockworkTemplateHash"] == loaded.hash
+        assert extra["ClockworkTemplateText"] == TEMPLATE
+        assert rows["ClockworkTickUs"][2] == "System.Double"
+        assert float(extra["ClockworkTickUs"]) == 100.0
+        for name, value in {"PulseMs": 3.0, "Cycles": 1.0, "WaitMs": 10.0}.items():
+            _id, text, data_type, _words = rows[f"ClockworkKnob{name}"]
+            assert data_type == "System.Double", name
+            assert float(extra[f"ClockworkKnob{name}"]) == value, name
+        assert "in ms: line A high" in rows["ClockworkKnobPulseMs"][3]
+        assert "a pure number" in rows["ClockworkKnobCycles"][3]
+        assert rows["ClockworkLabelSample"][1:3] == ("polyalanine", "System.String")
+        # off_tick = 10 + round(3.0 ms / 100 us) = 40, so the mark is 4 ms and scan 40.
+        assert rows["ClockworkMarkOffMs"][2] == "System.Double"
+        assert float(extra["ClockworkMarkOffMs"]) == 4.0
+        assert rows["ClockworkMarkOffScan"][1:3] == ("40", "System.Int32")
+        assert "n + 1" in rows["ClockworkMarkOffScan"][3], "the +-1 convention is named"
+        per_template = [rows[name][0] for name in rows
+                        if name.startswith(("ClockworkKnob", "ClockworkLabel",
+                                            "ClockworkMark"))]
+        assert len(per_template) == 3 + 1 + 2
+        assert sorted(per_template) == list(range(TEMPLATE_PARAM_ID_BASE,
+                                                  TEMPLATE_PARAM_ID_BASE + 6))
+        assert not any(name.startswith("ClockworkSeries") for name in rows), (
+            "a render outside any series writes no series key, not a zero"
+        )
+
+
+def test_a_hand_written_method_stamps_none_of_the_render_or_series_keys(tmp_path):
+    with FakeConsole() as fake:
+        geometry = make_geometry(fake)
+    with Recording.create(tmp_path, make_method(), geometry) as recording:
+        path = recording.raw_path
+    rows = global_rows(path)
+    assert not [name for name in rows if name.startswith(RENDER_NAMES)]
+    assert max(param_id for param_id, *_ in rows.values()) < CLIENT_PARAM_ID_BASE + 10
+
+
+def test_a_series_is_stamped_and_an_unshuffled_one_has_no_seed(tmp_path):
+    with FakeConsole() as fake:
+        geometry = make_geometry(fake)
+    method = make_method()
+    shuffled = Provenance(series=Series("req-0923-a", index=4, position=2, seed=12345))
+    with Recording.create(tmp_path, method, geometry, stem="one",
+                          provenance=shuffled) as recording:
+        rows = global_rows(recording.raw_path)
+    assert rows["ClockworkSeriesId"][1:3] == ("req-0923-a", "System.String")
+    assert rows["ClockworkSeriesIndex"][1:3] == ("4", "System.Int32")
+    assert rows["ClockworkSeriesPosition"][1:3] == ("2", "System.Int32")
+    assert rows["ClockworkSeriesSeed"][1:3] == ("12345", "System.Int32")
+    assert not [name for name in rows if name.startswith(RENDER_NAMES[:-1])], (
+        "a series of hand-written methods names no template"
+    )
+
+    in_order = Provenance(series=Series("plan", index=1, position=1))
+    with Recording.create(tmp_path, method, geometry, stem="two",
+                          provenance=in_order) as recording:
+        rows = global_rows(recording.raw_path)
+    assert "ClockworkSeriesPosition" in rows and "ClockworkSeriesSeed" not in rows
+
+
+def test_the_fixed_keys_sit_in_clockworks_block_below_the_per_template_range():
+    fixed = [key for key, _field in PROVENANCE_KEYS] + list(RENDER_KEYS) + list(SERIES_KEYS)
+    ids = [key.param_id for key in fixed]
+    assert len(set(ids)) == len(ids) and len({key.name for key in fixed}) == len(fixed)
+    assert all(CLIENT_PARAM_ID_BASE < i < TEMPLATE_PARAM_ID_BASE for i in ids)
+    assert all(key.name.startswith("Clockwork") for key in fixed)
+
+
+def test_a_render_of_another_method_is_refused_before_any_file_exists(tmp_path):
+    """A method edited after rendering is hand-written, and a stamp saying otherwise
+    would put a knob setting on a file it did not make."""
+    _loaded, rendered = rendered_fixture()
+    with FakeConsole() as fake:
+        geometry = make_geometry(fake)
+    with pytest.raises(ValueError, match="hand-written"):
+        Recording.create(tmp_path, make_method(), geometry,
+                         provenance=Provenance(rendered=rendered))
+    assert os.listdir(tmp_path) == []
+
+
+def test_a_label_left_empty_is_not_stamped():
+    _loaded, rendered = rendered_fixture(labels={"sample": "x"})
+    empty = dataclasses.replace(rendered, labels={"sample": ""})
+    names = {key.name for key in provenance_globals(Provenance(rendered=empty))}
+    assert "ClockworkLabelSample" not in names
+    assert "ClockworkKnobPulseMs" in names
+
+
+@pytest.mark.parametrize("fields, complaint", [
+    ({"id": "", "index": 1, "position": 1}, "needs an id"),
+    ({"id": "s", "index": 0, "position": 1}, "counts from 1"),
+    ({"id": "s", "index": 1, "position": 0}, "counts from 1"),
+    ({"id": "s", "index": 1, "position": 1, "seed": 2**31}, "Int32"),
+    ({"id": "s", "index": 1, "position": 1, "seed": -1}, "Int32"),
+])
+def test_a_series_that_the_file_could_not_hold_is_refused(fields, complaint):
+    with pytest.raises(ValueError, match=complaint):
+        Series(**fields)

@@ -131,7 +131,7 @@ from ..transcript import sent as _sent
 from .console import Console
 from .session import EMPTY_SETTLE_S, run_frame, start_chain
 from .stream import DataStream, StreamTimeout
-from .uimf import Geometry, Recording
+from .uimf import Geometry, Provenance, Recording
 from .wire import (
     SECONDS_PER_SAMPLE_2GSPS,
     AcqError,
@@ -1871,6 +1871,7 @@ def run_acquisition(
     instrument: Instrument = UNCALIBRATED,
     adc_name: str = "",
     snapshot: Snapshot | None = None,
+    provenance: Provenance | None = None,
     overwrite: bool = False,
     stop: Callable[[], str | None] | None = None,
     clock: Callable[[], float] = time.perf_counter,
@@ -1955,6 +1956,14 @@ def run_acquisition(
     again would be recording the same measurement twice under two names. A run given
     none stamps none, which is every `Recording` driven by hand.
 
+    `provenance` is how the method was made, when it is more than a document somebody
+    wrote: the template render it came from and the series it belongs to, stamped as
+    `Clockwork*` parameters of their own (`clockwork.acq.uimf.provenance_globals`, lab
+    record, task 66). One argument rather than a dozen, so that what a run records about
+    its making can grow without this signature growing with it. A replicate passes the
+    same one, since it is the same render; a series' next run passes its own position.
+    It reaches only a recording created here -- one handed in was stamped by its maker.
+
     `stop` is asked, between one repetition and the next, whether to end the run; a
     string is the reason and ends it, `None` carries on. **This is the whole of a
     window's Stop button**, and it is a question asked between repetitions rather than
@@ -2015,7 +2024,7 @@ def run_acquisition(
                 adc_name=adc_name, console_version=info.text,
                 box_state=snapshot.render() if snapshot else "",
                 conditions=snapshot.conditions.strip() if snapshot else "",
-                clock=clock, started=started, overwrite=overwrite,
+                provenance=provenance, clock=clock, started=started, overwrite=overwrite,
                 # A run this function created the files for is a run somebody pressed
                 # Acquire for, so it is published: a mainspring left open with `Live`
                 # ticked picks it up within a couple of seconds and follows the raw

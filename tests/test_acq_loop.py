@@ -965,6 +965,33 @@ def test_a_replicate_that_reuses_a_stem_collides_rather_than_overwriting(rig):
         rig.acquire(method, boxes, replicate=True)
 
 
+def test_a_rendered_run_carries_its_provenance_through_to_both_files(rig):
+    """`run_acquisition` takes one `Provenance` and hands it to the recording it
+    creates; the knobs, the mark and the series land in the raw file and the companion
+    alike (lab record, task 66). The fixture template shrunk to a table this rig runs."""
+    from clockwork.method import template as templates
+    from test_method_template import LABELS, TEMPLATE
+
+    text = (TEMPLATE.replace("accumulations = 10", "accumulations = 2")
+            .replace("scans = 100", "scans = 32").replace("100:];", "32:];"))
+    rendered = templates.render(templates.loads_template(text), {"cycles": 1}, LABELS)
+    # The fixture's box2 carries a compression table this stand-in does not model,
+    # and a non-strict box acknowledges it: the subject here is the stamp.
+    boxes = make_boxes("box1", "box2",
+                       transport=lambda: FakeBox(arb_modules=1, strict=False))
+    send_phases(rendered.method, boxes)
+    run = rig.acquire(rendered.method, boxes, provenance=acq.Provenance(
+        rendered=rendered, series=acq.Series("plan-1", index=3, position=1, seed=7)))
+    assert run.complete
+    for path in (run.raw_path, run.summed_path):
+        extra = UimfFile(path).global_params().extra
+        assert float(extra["ClockworkKnobPulseMs"]) == 1.5
+        assert int(extra["ClockworkMarkOffScan"]) == 25
+        assert extra["ClockworkLabelSample"] == LABELS["sample"]
+        assert (extra["ClockworkSeriesId"], extra["ClockworkSeriesIndex"],
+                extra["ClockworkSeriesSeed"]) == ("plan-1", "3", "7")
+
+
 # --- the re-arm fallback -----------------------------------------------------------------
 
 

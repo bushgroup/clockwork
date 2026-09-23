@@ -342,7 +342,9 @@ owns. Three more join them there from the [instrument file](instrument-file-form
 `ClockworkChannelOffset`, `ClockworkFullScale` and `ClockworkInverted`, which record the window the
 acquisition ran through; and two more from the run itself, `ClockworkBoxState` and
 `ClockworkConditions`, which record what the boxes were holding and what the operator said about
-the rest of the instrument. A method's hash changes if and only if some field in the document changes, which makes it
+the rest of the instrument. A method rendered from a template adds the template, its knobs,
+labels and marks, and a run acquired in a series adds its place in the series; both sets are in
+[`template-file-format.md`](template-file-format.md#what-a-rendered-run-records). A method's hash changes if and only if some field in the document changes, which makes it
 a stable key for grouping acquisitions by the method that produced them. The file name is not one
 of the fields: a technical replicate is the same method written to a different file, so every
 replicate of one method stamps to the same hash.

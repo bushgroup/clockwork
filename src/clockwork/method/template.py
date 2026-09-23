@@ -196,7 +196,10 @@ class Rendered:
     """What `render` returns: the method, and everything a run records about its making.
 
     `knobs` holds every knob, turned or left at its default; `derived` every
-    derivation's value; `labels` only the labels the caller gave.
+    derivation's value; `labels` only the labels the caller gave. `template` is the
+    template itself, for what a value alone does not say -- a knob's unit and
+    description, a label's description -- which the file's stamp writes beside each one
+    (`clockwork.acq.Provenance`).
     """
 
     method: Method
@@ -207,6 +210,7 @@ class Rendered:
     template_text: str
     tick_us: float | None
     derived: dict[str, Number] = field(default_factory=dict)
+    template: Template | None = field(default=None, compare=False, repr=False)
 
 
 # --- the derivation vocabulary -----------------------------------------------------------
@@ -740,6 +744,39 @@ def _check_holes(body: dict, seen: dict[str, str], problems: list[str]) -> None:
             )
 
 
+def camel_case(name: str) -> str:
+    """How a knob, label or mark is spelled inside a file's parameter name.
+
+    Split on underscores, the first letter of each piece capitalized and the rest left
+    alone: `bias_hold_v` is `BiasHoldV`, and a rendered run stamps it as
+    `ClockworkKnobBiasHoldV` (lab record, task 66). The spelling is part of the file
+    format and is chosen once; `_check_stamp_names` refuses a template in which two names
+    of one kind would come out the same.
+    """
+    return "".join(piece[:1].upper() + piece[1:] for piece in name.split("_") if piece)
+
+
+def _check_stamp_names(kind: str, names: list[str], problems: list[str]) -> None:
+    """Refuse two names of one kind that a file would stamp under one parameter name.
+
+    `pulse_ms` and `pulseMs`, or `a_1` and `a1`, are two names here and one in the
+    file, and the second would be refused by the writer when a run was already under way.
+    Across kinds there is no collision to find, since each kind has its own prefix.
+    """
+    spelled: dict[str, str] = {}
+    for name in names:
+        word = camel_case(name)
+        if not word:
+            problems.append(f"{kind}.{name}: {name!r} has no letter or digit to be stamped by")
+        elif word in spelled:
+            problems.append(
+                f"{kind}.{name}: {name!r} and {spelled[word]!r} would be stamped into a file "
+                f"under one name, {word!r}; rename one of them"
+            )
+        else:
+            spelled[word] = name
+
+
 def from_dict(data: dict, text: str = "") -> Template:
     """Build and validate a `Template` from a parsed TOML document.
 
@@ -771,6 +808,8 @@ def from_dict(data: dict, text: str = "") -> Template:
     constants = _constants(data.get("constants"), seen, problems)
     derivations = _derivations(data.get("derive"), seen, problems)
     marks = _marks(data.get("marks"), seen, problems)
+    for kind, entries in (("knobs", knobs), ("labels", labels), ("marks", marks)):
+        _check_stamp_names(kind, [entry.name for entry in entries], problems)
     if marks and seen.get(TICK_NAME) in (None, "label"):
         problems.append(
             f"marks: a mark's expected scan is its time over the pusher period, so a template "
@@ -948,6 +987,7 @@ def _render(
         template_text=template.text,
         tick_us=None if tick_us is None else float(tick_us),
         derived=derived,
+        template=template,
     )
 
 
@@ -976,6 +1016,7 @@ __all__ = [
     "Rendered",
     "Template",
     "TemplateError",
+    "camel_case",
     "format_number",
     "from_dict",
     "is_template",
