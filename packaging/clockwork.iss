@@ -19,7 +19,7 @@
 ; nothing here names the console directly.
 
 #define MyAppName "clockwork"
-#define MyAppVersion "0.9.0"
+#define MyAppVersion "1.0.0"
 #define MyAppPublisher "University of Washington"
 #define MyAppURL "https://github.com/bushgroup/clockwork"
 #define MyAppExeName "clockwork.exe"
