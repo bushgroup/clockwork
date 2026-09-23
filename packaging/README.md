@@ -58,6 +58,41 @@ on MASSTRO (2026-09-16), which put `ISCC.exe` under the current user's
 `AppData\Local\Programs\Inno Setup 6\` rather than on `PATH` -- call it by that full path, or add
 it to `PATH` yourself, until something does that for every clone.
 
+## Releasing
+
+**What a 1.x version promises** (from 1.0.0, 2026-09-22): the three things a user or a downstream
+reader relies on stay compatible across every 1.x release --
+
+- **the method file**: a method a 1.x release saved still loads in every later 1.x. The loader
+  refuses any `schema_version` but `clockwork.method.SCHEMA_VERSION` (2 at 1.0.0), so moving that
+  number inside 1.x means the loader accepting 2 as well; a new key is fine, a renamed or removed
+  one is not;
+- **the files a run leaves**: the `YYMMDD_INITIALS_NNN` stem and the names of the files beside it
+  (the raw and summed UIMF, the transcript, the send log);
+- **the UIMF parameters clockwork writes**, through `mainspring.uimf`.
+
+A change that breaks one of those is a 2.0.0. A change that adds without breaking is a minor
+release, a fix is a patch. Everything else -- the window's layout, module internals, the self-check's
+wording -- carries no promise.
+
+**Cutting a release**, the way 1.0.0 was cut:
+
+1. One commit that changes the version and nothing else: `pyproject.toml`, `clockwork.__version__`
+   and `packaging/clockwork.iss` together (`check_public.py` fails unless they agree), then
+   `uv lock`. `uv run tools/check_public.py` and `uv run pytest` pass before it is committed; push it.
+2. Build from a clean tree, so `src/clockwork/_commit.py` names that commit with no `-dirty`:
+   `tools/build_exe.ps1`, then `ISCC.exe`, giving `dist\installer\clockwork-<version>-setup.exe`.
+3. Install that file on a machine other than the one that built it, and run its self-check.
+   The build is windowed, so PowerShell waits for it only through `Start-Process`:
+
+   ```
+   $p = Start-Process -FilePath "$env:LOCALAPPDATA\Programs\clockwork\clockwork.exe" -ArgumentList '--self-check' -Wait -PassThru -NoNewWindow; "exit code: $($p.ExitCode)"
+   ```
+
+4. Only then, an annotated tag on the bump commit, pushed: `git tag -a v<version> <commit> -m
+   "clockwork <version>"`, `git push origin v<version>`. The tag always names the commit the
+   installer was built from.
+
 ## What differs from mainspring's chain
 
 - **No file association.** mainspring is the only UIMF viewer (`CLAUDE.md`'s decisions of
@@ -106,8 +141,8 @@ name, so the exclusion list in `clockwork.spec` is doing real work, not standing
 
 ## Open
 
-- **Where the installer is validated** (task 52 step 5): still open in the lab record. The
-  installer itself compiles clean on MASSTRO -- what remains is running it on a Windows install
-  that never had the dev toolchain on it, since developing on the deployment machine is what hides
-  a missing dependency until someone else runs the build.
+- ~~**Where the installer is validated** (task 52 step 5).~~ **Closed 2026-09-19** on a clean
+  Windows 11 LTSC install that never had the dev toolchain on it: per-user install, `--self-check`
+  with `PATH` cut to the Windows directories, a full `--fake` run, clean uninstall, nothing missing
+  (lab record, tasks 32 and 52). A release's step 3 above repeats the self-check part of it.
 
