@@ -220,6 +220,24 @@ def _self_check() -> int:
     return 0
 
 
+def _report(args: argparse.Namespace) -> int:
+    """`clockwork report`: print the pre-filled issue's address, and open it."""
+    import webbrowser
+
+    from clockwork.report import Report
+
+    from . import errors
+
+    address = Report(method=args.method, transcript=args.transcript,
+                     errors_log=errors.errors_log_path()).url()
+    print(address)
+    if not args.print_only and not webbrowser.open(address):
+        print("no browser could be opened; paste the address above into one",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Console-script entry point, and the frozen build's entry point through
     `packaging/entrypoint.py`.
@@ -232,6 +250,8 @@ def main(argv: list[str] | None = None) -> int:
     sys.stderr = _GuardedStream(sys.stderr)
 
     parser = argparse.ArgumentParser(prog="clockwork")
+    parser.add_argument("--version", action="store_true",
+                        help="print the version and the commit it was built from, and exit")
     parser.add_argument(
         "--self-check", action="store_true",
         help="run a hardware-free stand-in acquisition and exit, no window shown",
@@ -285,13 +305,26 @@ def main(argv: list[str] | None = None) -> int:
                           "docs/routines.md)")
     mcp.add_argument("--endpoint", metavar="ADDRESS", default="",
                      help="the daemon's command socket (default: tcp://127.0.0.1:5570)")
+    report = commands.add_parser(
+        "report", help="open a bug report on the lab's issue tracker, filled in with this "
+                       "installation's facts",
+        description="Open a new bug report in the browser with the version, the build "
+                    "commit, the PC, the operating system and the tail of the window's "
+                    "error log already filled in, and the tail of a run's transcript when "
+                    "one is named. Strings sent to the boxes and the console are left out.")
+    report.add_argument("--transcript", metavar="PATH", default="",
+                        help="a run's .transcript.log, whose tail goes in the report")
+    report.add_argument("--method", metavar="NAME", default="",
+                        help="the method's name, for the report; its contents never go in")
+    report.add_argument("--print-only", action="store_true",
+                        help="print the address and open no browser")
     # The verbs are built from the tool registry, which costs half a second of imports
     # (the toolbox, the loop, mainspring's reader): paid only when the command line
     # could name a verb or asks for help, never by the window's own launch.
     words = list(sys.argv[1:] if argv is None else argv)
     command = next((word for word in words if not word.startswith("-")), None)
     cli = None
-    if command not in (None, "serve", "mcp") or {"-h", "--help"} & set(words[:1]):
+    if command not in (None, "serve", "mcp", "report") or {"-h", "--help"} & set(words[:1]):
         from clockwork.mcp import cli
 
         cli.add_verbs(commands)
@@ -309,6 +342,16 @@ def main(argv: list[str] | None = None) -> int:
     _seed_numba_cache(os.environ["NUMBA_CACHE_DIR"])
 
     import clockwork
+
+    if args.version or args.command == "report":
+        # As `serve`: the answer belongs in the terminal it was typed at (task 60).
+        if getattr(sys, "frozen", False):
+            _attach_parent_console()
+        if args.version:
+            print(f"clockwork {clockwork.__version__} "
+                  f"({clockwork.built_commit() or 'unknown commit'})")
+            return 0
+        return _report(args)
 
     if args.command == "serve":
         # A windowed build has no stdout of its own; the daemon's log belongs in the

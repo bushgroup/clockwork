@@ -132,6 +132,27 @@ its verdict under `verdict` and the report a person reads under `text`. A verdic
 `could not judge` is still exit status 0, since the routine answered; a routine that does not
 exist or does not load is 1.
 
+## Reporting a problem
+
+Two commands sit beside the verbs and need no daemon. `clockwork --version` prints the version
+and the commit the installation was built from. `clockwork report` opens a new bug report on the
+lab's issue tracker in the browser, with the version, the build commit, the PC's name, the
+operating system and the last 40 lines of the window's error log already filled in, and prints
+the report's address:
+
+```
+clockwork report --transcript D:\data\ZZ-012-2026-09-24.transcript.log --method bradykinin.toml
+```
+
+`--transcript` adds the last 40 lines of a run's wire transcript, and `--method` adds the method's
+name. Neither carries the method itself: every string sent to a box or to the acquisition console
+is removed from the transcript before it goes in, and the method file is never read. The whole
+address is held under 8,000 characters, so a long tail is shortened from its oldest lines, and a
+transcript that still does not fit is replaced by its path and a request to drag the file into the
+report. `--print-only` prints the address without opening a browser. A group running clockwork
+with a tracker of its own points reports there by setting `CLOCKWORK_ISSUES` to the address of
+that tracker's new-issue page.
+
 ## The verbs
 
 Each verb is its tool, described in full by `clockwork <verb> --help` and in the

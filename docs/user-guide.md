@@ -220,6 +220,15 @@ names the path, because the installed clockwork opens no console window and has 
 print one. **Help > About** names the same path. Attach that file when reporting a button that
 did nothing.
 
+To report a problem, choose **Help > Report a problem...**. It opens a new bug report on the lab's
+issue tracker in the browser with the version, the build commit, the PC's name, the operating
+system, the method's name, and the last lines of the error log and of the current or last run's
+wire transcript already filled in, so the report needs only what you did, what happened and what
+you expected. The method's strings stay out: every string sent to a box or to the console is
+removed from the transcript first. A transcript too long to fit is named by its path instead, to
+be dragged into the report. `clockwork report` does the same from a terminal
+([command line](command-line.md)).
+
 ## Opening the result in mainspring
 
 **Open in mainspring** opens the last run's file: the summed companion if the run kept one, the

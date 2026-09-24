@@ -877,7 +877,8 @@ LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method",
                 "clockwork.naming", "clockwork.owner", "clockwork.owner.wire",
                 "clockwork.owner.remote", "clockwork.owner.daemon", "clockwork.summary",
                 "clockwork.mcp", "clockwork.mcp.server", "clockwork.mcp.cli",
-                "clockwork.envelope", "clockwork.record", "clockwork.routine")
+                "clockwork.envelope", "clockwork.record", "clockwork.routine",
+                "clockwork.report")
 QT_PREFIXES = ("PySide6", "PyQt", "pyqtgraph", "shiboken")
 
 # --- opaque lab references ------------------------------------------------------------

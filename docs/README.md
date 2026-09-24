@@ -17,7 +17,7 @@
   audit log of every call.
 - [**Command line**](command-line.md). `clockwork <verb>`, every tool of the MCP server as a
   subcommand for a terminal or a script: how its flags are written, the JSON it answers and its
-  exit statuses, and following a run from a shell.
+  exit statuses, following a run from a shell, and `clockwork report` for filing a bug.
 - [**Instrument routines**](routines.md). Experiments an instrument needs run anyway, written
   down so that nothing is left to choose: the template and knob values or the documents to read
   the boxes back against, the numbers measured, the criteria that judge them, and the verdict

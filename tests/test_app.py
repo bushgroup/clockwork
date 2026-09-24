@@ -2134,3 +2134,23 @@ def test_instrument_diff_dialog_builds_one_state_panel_per_box(window, tmp_path,
     panels = dialog.findChildren(StatePanel)
     assert len(panels) == len(method.boxes)
     assert all(panel.opened for panel in panels)
+
+
+def test_report_a_problem_sits_above_about_and_names_the_last_run(window, tmp_path,
+                                                                  monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+
+    help_menu = window.action_about.associatedObjects()[-1]
+    actions = [action for action in help_menu.actions() if not action.isSeparator()]
+    assert actions.index(window.action_report) == actions.index(window.action_about) - 1
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    window.method_path = str(tmp_path / "bradykinin.toml")
+    log = tmp_path / "ZZ-007-2026-09-24.transcript.log"
+    log.write_text("10:00:00.000 mips.wire        auklet > b'STBLDAT'\n"
+                   "10:00:00.001 acq.loop         FrameDone: frame 1 finished\n",
+                   encoding="utf-8")
+    window._last_run_paths = (str(tmp_path / "ZZ-007.uimf"), "", "ZZ-007")
+    text = parse_qs(urlsplit(window.report_url()).query)["attachments"][0]
+    assert "bradykinin.toml" in text and "FrameDone: frame 1 finished" in text
+    assert "STBLDAT" not in text

@@ -31,9 +31,10 @@ import os
 import time
 from dataclasses import replace
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QFont
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QDesktopServices, QFont
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -582,6 +583,11 @@ class MainWindow(QMainWindow):
         run_menu.addAction(self.action_queue)
 
         help_menu = self.menuBar().addMenu("&Help")
+        self.action_report = QAction("&Report a problem...", self)
+        self.action_report.setToolTip(
+            "Open a new bug report in the browser with the version, this PC, the error "
+            "log and the last run's transcript already filled in.")
+        help_menu.addAction(self.action_report)
         self.action_about = QAction("&About clockwork", self)
         help_menu.addAction(self.action_about)
 
@@ -619,6 +625,7 @@ class MainWindow(QMainWindow):
         self.action_find.triggered.connect(self.find_boxes)
         self.action_read_state.triggered.connect(self.read_state)
         self.action_console.triggered.connect(self.start_console)
+        self.action_report.triggered.connect(self.report_problem)
         self.action_about.triggered.connect(self._about)
         self.action_forget_geometry.triggered.connect(self._forget_geometry)
 
@@ -1568,6 +1575,25 @@ class MainWindow(QMainWindow):
             self.stem.setPlaceholderText("set your initials first")
             return
         self.stem.setText(next_stem(self._directory(), initials))
+
+    def report_url(self) -> str:
+        """The pre-filled bug report for this window: the method's name, and the
+        transcript of the run in flight or else of the last one."""
+        from ..report import Report, transcript_beside
+
+        raw, summed, stem = self._live_run if self._live_run[2] else self._last_run_paths
+        directory = os.path.dirname(raw or summed) or self._directory()
+        return Report(method=self.method_path or "", errors_log=errors.errors_log_path(),
+                      transcript=transcript_beside(directory, stem)).url()
+
+    def report_problem(self) -> None:
+        address = self.report_url()
+        if not QDesktopServices.openUrl(QUrl.fromEncoded(address.encode("ascii"))):
+            # Eight kilobytes of address is no message to read in a dialog.
+            QApplication.clipboard().setText(address)
+            self._complain("No browser could be opened",
+                           "The report's address is copied; paste it into a browser's "
+                           "address bar to file it.")
 
     def _about(self) -> None:
         QMessageBox.about(
