@@ -58,9 +58,16 @@ from .tools import PROGRESS_WAIT_MAX_S, TOOLS, Tool, Toolbox, ToolFailure
 __all__ = ["COMMON", "RECORD_WAIT_S", "Flag", "Verb", "add_verbs", "is_verb", "run",
            "verb_name", "verbs"]
 
-COMMON = ("endpoint", "library", "output", "instrument", "limits")
+COMMON = ("endpoint", "library", "output", "instrument", "limits", "routines")
 """The options every verb takes, which say where the tools are pointed rather than what
 a tool is asked; no tool may take an argument of one of these names."""
+
+ALIASES = {"run-routine": ("routine",)}
+"""Shorter names a verb also answers to: `clockwork routine beam-check` for
+`clockwork run-routine --name beam-check`, the one verb a trainee types by hand."""
+
+POSITIONAL = {"run-routine": "name"}
+"""A verb's argument that may also be given bare, after the verb."""
 
 RECORD_WAIT_S = 60.0
 """How long a finished `acquire` waits for its run record's last file entry: the
@@ -129,7 +136,8 @@ def verbs() -> list[Verb]:
 
 
 def is_verb(command: str | None) -> bool:
-    return bool(command) and any(verb.name == command for verb in verbs())
+    return bool(command) and any(
+        command == verb.name or command in ALIASES.get(verb.name, ()) for verb in verbs())
 
 
 # -- the parser ----------------------------------------------------------------------
@@ -139,12 +147,17 @@ def add_verbs(commands: argparse._SubParsersAction) -> None:
     """One subparser per verb on `commands`, each with the common options."""
     for verb in verbs():
         parser = commands.add_parser(
-            verb.name, help=verb.summary, description=verb.tool.description,
+            verb.name, aliases=list(ALIASES.get(verb.name, ())), help=verb.summary,
+            description=verb.tool.description,
             formatter_class=argparse.RawDescriptionHelpFormatter,
             epilog="Answers as JSON on standard output. A refusal is one sentence on "
                    "standard error and exit status 1.")
         for flag in verb.flags:
-            _add(parser, flag)
+            _add(parser, flag, positional=POSITIONAL.get(verb.name) == flag.parameter)
+        if verb.name in POSITIONAL:
+            parser.add_argument("bare", nargs="?", metavar=POSITIONAL[verb.name].upper(),
+                                help=f"the {POSITIONAL[verb.name]}, as --"
+                                     f"{verb_name(POSITIONAL[verb.name])} gives it")
         if verb.tool.name == "progress":
             parser.add_argument(
                 "--follow", action="store_true",
@@ -169,6 +182,9 @@ def add_verbs(commands: argparse._SubParsersAction) -> None:
         common.add_argument("--limits", metavar="PATH", default="",
                             help="the instrument's standing limits (default: limits.toml "
                                  "beside --instrument)")
+        common.add_argument("--routines", metavar="DIR", default="",
+                            help="the instrument's routines (default: routines beside the "
+                                 "library)")
         parser.set_defaults(verb=verb, verb_parser=parser)
 
 
@@ -211,11 +227,11 @@ def _flag(tool: str, parameter: inspect.Parameter) -> Flag:
                     "flag can carry; teach clockwork.mcp.cli._flag the type")
 
 
-def _add(parser: argparse.ArgumentParser, flag: Flag) -> None:
+def _add(parser: argparse.ArgumentParser, flag: Flag, *, positional: bool = False) -> None:
     shown = "" if flag.required or flag.default in (None, "", {}, []) \
         else f" (default: {flag.default})"
     common: dict[str, Any] = {"dest": flag.dest, "default": argparse.SUPPRESS}
-    if flag.required:
+    if flag.required and not positional:
         common["required"] = True
     if flag.kind == "switch":
         parser.add_argument(flag.option, action=argparse.BooleanOptionalAction,
@@ -307,7 +323,16 @@ def _arguments(verb: Verb, args: argparse.Namespace,
     """The flags given, as the tool's arguments: the ones not given are left to the
     tool's own defaults, and repeated `KEY=VALUE`s become one mapping."""
     found: dict[str, object] = {}
+    bare = getattr(args, "bare", None)
+    if bare is not None:
+        chosen = next(flag for flag in verb.flags if flag.parameter == POSITIONAL[verb.name])
+        if hasattr(args, chosen.dest) and getattr(args, chosen.dest) != bare:
+            parser.error(f"the {chosen.parameter} is given twice, as {bare!r} and as "
+                         f"{chosen.option}")
+        setattr(args, chosen.dest, bare)
     for flag in verb.flags:
+        if flag.required and not hasattr(args, flag.dest):
+            parser.error(f"the following arguments are required: {flag.option}")
         if not hasattr(args, flag.dest):
             continue
         value = getattr(args, flag.dest)
@@ -361,7 +386,10 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
         output = os.path.abspath(args.output or hello.output or os.getcwd())
         toolbox = Toolbox(owner, library=args.library or hello.library, output=output,
                           instrument=instrument, instrument_path=args.instrument,
-                          log=AuditLog.beside(output, via="cli"), limits=limits)
+                          log=AuditLog.beside(output, via="cli"), limits=limits,
+                          routines=args.routines)
+        if verb.tool.name == "run_routine":
+            toolbox.narrate = lambda line: _say(err, line)
         if verb.tool.name == "progress" and args.follow:
             return _follow(toolbox, arguments, out, err, program)
         try:

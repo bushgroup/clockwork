@@ -57,6 +57,7 @@ from typing import Any
 
 from .. import envelope, summary
 from .. import method as method_module
+from .. import routine as routine_module
 from ..acq import BatchSeen, Event, Run, Snapshot, cautions, refusals
 from ..acq.uimf import RAW_SUFFIX, SUMMED_SUFFIX
 from ..app import methodlib
@@ -88,6 +89,7 @@ from ..owner.remote import DaemonError
 from ..owner.wire import TYPE_KEY, to_wire
 from ..record import RECORD_SUFFIX, RunRecord, brief
 from ..record import find as find_record
+from ..routine import Routine, RoutineError
 from ..transcript import send_log_name
 from .audit import AuditLog
 from .guard import guard_acquisition
@@ -105,6 +107,10 @@ PROGRESS_WAIT_MAX_S = 30.0
 2026-09-23): a session following a run makes one call every several seconds rather
 than spinning, and still hears about a finished run within one call."""
 
+ROUTINE_WAIT_S = 3600.0
+"""How long `run_routine` waits for its acquisition before judging it could not judge.
+A routine's run is seconds to minutes; an hour is a run that is stuck."""
+
 HASH_DIGITS = methodlib.HASH_DIGITS
 
 
@@ -121,7 +127,7 @@ class Tool:
 
     name: str
     group: str
-    """`method`, `hardware`, `acquisition` or `data`."""
+    """`method`, `hardware`, `acquisition`, `data` or `routine`."""
     function: Callable[..., dict]
     read_only: bool
     """True for a tool that changes nothing: no job, no file, no stop."""
@@ -173,9 +179,16 @@ class Toolbox:
         instrument_path: str = "",
         log: AuditLog | None = None,
         limits: Limits | None = None,
+        routines: str = "",
     ) -> None:
         self.owner = owner
         self.library = os.path.abspath(library) if library else ""
+        self.routines = (os.path.abspath(routines) if routines
+                         else routine_module.default_directory(self.library))
+        """Where the instrument's routines are: `routines` beside the library unless named."""
+        self.narrate: Callable[[str], None] | None = None
+        """Told each step of a `run_routine` as it happens, for a person watching a
+        command line; nothing else reads it."""
         self.output = os.path.abspath(output or os.getcwd())
         self.instrument = instrument
         self.instrument_path = instrument_path
@@ -836,6 +849,91 @@ class Toolbox:
         return summary.atd(self._in_output(path), mz, preset=preset, frames=frames,
                            points=points)
 
+    @tool("data")
+    def ion_events(self, path: str, frames: list[int] | None = None) -> dict:
+        """Ion arrivals push by push: how many per push, how tall, how wide.
+
+        The detector's single-ion view, for a file whose rows are single pushes: the
+        raw file of any run, or the summed file of a run with one accumulation, such as
+        the detection-response experiment. An event is a run of consecutive stored bins
+        in one push. Answers `events_per_push`, `occupancy` (the fraction of pushes
+        holding any), the event heights at the 5th to 99th percentiles and their
+        maximum in stored units and in millivolts, the widths in bins, the median
+        area, how many events reached the card's top code (`railed_events`), and the
+        total counts per push. A summed file of several pushes a row is refused.
+        """
+        return summary.ion_events(self._in_output(path), frames=frames)
+
+    # -- routines ----------------------------------------------------------------
+
+    @tool("routine")
+    def list_routines(self) -> dict:
+        """The instrument's routines: experiments run with nothing left to choose.
+
+        Each routine is a template at fixed knob values, or a read-back of the boxes
+        against documents, with the criteria that judge it. For each: its name, what it
+        asks, whether it may run with nobody at the instrument (`unattended`), what it
+        acquires or reads, each criterion in words with its source, and whether the
+        standing limits allow its template. Run one with `run_routine`.
+        """
+        routines = []
+        for path, loaded in routine_module.scan(self.routines):
+            relative = os.path.relpath(path, self.routines).replace(os.sep, "/")
+            if isinstance(loaded, RoutineError):
+                routines.append({"path": relative, "problem": str(loaded)})
+                continue
+            entry: dict[str, Any] = {
+                "name": loaded.name, "path": relative, "description": loaded.description,
+                "unattended": loaded.unattended, "hash": loaded.hash[:HASH_DIGITS],
+                "acquires": None, "audits": [entry.document for entry in loaded.audit],
+                "measures": [{"name": item.name, "function": item.function,
+                              "file": item.file} for item in loaded.measures],
+                "criteria": [{"name": item.name, "value": item.value,
+                              "comparison": item.describe(), "unmet": item.unmet,
+                              "judged": item.judge, "source": item.source}
+                             for item in loaded.criteria],
+                "limits": None,
+            }
+            if loaded.acquire is not None:
+                spec = loaded.acquire
+                entry["acquires"] = {"template": spec.template, "knobs": dict(spec.knobs),
+                                     "labels": dict(spec.labels),
+                                     "replicates": spec.replicates}
+                try:
+                    entry["limits"] = self._limits_of(
+                        template_module.load_template(self._in_library(spec.template)))
+                except (OSError, TemplateError, ToolFailure) as exc:
+                    entry["problem"] = f"its template does not load: {exc}"
+            routines.append(entry)
+        return {"directory": self.routines, "routines": routines}
+
+    @tool("routine", read_only=False)
+    def run_routine(self, name: str, initials: str, conditions: str = "") -> dict:
+        """Run one of the instrument's routines to its verdict, and answer the report.
+
+        `name` is a routine's name from `list_routines`. `initials` are those of the
+        person it is run for, or who scheduled it, and name the files. `conditions` is
+        free text about the sample and source, stamped into every file beside the
+        routine's own; empty is allowed. A routine is a request with no free
+        parameters: it is armed and acquired through `arm` and `acquire`, so the
+        standing limits, the cold-start check and the budget apply to it exactly, and it
+        leaves a run record and stamped files like any request. A routine that reads
+        the boxes back acquires nothing.
+
+        Answers when the routine is judged, which for one that acquires is after its
+        files are written: `verdict` is `pass`, `fail` or `could not judge`, with
+        `reason` (such as no beam, saturation, or a refused arm); `criteria` gives each
+        number, what it was compared with and whether it was met; `text` is the report
+        in a few lines to give the person; `record` is the run record it was added to.
+        """
+        loaded = self._routine(name)
+        who = self._initials(initials)
+        words = routine_module.request_words(loaded)
+        self._say(f"routine {loaded.name}: {loaded.description or 'no description'}")
+        if loaded.audit:
+            return self._run_audit(loaded, who, words)
+        return self._run_acquiring(loaded, who, words, conditions)
+
     # -- helpers -----------------------------------------------------------------
 
     def _library_files(self) -> list[str]:
@@ -1132,6 +1230,205 @@ class Toolbox:
                 return found
             time.sleep(0.05)
 
+    # -- running a routine -------------------------------------------------------
+
+    def _say(self, line: str) -> None:
+        if self.narrate is not None:
+            try:
+                self.narrate(line)
+            except Exception:  # noqa: BLE001 -- a watcher that cannot hear is not a failure
+                pass
+
+    def _routine(self, name: str) -> Routine:
+        """The routine called `name` in the routine directory, or one sentence why not."""
+        found = routine_module.scan(self.routines)
+        names = []
+        for path, loaded in found:
+            if isinstance(loaded, RoutineError):
+                if os.path.splitext(os.path.basename(path))[0] == name:
+                    raise ToolFailure(f"routine {name} does not load: {loaded}")
+                continue
+            if loaded.name == name:
+                return loaded
+            names.append(loaded.name)
+        if not self.routines:
+            raise ToolFailure("no routine directory is set: start the server with --library "
+                              "or --routines")
+        raise ToolFailure(f"there is no routine called {name!r} in {self.routines}; the "
+                          f"routines are {', '.join(names) or 'none'}")
+
+    def _discover_for(self, loaded: Method) -> None:
+        """Find the boxes if the owner knows none yet: from the ports on the instrument,
+        and under --fake as the stand-ins `loaded` names."""
+        if self.owner.status().boxes:  # type: ignore[attr-defined]
+            return
+        self._say("finding the boxes")
+        event, handle = self._run(Discover(label="finding the boxes for a routine",
+                                           method=loaded), JOB_WAIT_S)
+        if not isinstance(event, JobFinished):
+            raise ToolFailure(f"the boxes were not found within {JOB_WAIT_S:.0f} s (job "
+                              f"{handle.id}); call status to see what is running")
+
+    def _audit_method(self, entry: routine_module.AuditEntry) -> tuple[Method, str]:
+        """An audit's document as the method it declares, and its hash: a method as it
+        stands, a template rendered at its defaults (or the entry's knobs), a required
+        label it does not give filled with the routine's name, since a label renders
+        nothing."""
+        path = self._in_library(entry.document)
+        try:
+            with open(path, "rb") as handle:
+                data = tomllib.load(handle)
+            if template_module.is_template(data):
+                template = template_module.load_template(path)
+                labels = {label.name: "stack audit" for label in template.labels
+                          if label.required} | dict(entry.labels)
+                rendered = template_module.render(template, dict(entry.knobs), labels)
+                return rendered.method, rendered.template_hash
+            loaded = method_module.load(path)
+        except (OSError, tomllib.TOMLDecodeError, MethodError, TemplateError) as exc:
+            raise ToolFailure(f"the audit's document {entry.document} does not load: "
+                              f"{exc}") from exc
+        return loaded, method_module.stamp(loaded)["method_hash"]
+
+    def _run_audit(self, loaded: Routine, who: str, words: str) -> dict:
+        documents = [(entry, *self._audit_method(entry)) for entry in loaded.audit]
+        self._discover_for(documents[0][1])
+        names = tuple(dict.fromkeys(box.name for _, method, _ in documents
+                                    for box in method.boxes))
+        self._say(f"reading back {', '.join(names)}")
+        event, handle = self._run(ReadState(label=f"reading the boxes for routine "
+                                                  f"{loaded.name}", names=names), JOB_WAIT_S)
+        states = event.result if isinstance(event, JobFinished) else None
+        if not isinstance(states, Mapping):
+            raise ToolFailure(f"the boxes did not finish reading back within "
+                              f"{JOB_WAIT_S:.0f} s (job {handle.id})")
+        readings = [state for state in states.values() if isinstance(state, BoxState)]
+        audited = {entry.name: {"document": entry.document, "hash": digest[:HASH_DIGITS],
+                                "settings": list(entry.settings),
+                                **routine_module.audit(method, readings, entry.settings)}
+                   for entry, method, digest in documents}
+        judged = routine_module.judge(loaded, [audited])
+        identity, words = self._request(words, "")
+        record = RunRecord.open(self.output, next_stem(self.output, who),
+                                request_id=identity, text=words, initials=who)
+        return self._routine_report(loaded, judged, record, identity, files=[],
+                                    extra={"audit": audited,
+                                           "read_back": "\n".join(state.render()
+                                                                  for state in readings)})
+
+    def _run_acquiring(self, loaded: Routine, who: str, words: str, conditions: str) -> dict:
+        spec = loaded.acquire
+        assert spec is not None
+        chosen = {"template": spec.template, "knobs": dict(spec.knobs),
+                  "labels": dict(spec.labels)}
+        try:
+            method, _, _ = self._method("", spec.template, spec.knobs, spec.labels)
+        except (MethodError, TemplateError) as exc:
+            raise ToolFailure(f"routine {loaded.name}'s template does not render: "
+                              f"{exc}") from exc
+        self._discover_for(method)
+        stamped = "; ".join(part for part in (spec.conditions, conditions.strip()) if part)
+        plan = (f"routine {loaded.name}: {spec.template} at "
+                f"{dict(spec.knobs) or 'its defaults'}, {spec.replicates} file"
+                f"{'s' if spec.replicates != 1 else ''}; judged by "
+                + "; ".join(f"{item.name} {item.describe()}" for item in loaded.criteria))
+        self._say(f"arming {spec.template}")
+        try:
+            armed = self.call("arm", {"request": words, "initials": who, **chosen,
+                                      "conditions": stamped, "plan": plan})
+        except ToolFailure as exc:
+            return self._unjudged(loaded, who, words, "", f"the arm was refused: {exc}")
+        identity = str(armed["request_id"])
+        if "stem" not in armed:
+            return self._unjudged(loaded, who, words, identity,
+                                  f"the send had not finished within {JOB_WAIT_S:.0f} s "
+                                  f"(job {armed.get('job')})")
+        for caution in armed.get("cold_start") or []:
+            self._say(f"caution: {caution}")
+        self._say(f"acquiring {spec.replicates} file{'s' if spec.replicates != 1 else ''}")
+        try:
+            started = self.call("acquire", {"request": words, "initials": who, **chosen,
+                                            "replicates": spec.replicates,
+                                            "request_id": identity})
+        except ToolFailure as exc:
+            return self._unjudged(loaded, who, words, identity,
+                                  f"the acquisition was refused: {exc}")
+        job = int(started["job"])
+        ended = self._await(self._known(job), ROUTINE_WAIT_S)
+        recorder = self.recorder(job)
+        if recorder is not None:
+            recorder.join(60.0)
+        if ended is None:
+            return self._unjudged(loaded, who, words, identity,
+                                  f"the acquisition had not finished within "
+                                  f"{ROUTINE_WAIT_S / 60:.0f} min; follow job {job} with "
+                                  "progress", job=job)
+        if isinstance(ended, JobFailed):
+            return self._unjudged(loaded, who, words, identity,
+                                  f"the acquisition failed: {ended.message}", job=job)
+        runs = [run for run in (ended.result or []) if isinstance(run, Run)]
+        files = [{"stem": _stem_of(run), "raw_path": run.raw_path,
+                  "summed_path": run.summed_path, "complete": run.complete}
+                 for run in runs]
+        if len(runs) != spec.replicates or not all(run.complete for run in runs):
+            return self._unjudged(loaded, who, words, identity,
+                                  f"{sum(run.complete for run in runs)} of "
+                                  f"{spec.replicates} files were acquired whole",
+                                  job=job, files=files)
+        self._say("judging the files")
+        judged = routine_module.judge(
+            loaded, routine_module.measure(loaded, files),
+            last=routine_module.last_passing(self.output, loaded.name, before=identity))
+        record = RunRecord.open(self.output, files[0]["stem"], request_id=identity,
+                                text=words, initials=who)
+        return self._routine_report(loaded, judged, record, identity, files=files, job=job)
+
+    def _await(self, handle: Handle, timeout: float) -> JobFinished | JobFailed | None:
+        """Wait for a job to end, telling `narrate` each event but the scan counter's."""
+        deadline = time.monotonic() + timeout
+        seen = 0
+        while time.monotonic() < deadline:
+            for entry in self._wait(handle, seen, min(30.0, deadline - time.monotonic())):
+                seen = entry.seq
+                if isinstance(entry.event, (JobFinished, JobFailed)):
+                    return entry.event
+                if not isinstance(entry.event, BatchSeen):
+                    self._say(entry.event.text)
+        return None
+
+    def _unjudged(self, loaded: Routine, who: str, words: str, identity: str, reason: str,
+                  *, job: int | None = None, files: list[dict] | None = None) -> dict:
+        """The report of a routine that never reached its numbers, in a run record of
+        the request's own (begun here if nothing was armed)."""
+        if not identity:
+            identity, words = self._request(words, "")
+        record = RunRecord.open(self.output, next_stem(self.output, who),
+                                request_id=identity, text=words, initials=who)
+        judged = {"verdict": "could not judge", "reason": reason, "criteria": [],
+                  "values": {}}
+        return self._routine_report(loaded, judged, record, identity, files=files or [],
+                                    job=job)
+
+    def _routine_report(self, loaded: Routine, judged: Mapping[str, Any], record: RunRecord,
+                        identity: str, *, files: list[dict], job: int | None = None,
+                        extra: Mapping[str, Any] | None = None) -> dict:
+        """The report `run_routine` answers, and the same added to the run record."""
+        text = routine_module.report_text(loaded, judged)
+        entry = {"routine": loaded.name, "hash": loaded.hash, "path": loaded.path,
+                 "verdict": judged["verdict"], "reason": judged["reason"],
+                 "criteria": judged["criteria"], "values": judged["values"],
+                 "files": [item["stem"] for item in files], "job": job, "text": text,
+                 **dict(extra or {})}
+        record.append("routines", _plain(entry))
+        for line in text.splitlines():
+            self._say(line)
+        return {"routine": loaded.name, "verdict": judged["verdict"],
+                "reason": judged["reason"], "text": text, "request_id": identity,
+                "record": record.path, "job": job, "files": files,
+                "criteria": judged["criteria"], "values": judged["values"],
+                "unattended": loaded.unattended, "hash": loaded.hash[:HASH_DIGITS],
+                **_plain(dict(extra or {}))}
+
     @staticmethod
     def _unfinished(handle: Handle, event: Event | None) -> dict:
         return {"job": handle.id, "done": event is not None,
@@ -1211,6 +1508,15 @@ def _template_entry(rendered: Rendered | None, path: str) -> dict | None:
             "labels": dict(rendered.labels)}
 
 
+def _stem_of(run: Run) -> str:
+    """A run's stem, off its raw file's name, or its summed file's."""
+    stem = os.path.basename(run.raw_path or run.summed_path or "")
+    for suffix in (SUMMED_SUFFIX, RAW_SUFFIX):
+        if stem.endswith(suffix):
+            return stem[: -len(suffix)]
+    return stem
+
+
 def _file_entry(run: Run) -> dict:
     """One finished run as its request's record keeps it, with its file's summary: the
     summed file's, or the raw file's for a run that never folded and so wrote none."""
@@ -1220,11 +1526,7 @@ def _file_entry(run: Run) -> dict:
         numbers: dict[str, Any] = brief(summary.summarize(path)) if path else {}
     except Exception as exc:  # noqa: BLE001 -- the record says why, never raises
         numbers = {"problem": sentence(exc)}
-    stem = os.path.basename(run.raw_path or path or "")
-    for suffix in (RAW_SUFFIX, SUMMED_SUFFIX):
-        if stem.endswith(suffix):
-            stem = stem[: -len(suffix)]
-    return {"stem": stem, "raw": run.raw_path, "summed": run.summed_path,
+    return {"stem": _stem_of(run), "raw": run.raw_path, "summed": run.summed_path,
             "complete": run.complete, "stopped_early": run.stopped_early,
             "replicate": run.replicate, "seconds": round(run.seconds, 2),
             "summary": numbers}

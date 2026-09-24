@@ -15,7 +15,7 @@ the instrument. Every tool is also a subcommand of `clockwork` for a terminal or
 
 ```
 clockwork mcp [--fake] [--library DIR] [--output DIR] [--instrument PATH] [--limits PATH]
-              [--endpoint ADDRESS]
+              [--routines DIR] [--endpoint ADDRESS]
 ```
 
 The server speaks MCP over its standard input and output, so it is started by the MCP client
@@ -32,7 +32,8 @@ where runs are written and where the data tools read by default. Both default to
 states no channel offset, exactly as it does from the window. `--limits` is the instrument's
 [standing limits](instrument-limits.md), by default the `limits.toml` beside the instrument
 document; limits named and not found, or found and not valid, stop the server with the problems
-on standard error.
+on standard error. `--routines` is the directory of the instrument's [routines](routines.md), by
+default the `routines` directory beside the library.
 
 `--fake` needs no daemon. The server holds simulated boxes and a simulated acquisition console of
 its own, starts the console at once, and writes its files to
@@ -98,6 +99,9 @@ relative to the output directory, unless it is absolute.
 | | `summarize_file` | `path`, `frames`, `points`, `texts` | Frames, scans, total counts, total ion current, base peak, calibration, pusher period, saturation, every clockwork stamp, and the request the run served |
 | | `windowed_intensities` | `path`, `windows`, `reference`, `scans`, `frames` | Summed intensity in named m/z windows and each window's ratio to a reference |
 | | `arrival_time_distribution` | `path`, `mz`, `preset`, `frames`, `points` | Intensity against scan in one m/z window, with the peak in scans and in ms |
+| | `ion_events` | `path`, `frames` | Ion arrivals push by push in a file of single pushes: events per push, the fraction of pushes holding any, event heights in stored units and millivolts, widths, and how many reached the card's top code |
+| Routine | `list_routines` | none | Every routine: what it asks, whether it may run unattended, what it acquires or reads, its criteria in words, and whether the standing limits allow its template |
+| | `run_routine` | `name`, `initials`, `conditions` | The routine run through `arm` and `acquire` and judged: `pass`, `fail` or `could not judge` with the reason, each criterion's numbers, the report as text, and the run record it was added to |
 
 A method is named in one of two ways wherever a tool sends or checks one: `method`, a document, or
 `template` with `knobs` and `labels`, a template rendered at those values
@@ -169,6 +173,14 @@ sends a string reaches the owner, and it is the same sentence whichever client a
 `--fake` with no limits nothing is refused but an empty request, and cold-start findings come
 back as cautions, so the whole tool set can be exercised on a machine with no instrument; a
 rehearsal given `--limits` is held to them exactly as the instrument would be.
+
+## Routines
+
+A [routine](routines.md) is a request with no free parameters: a template at fixed knob values,
+or a read-back of the boxes against documents, with criteria that judge the result. `run_routine`
+sends it through the tools above, so everything this document says about requests, the interlock
+and the run record applies to it, and answers once it is judged. Its verdict is `pass`, `fail` or
+`could not judge`, and a routine that could not judge says why, such as no beam or a refused arm.
 
 ## The run record
 

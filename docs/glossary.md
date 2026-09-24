@@ -218,6 +218,10 @@ Three terms carry more than one sense and are given both in one entry: *table*, 
   acquisition settings, the order the boxes are started in, and the map from box name to serial
   port, as one flat TOML document. Its shape is
   [method-file-format.md](method-file-format.md).
+- **Routine.** An experiment an instrument needs run anyway, written down so that nothing is left
+  to choose: a template at fixed knob values, or a read-back of the boxes against documents, with
+  the criteria that judge the result as `pass`, `fail` or `could not judge`. It is sent through
+  the same tools as any request. Its shape is [routines.md](routines.md).
 - **Phase.** Which of a box's three string lists a command belongs to, chosen by how long its
   effect lasts. `setup` persists in the box and is sent on demand; `load` is the table or
   compression table sent once per acquisition; `arm` is what puts the box in table mode.

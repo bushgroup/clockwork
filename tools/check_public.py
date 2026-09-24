@@ -659,6 +659,186 @@ arm = ["SMOD,TBL"]
             owner.join(30)
 
 
+def check_routines() -> None:
+    """Instrument routines over the stand-ins (lab record, task 76).
+
+    A public fixture routine, written here, run by `run_routine` over a `--fake` owner:
+    one template, two files, judged on `ion_events`. The stand-in console's per-push
+    spectrum is three separate one-bin events in fifteen pushes of every sixteen, so the
+    run has exactly 2.8125 events per push, and the fixture holds it to that within 1 %,
+    to the pair's own spread and, the second time, to the last passing run. Then an
+    audit routine that acquires nothing: the one DC bias channel the template declares
+    reads back 0 V before any send and 5 V after, so the audit fails, then passes. Last,
+    limits that do not list the template turn the refused arm into `could not judge`.
+    """
+    import json
+    import tempfile
+
+    from clockwork import envelope, routine, summary
+    from clockwork.mcp import Toolbox, ToolFailure
+    from clockwork.mcp.server import SIMULATED
+    from clockwork.owner import LocalOwner, StartConsole
+
+    template = """\
+template_schema = 1
+renders = 2
+start = [["box1", "TBLSTRT"]]
+reset = [["box1", "SMOD,LOC"], ["box1", "SMOD,TBL"]]
+[labels]
+sample = { required = true, description = "what was sprayed" }
+[metadata]
+name = "routine self-check"
+created = 2026-09-24
+[acquisition]
+frames = 1
+scans = 32
+accumulations = 2
+repetition_mode = "per_repetition"
+keep_raw = true
+file_stem = "routine-self-check"
+enable = { box = "box1", channel = "A" }
+[[boxes]]
+name = "box1"
+port = "COM3"
+setup = ["STBLCLK,EXT"]
+load = ["STBLDAT;0:[A:1,0:A:1:B:1,500:B:0,532:A:0,533:];"]
+arm = ["SMOD,TBL"]
+[boxes.dc_bias]
+16 = 5.0
+"""
+    check = """\
+routine_schema = 1
+[routine]
+name = "fixture-check"
+description = "two stand-in files, judged on their events"
+[acquire]
+template = "fixture.toml"
+labels = { sample = "nothing" }
+replicates = 2
+[[measure]]
+name = "events"
+function = "ion_events"
+file = "raw"
+[[criterion]]
+name = "beam"
+value = "events.events_per_push"
+at_least = 0.5
+unmet = "no beam"
+[[criterion]]
+name = "events per push"
+value = "events.events_per_push"
+reference = "golden"
+golden = 2.8125
+factor = 1.01
+[[criterion]]
+name = "the pair agrees"
+value = "events.events_per_push"
+reference = "pair"
+factor = 1.01
+[[criterion]]
+name = "height, last pass"
+value = "events.height.p50"
+reference = "last-passing"
+factor = 1.05
+[report]
+show = ["events.occupancy"]
+"""
+    audit = """\
+routine_schema = 1
+[routine]
+name = "fixture-audit"
+unattended = true
+[[audit]]
+name = "stack"
+document = "fixture.toml"
+[[criterion]]
+value = "stack.differences"
+at_most = 0
+"""
+    try:
+        loaded = routine.loads(check)
+        check_true("a routine document loads, with its criteria in words",
+                   loaded.criteria[1].describe() == "within 1.01x of 2.8125")
+    except routine.RoutineError as exc:
+        check_true(f"a routine document loads ({exc})", False)
+        return
+    try:
+        routine.loads(check.replace('function = "ion_events"', 'function = "occupancy"'))
+        refused = ""
+    except routine.RoutineError as exc:
+        refused = str(exc)
+    check_true("a routine naming a function that does not exist is refused by name",
+               "'occupancy' is not one of" in refused)
+
+    with tempfile.TemporaryDirectory() as scratch:
+        library = os.path.join(scratch, "library")
+        routines = os.path.join(scratch, "routines")
+        output = os.path.join(scratch, "runs")
+        for folder, name, text in ((library, "fixture.toml", template),
+                                   (routines, "fixture-check.toml", check),
+                                   (routines, "fixture-audit.toml", audit)):
+            os.makedirs(folder, exist_ok=True)
+            with open(os.path.join(folder, name), "w", encoding="utf-8",
+                      newline="\n") as handle:
+                handle.write(text)
+        owner = LocalOwner(fake=True, program="clockwork routine self-check").start()
+        owner.submit(StartConsole())
+        try:
+            toolbox = Toolbox(owner, library=library, output=output, instrument=SIMULATED)
+            check_true("the routine directory defaults to routines beside the library",
+                       toolbox.routines == routines)
+            cold = toolbox.call("run_routine", {"name": "fixture-audit", "initials": "sc"})
+            check_true(
+                "an audit routine before any send finds the declared channel at 0 V and "
+                f"fails ({cold['reason']})",
+                cold["verdict"] == "fail" and cold["audit"]["stack"]["rows"][0]["held"] == 0.0)
+            first = toolbox.call("run_routine", {"name": "fixture-check", "initials": "sc"})
+            check_true(f"run_routine arms, acquires two files and judges them: {first['text']}",
+                       first["verdict"] == "pass" and len(first["files"]) == 2)
+            events = summary.ion_events(first["files"][0]["raw_path"])
+            check_true(
+                "ion_events counts the stand-in's spectrum exactly: 2.8125 events per push, "
+                "15/16 of pushes occupied",
+                events["events_per_push"] == 2.8125 and events["occupancy"] == 15 / 16)
+            second = toolbox.call("run_routine", {"name": "fixture-check", "initials": "sc"})
+            compared = next(entry for entry in second["criteria"]
+                            if entry["reference"] == "last-passing")
+            check_true("the second run is compared with the first, its last pass",
+                       second["verdict"] == "pass" and compared["met"] is True
+                       and compared["reference_request"] == first["request_id"])
+            warm = toolbox.call("run_routine", {"name": "fixture-audit", "initials": "sc"})
+            check_true("after a send the audit finds the stack held, and passes",
+                       warm["verdict"] == "pass")
+            with open(first["record"], encoding="utf-8") as handle:
+                written = json.load(handle)
+            check_true("the routine's report is in its request's run record",
+                       written["routines"][0]["verdict"] == "pass"
+                       and written["request"]["text"].startswith("routine fixture-check"))
+            limited = Toolbox(owner, library=library, output=output, instrument=SIMULATED,
+                              limits=envelope.loads(
+                                  'schema_version = 1\n[allow]\nboxes = ["box1"]\n'
+                                  "[budget]\nmax_runs = 5\nmax_replicates_per_run = 2\n"
+                                  "max_hours = 8\n"))
+            report = limited.call("run_routine", {"name": "fixture-check", "initials": "sc"})
+            check_true(
+                "limits that do not list the template make the routine could-not-judge, "
+                "with the refused arm as the reason",
+                report["verdict"] == "could not judge"
+                and "not in the standing limits" in report["reason"])
+            try:
+                toolbox.call("run_routine", {"name": "no-such-routine", "initials": "sc"})
+                unknown = ""
+            except ToolFailure as exc:
+                unknown = str(exc)
+            check_true("an unknown routine is refused with the names of those there are",
+                       "fixture-audit, fixture-check" in unknown)
+        except Exception as exc:  # noqa: BLE001 -- reporting, not handling
+            check_true(f"routines run over the stand-ins ({exc})", False)
+        finally:
+            owner.shutdown()
+            owner.join(30)
+
+
 def _ended(owner: object, handle: object, timeout: float = 10.0) -> object | None:
     """The `JobFinished` or `JobFailed` of `handle`, polled for; None on a timeout."""
     import time as _time
@@ -697,7 +877,7 @@ LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method",
                 "clockwork.naming", "clockwork.owner", "clockwork.owner.wire",
                 "clockwork.owner.remote", "clockwork.owner.daemon", "clockwork.summary",
                 "clockwork.mcp", "clockwork.mcp.server", "clockwork.mcp.cli",
-                "clockwork.envelope", "clockwork.record")
+                "clockwork.envelope", "clockwork.record", "clockwork.routine")
 QT_PREFIXES = ("PySide6", "PyQt", "pyqtgraph", "shiboken")
 
 # --- opaque lab references ------------------------------------------------------------
@@ -2610,6 +2790,9 @@ def main() -> int:
 
     section("the standing envelope")
     check_envelope()
+
+    section("instrument routines")
+    check_routines()
 
     section("the window")
     # Task 50. Nothing here opens a window: what a clone can establish without a

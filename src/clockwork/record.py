@@ -34,7 +34,7 @@ RECORD_SCHEMA = 1
 RECORD_SUFFIX = ".request.json"
 SOURCES = ("agent", "window")
 
-SECTIONS = ("plans", "arms", "acquisitions", "files", "notes")
+SECTIONS = ("plans", "arms", "acquisitions", "files", "notes", "routines")
 
 _GUARD = threading.Lock()
 """One lock for every record this process writes: they are small and written seldom."""

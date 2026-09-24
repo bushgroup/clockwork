@@ -1,6 +1,6 @@
 """A clockwork UIMF file read back as numbers: what it holds, in windows, against arrival time.
 
-Three functions, each returning a small JSON-serialisable dict, so that a caller that reasons
+Four functions, each returning a small JSON-serialisable dict, so that a caller that reasons
 on numbers -- an agent's tool, a bench script, a test -- never has to hold a frame or plot one.
 mainspring stays the only viewer; this is its reader and nothing else of it (lab record,
 task 72).
@@ -13,6 +13,9 @@ task 72).
                                  scan range, and each window's ratio to a reference window
     atd(path, mz)                intensity against scan in one m/z window, decimated, with
                                  the peak's position in scans and in milliseconds
+    ion_events(path)             ion arrivals push by push in a file of single pushes: how
+                                 many per push, their heights, widths and areas (lab
+                                 record, task 76)
 
 **Only `mainspring.uimf`'s ordinary reader is used**: `UimfFile.frame_numbers`,
 `frame_params`, `global_params` and `read_frame`, the `SparseFrame` and `Calibration` they
@@ -74,6 +77,7 @@ from .acq.uimf import (
 
 __all__ = [
     "DEFAULT_POINTS",
+    "HEIGHT_PERCENTILES",
     "PRESETS",
     "STORED_CEILING",
     "TEXT_LIMIT",
@@ -81,6 +85,7 @@ __all__ = [
     "SummaryError",
     "atd",
     "file_kind",
+    "ion_events",
     "summarize",
     "windowed",
 ]
@@ -812,4 +817,115 @@ def atd(
         "mean_scan": mean_scan,
         "mean_ms": ms(mean_scan) if mean_scan is not None else None,
         "profile": {"scans_per_point": scans_per_point, "values": values},
+    }
+
+
+HEIGHT_PERCENTILES = (5, 25, 50, 75, 95, 99)
+"""The points of the pulse-height distribution `ion_events` reports, besides its maximum."""
+
+
+def ion_events(
+    path: str | os.PathLike[str],
+    *,
+    frames: Iterable[int] | None = None,
+) -> dict:
+    """Ion arrivals push by push: how many there are, how tall and how wide.
+
+    An **event** is a run of consecutive stored bins within one push: one ion, or ions
+    arriving closer together than the pulse width, which zero suppression stores as one
+    stretch of samples above its threshold. This is the per-push view the detection-response
+    experiment exists to give, and it needs single pushes: every raw file clockwork writes,
+    or any file whose frames say `Accumulations` 1. A summed file of more than one push per
+    row is refused with `SummaryError`, since its runs are sums of several pushes' ions.
+
+    The result:
+
+    - `pushes`: how many pushes the frames read hold, `pushes_with_events` how many stored
+      at least one event, `occupancy` their fraction.
+    - `events` and `events_per_push`.
+    - `height`: each event's peak stored value, at `HEIGHT_PERCENTILES` and its maximum,
+      in stored units, and under `height_mv` the same in millivolts above the bottom of the
+      card's window where the file stamps its full scale (`ClockworkFullScale`): one stored
+      unit is the full scale over 65536, 7.63 uV at 0.5 V. A foreign file has no such stamp
+      and no `height_mv`.
+    - `width_bins`: each event's length in bins, its mode, median and 95th percentile.
+    - `area_median`: the median of each event's summed intensity.
+    - `railed_events` and `railed_fraction`: events whose peak is at `STORED_CEILING`, the
+      card's top code, so their height is a lower bound. None on a foreign file.
+    - `counts_per_push`: every stored intensity summed, over the pushes: the total ion
+      current per push.
+
+    Scans are not folded here: a push is a push wherever it sits in a repetition.
+    """
+    opened = _open(path)
+    numbers_read = _select(opened, frames)
+    heights: list[np.ndarray] = []
+    widths: list[np.ndarray] = []
+    areas: list[np.ndarray] = []
+    pushes = 0
+    pushes_with = 0
+    total = 0.0
+    for number in numbers_read:
+        params = opened.uimf.frame_params(number)
+        if opened.kind != "raw" and int(params.accumulations) != 1:
+            raise SummaryError(
+                f"{opened.path}: frame {number} sums {params.accumulations} pushes per row, "
+                "so its runs of bins are several pushes' ions added together; ask the raw "
+                "file, whose rows are single pushes"
+            )
+        frame = opened.uimf.read_frame(number)
+        pushes += int(frame.scans)
+        count = len(frame)
+        if count == 0:
+            continue
+        scan = np.repeat(np.arange(frame.scans), np.diff(frame.scan_start))
+        bins = frame.bin_index.astype(np.int64)
+        values = frame.intensity.astype(np.int64)
+        starts = np.ones(count, dtype=bool)
+        starts[1:] = (bins[1:] != bins[:-1] + 1) | (scan[1:] != scan[:-1])
+        first = np.flatnonzero(starts)
+        widths.append(np.diff(np.append(first, count)))
+        heights.append(np.maximum.reduceat(values, first))
+        areas.append(np.add.reduceat(values, first))
+        pushes_with += int(np.unique(scan[first]).size)
+        total += float(values.sum())
+
+    height = np.concatenate(heights) if heights else np.zeros(0, dtype=np.int64)
+    width = np.concatenate(widths) if widths else np.zeros(0, dtype=np.int64)
+    area = np.concatenate(areas) if areas else np.zeros(0, dtype=np.int64)
+    full_scale = opened.globals_.extra.get("ClockworkFullScale")
+    try:
+        unit_mv = float(full_scale) * 1000.0 / 65536.0 if full_scale is not None else None
+    except ValueError:
+        unit_mv = None
+
+    def spread(values: np.ndarray, scale: float = 1.0) -> dict | None:
+        if values.size == 0:
+            return None
+        found = {f"p{point}": float(np.percentile(values, point)) * scale
+                 for point in HEIGHT_PERCENTILES}
+        found["max"] = float(values.max()) * scale
+        return found
+
+    railed = int((height >= STORED_CEILING).sum()) if opened.kind != "foreign" else None
+    return opened.header() | {
+        "frames": {"count": len(numbers_read), "first": numbers_read[0],
+                   "last": numbers_read[-1]},
+        "pushes": pushes,
+        "pushes_with_events": pushes_with,
+        "occupancy": pushes_with / pushes if pushes else None,
+        "events": int(height.size),
+        "events_per_push": height.size / pushes if pushes else None,
+        "height": spread(height),
+        "height_mv": spread(height, unit_mv) if unit_mv is not None else None,
+        "full_scale_v": float(full_scale) if unit_mv is not None else None,
+        "width_bins": None if width.size == 0 else {
+            "mode": int(np.bincount(width).argmax()),
+            "median": float(np.median(width)),
+            "p95": float(np.percentile(width, 95))},
+        "area_median": float(np.median(area)) if area.size else None,
+        "railed_events": railed,
+        "railed_fraction": (railed / height.size if railed is not None and height.size
+                            else (0.0 if railed is not None else None)),
+        "counts_per_push": total / pushes if pushes else None,
     }

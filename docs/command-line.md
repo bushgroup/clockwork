@@ -3,7 +3,7 @@
 Every tool the [MCP server](mcp-server.md) offers an agent is also a subcommand of `clockwork`,
 so a person at a terminal, a script or a continuous-integration job can drive the instrument with
 no MCP client at all. `clockwork status` answers what the `status` tool answers, `clockwork arm`
-sends what the `arm` tool sends, and so on for all 18 tools. Each verb calls the same function as
+sends what the `arm` tool sends, and so on for all 21 tools. Each verb calls the same function as
 its tool, through the same owner of the hardware, so it is refused in exactly the places the tool
 is refused: the interlock, the [standing limits](instrument-limits.md) and the cold-start check
 all live inside the tools, and a verb cannot reach a box around them.
@@ -40,6 +40,7 @@ From a source checkout, run each verb as `uv run clockwork <verb>`.
 | `--output DIR` | Where runs are written and read back, by default the daemon's `--output` |
 | `--instrument PATH` | The [instrument file](instrument-file-format.md) runs are acquired under |
 | `--limits PATH` | The standing limits, by default the `limits.toml` beside `--instrument` |
+| `--routines DIR` | The instrument's [routines](routines.md), by default the `routines` directory beside the library |
 
 `--instrument` and `--limits` matter to `arm` and `acquire` and are accepted by every verb, so a
 shell alias or a script can pass them once for a whole session. Against the instrument, a verb
@@ -117,6 +118,20 @@ holding exactly the method they render. The same words in `--request` continue t
 within one daemon session, so both commands above serve one request and its files share one
 series; `--request-id` continues a request from an earlier session.
 
+## Running a routine
+
+```
+clockwork routine beam-check --initials AB
+```
+
+`routine` is the one verb with a second name and a bare argument. It is the verb `run-routine`
+with its `--name` given bare, shortened for the command a trainee types by hand. It arms and acquires the
+[routine](routines.md) through the same tools as the commands above, writes each step to
+standard error as it happens, and answers the report as JSON when the routine is judged, with
+its verdict under `verdict` and the report a person reads under `text`. A verdict of `fail` or
+`could not judge` is still exit status 0, since the routine answered; a routine that does not
+exist or does not load is 1.
+
 ## The verbs
 
 Each verb is its tool, described in full by `clockwork <verb> --help` and in the
@@ -151,6 +166,12 @@ Each verb is its tool, described in full by `clockwork <verb> --help` and in the
 - `summarize-file`: what one UIMF file holds, as numbers.
 - `windowed-intensities`: summed intensity in named m/z windows, and ratios to a reference.
 - `arrival-time-distribution`: intensity against scan in one m/z window, with its peak.
+- `ion-events`: ion arrivals push by push in a file of single pushes: how many, how tall, how wide.
+
+**Routines**
+
+- `list-routines`: the instrument's routines, with what each acquires or reads and its criteria in words.
+- `run-routine`: run one routine to its verdict and answer the report; `clockwork routine NAME` for short.
 
 The verbs are generated from the server's tool registry when `clockwork` starts, so a tool added
 to the server is a verb of the command line the same day.

@@ -55,6 +55,26 @@ intercept = 0.07690495
 measured = 2026-09-09
 """
 
+# A routine for the `routine` verb: the template above once, judged on the stand-in's
+# events, whose rate is exactly 2.8125 a push.
+ROUTINE = f"""\
+routine_schema = 1
+[routine]
+name = "shell-check"
+description = "the template once from a shell"
+[acquire]
+template = "line-b.toml"
+labels = {{ sample = "{LABELS['sample']}" }}
+[[measure]]
+name = "events"
+function = "ion_events"
+file = "raw"
+[[criterion]]
+name = "events"
+value = "events.events_per_push"
+at_least = 2.8
+"""
+
 
 @pytest.fixture
 def library(tmp_path):
@@ -243,7 +263,22 @@ def test_a_request_from_the_shell_one_verb_per_process(shell, library, tmp_path)
     assert set(windowed["windows"]) >= {"low", "high"}
     assert "peak" in shell.json("arrival-time-distribution", "--path", summed,
                                 "--mz", "[100,1500]")
+    events = shell.json("ion-events", "--path", run["raw"]["name"])
+    assert events["file"] == "raw" and events["events_per_push"] == 3 * 15 / 16
     assert shell.json("stop")["stopping"] is False
+
+    routines = tmp_path / "routines"
+    routines.mkdir()
+    (routines / "shell-check.toml").write_text(ROUTINE, encoding="utf-8")
+    [listed] = shell.json("list-routines")["routines"]
+    assert listed["name"] == "shell-check" and listed["acquires"]["replicates"] == 1
+    code, out, err = shell("routine", "shell-check", "--initials", "zz")
+    assert code == 0, err
+    report = json.loads(out)
+    assert report["verdict"] == "pass" and report["text"].startswith("shell-check: pass")
+    assert "arming line-b.toml" in err and err.rstrip().endswith("met")
+    code, out, err = shell("run-routine", "--name", "no-such", "--initials", "zz")
+    assert code == 1 and "the routines are shell-check" in err
 
     with open(os.path.join(output, "mcp-calls.log"), encoding="utf-8") as handle:
         logged = [json.loads(line) for line in handle]

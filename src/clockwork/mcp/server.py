@@ -58,7 +58,10 @@ defaults; say which defaults were used when reporting back. The instrument's sta
 limits bound which templates may run and how far each knob may turn: list_templates
 shows them, and a refusal from them is final for this session, not something to work
 around. Report every cold_start caution arm and acquire answer. Use note to record why
-you chose the next acquisition, and what you told the person. On the real instrument
+you chose the next acquisition, and what you told the person. The instrument's routines
+(list_routines) are experiments with nothing left to choose, such as checking the beam:
+run_routine runs one through arm and acquire to a verdict, pass, fail or could not judge,
+and its text is the report to give the person. On the real instrument
 the person owns the sample and the source: confirm with them that the sample is
 spraying before acquiring. When status says fake is true, nothing is real: the boxes
 and the digitizer are simulated."""
@@ -80,10 +83,12 @@ def server_for(toolbox: Toolbox) -> object:
 
 def build_server(owner: object, library: str = "", output: str = "", *,
                  instrument: Instrument = UNCALIBRATED, instrument_path: str = "",
-                 log: AuditLog | None = None, limits: Limits | None = None) -> object:
+                 log: AuditLog | None = None, limits: Limits | None = None,
+                 routines: str = "") -> object:
     """An `MCPServer` over `owner`, listing `library` and writing into `output`."""
     return server_for(Toolbox(owner, library=library, output=output, instrument=instrument,
-                              instrument_path=instrument_path, log=log, limits=limits))
+                              instrument_path=instrument_path, log=log, limits=limits,
+                              routines=routines))
 
 
 def _adapter(toolbox: Toolbox, entry: Tool) -> Callable[..., dict]:
@@ -147,7 +152,7 @@ def instrument_and_limits(*, fake: bool, instrument_path: str = "",
 
 
 def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: str = "",
-        instrument_path: str = "", limits_path: str = "",
+        instrument_path: str = "", limits_path: str = "", routines: str = "",
         stream: TextIO | None = None) -> int:
     """Serve the tools on stdio until the client closes. Returns the exit code.
 
@@ -157,6 +162,7 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
     not answer is one sentence on stderr and exit code 1. `library` and `output`
     default to the daemon's own (`hello`), or under `fake` to the lab's golden
     experiments where a lab checkout is beside this one and to `fake_output()`.
+    `routines` defaults to the `routines` directory beside the library.
 
     `limits_path` is the instrument's standing limits (`clockwork.envelope`), by default
     the `limits.toml` beside `instrument_path` if there is one. Limits named and not
@@ -200,7 +206,7 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
     try:
         build_server(owner, library, output, instrument=instrument,
                      instrument_path=instrument_path, log=AuditLog.beside(output, via="mcp"),
-                     limits=limits).run("stdio")  # type: ignore[attr-defined]
+                     limits=limits, routines=routines).run("stdio")  # type: ignore[attr-defined]
     finally:
         if fake:
             owner.shutdown("the MCP client closed")  # type: ignore[attr-defined]

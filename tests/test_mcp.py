@@ -173,7 +173,8 @@ def test_every_tool_is_registered_with_its_arguments_and_description(fake_owner,
 
     listed = asyncio.run(body())
     assert list(listed) == [entry.name for entry in TOOLS]
-    assert {entry.group for entry in TOOLS} == {"method", "hardware", "acquisition", "data"}
+    assert {entry.group for entry in TOOLS} == {"method", "hardware", "acquisition", "data",
+                                                "routine"}
     for entry in TOOLS:
         assert listed[entry.name].description.strip(), entry.name
         assert (set(listed[entry.name].input_schema.get("properties", {}))
