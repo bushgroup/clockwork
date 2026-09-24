@@ -11,7 +11,8 @@ LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method",
                 "clockwork.method.template", "clockwork.instrument", "clockwork.transcript",
                 "clockwork.naming", "clockwork.owner", "clockwork.owner.wire",
                 "clockwork.owner.remote", "clockwork.owner.daemon", "clockwork.summary",
-                "clockwork.mcp", "clockwork.mcp.server")
+                "clockwork.mcp", "clockwork.mcp.server", "clockwork.envelope",
+                "clockwork.record")
 
 PROBE = """
 import importlib, sys

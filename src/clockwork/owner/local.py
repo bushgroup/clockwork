@@ -143,6 +143,12 @@ def fake_rack(method: Method) -> dict[str, Box]:
     bias bank and the two RF heads AUKLET has instead, so a method that declares them
     rehearses its setters too. Both readings are the bench script's (lab record,
     task 28).
+
+    **An ARB stand-in has no DC bias bank and answers two RF heads at 0 % drive**,
+    which is what the instrument's ARB boxes answer with no RF board fitted
+    (`GCHAN,DCB` 0, `GCHAN,RF` 2, lab record, task 71). A stand-in with sixteen
+    channels at 0 V would be refused by the cold-start check on every rehearsal for
+    settings no real ARB box has.
     """
     rack: dict[str, Box] = {}
     for entry in method.boxes:
@@ -151,7 +157,8 @@ def fake_rack(method: Method) -> dict[str, Box]:
             for command in tuple(entry.setup) + tuple(entry.load)
         ) else 0
         rack[entry.name] = Box(
-            transport=FakeBox(arb_modules=arb, rf_channels=0 if arb else 2),
+            transport=FakeBox(arb_modules=arb, rf_channels=2,
+                              dcb_channels=0 if arb else 16),
             name=entry.name,
         )
     return rack

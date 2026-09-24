@@ -180,7 +180,9 @@ __all__ = [
     "DECLARED_ELSEWHERE",
     "declared_differences",
     "enable_witness",
+    "LeftAsFound",
     "left_as_found",
+    "left_as_found_settings",
     "refusals",
     "run_acquisition",
     "send_phases",
@@ -1424,29 +1426,57 @@ def left_as_found(box: BoxMethod, state: BoxState) -> list[str]:
     reach the window as `Warned` and the classification a window does on them is the
     same substring match as the rest (`clockwork.app.runlog`).
     """
+    return [entry.text for entry in left_as_found_settings(box, state)]
+
+
+@dataclass(frozen=True, slots=True)
+class LeftAsFound:
+    """One ARB module setting a method leaves as the box holds it, as data.
+
+    `left_as_found`'s lines are these rendered; the standing envelope's cold-start
+    check reads the getter as well, because which setting it is decides whether it
+    refuses or cautions (lab record, task 71).
+    """
+
+    box: str
+    getter: str
+    holding: tuple[tuple[int, str], ...]
+    """Each module the method does not set this on, and what that module holds."""
+    elsewhere: tuple[int, ...] = ()
+    """The modules of the same box the method does set it on."""
+
+    @property
+    def text(self) -> str:
+        holding = ", ".join(f"{module}: {value}" for module, value in self.holding)
+        line = (f"{self.box} {self.getter[1:]} is left as found on "
+                f"module{'s' if len(self.holding) > 1 else ''} {holding}")
+        if self.elsewhere:
+            line += (f"{DECLARED_ELSEWHERE}"
+                     f"{'s' if len(self.elsewhere) > 1 else ''} "
+                     + ", ".join(str(module) for module in self.elsewhere))
+        return line
+
+
+def left_as_found_settings(box: BoxMethod, state: BoxState) -> list[LeftAsFound]:
+    """`left_as_found`, one `LeftAsFound` per setting rather than one line."""
     modules = state.modules
     if not modules:
         return []
     covered = declared_settings(
         command for command in tuple(box.setup) + declared_commands(box)
         if not is_comment(command))
-    lines: list[str] = []
+    found: list[LeftAsFound] = []
     for getter in ARB_MODULE_GETTERS:
         named = covered.get(getter, {})
         loose = [module for module in modules
                  if module not in named and getter in state.module(module)]
         if not loose:
             continue
-        holding = ", ".join(f"{module}: {state.module(module)[getter]}" for module in loose)
-        line = (f"{box.name} {getter[1:]} is left as found on "
-                f"module{'s' if len(loose) > 1 else ''} {holding}")
-        elsewhere = sorted(module for module in named if module in modules)
-        if elsewhere:
-            line += (f"{DECLARED_ELSEWHERE}"
-                     f"{'s' if len(elsewhere) > 1 else ''} "
-                     + ", ".join(str(module) for module in elsewhere))
-        lines.append(line)
-    return lines
+        found.append(LeftAsFound(
+            box=box.name, getter=getter,
+            holding=tuple((module, state.module(module)[getter]) for module in loose),
+            elsewhere=tuple(sorted(module for module in named if module in modules))))
+    return found
 
 
 def declared_differences(box: BoxMethod, state: BoxState) -> list[str]:

@@ -332,7 +332,8 @@ def check_mcp() -> None:
     tool list is the registry, a template is rendered, the boxes are armed for a
     request, one run is acquired and followed to its end, and the file it wrote names
     the request. Then the interlock: an owner that is not `--fake` -- built with a
-    stand-in scan, so nothing is opened -- is refused `arm` before any job exists.
+    stand-in scan, so nothing is opened -- and no standing limits is refused `arm`
+    before any job exists (lab record, task 71).
     """
     import asyncio
     import datetime as dt
@@ -342,7 +343,7 @@ def check_mcp() -> None:
     from mcp import Client
 
     from clockwork import summary
-    from clockwork.mcp import NOT_YET, TOOLS, Toolbox, ToolFailure
+    from clockwork.mcp import NO_LIMITS, TOOLS, Toolbox, ToolFailure
     from clockwork.mcp.server import SIMULATED, build_server
     from clockwork.mips import Discovery
     from clockwork.owner import LocalOwner, StartConsole
@@ -463,12 +464,168 @@ arm = ["SMOD,TBL"]
         except ToolFailure as exc:
             refusal = str(exc)
         check_true(
-            "against an owner that is not --fake, arm is refused by the interlock before "
-            "any job is submitted",
-            refusal == NOT_YET and real.status().queued == ()
+            "against an owner that is not --fake and no standing limits, arm is refused by "
+            "the interlock before any job is submitted",
+            refusal == NO_LIMITS and real.status().queued == ()
             and real.status().running is None)
         real.shutdown()
         real.serve()
+
+
+def check_envelope() -> None:
+    """The standing envelope and the cold-start check (lab record, task 71).
+
+    A limits document loaded and held against a template: a render inside it passes,
+    and each refusal is its own sentence -- a knob outside the range, a fixed knob
+    moved, a box not allowed, the budget's next acquisition, a hand-written method
+    against the instrument. Then the cold-start check over stand-in boxes read back
+    with getters, as a send reads them: the one DC bias channel the method leaves
+    undeclared is a refusal, and an ARB stand-in's two RF heads at 0 % drive are not.
+    Last, the tools over a `--fake` owner given the limits refuse that method's `arm`
+    before any send, and begin the run record of the one they accept.
+    """
+    import dataclasses
+    import json
+    import tempfile
+
+    from clockwork import envelope
+    from clockwork.envelope import HAND_WRITTEN, Ledger, check, cold_start, judge
+    from clockwork.mcp import Toolbox, ToolFailure
+    from clockwork.mcp.server import SIMULATED
+    from clockwork.method import template as template_module
+    from clockwork.mips import Box, FakeBox, read_state
+    from clockwork.owner import LocalOwner, StartConsole
+
+    fifteen = "".join(f"{channel} = 0.0\n" for channel in range(1, 15))
+    template_text = """\
+template_schema = 1
+renders = 2
+start = [["box1", "TBLSTRT"]]
+reset = [["box1", "SMOD,LOC"], ["box1", "SMOD,TBL"]]
+[knobs]
+b_ticks = { default = 500, min = 100, max = 520, unit = "ticks", description = "line B" }
+level_v = { default = 5.0, min = 0.0, max = 20.0, unit = "V", description = "a level" }
+[metadata]
+name = "envelope self-check"
+created = 2026-09-24
+[acquisition]
+frames = 1
+scans = 32
+accumulations = 2
+repetition_mode = "per_repetition"
+keep_raw = true
+file_stem = "envelope-self-check"
+enable = { box = "box1", channel = "A" }
+[[boxes]]
+name = "box1"
+port = "COM3"
+setup = ["STBLCLK,EXT", "SDCB,16,{level_v}"]
+load = ["STBLDAT;0:[A:1,0:A:1:B:1,{b_ticks}:B:0,532:A:0,533:];"]
+arm = ["SMOD,TBL"]
+[boxes.dc_bias]
+""" + fifteen
+    full_text = template_text.replace('"SDCB,16,{level_v}"', '"SDCB,15,0", "SDCB,16,{level_v}"')
+    loaded = template_module.loads_template(template_text)
+    full = template_module.loads_template(full_text)
+
+    def entry(key: str, digest: str) -> str:
+        return (f'[templates.{key}]\nhash = "{digest[:12]}"\n'
+                f"[templates.{key}.knobs]\nb_ticks = {{ min = 200, max = 450 }}\n"
+                f"[templates.{key}.fixed]\nlevel_v = 5.0\n")
+
+    head = ('schema_version = 1\n[allow]\nboxes = ["box1"]\n[budget]\nmax_runs = 1\n'
+            "max_replicates_per_run = 2\nmax_hours = 8\n")
+    limits = envelope.loads(head + entry("fifteen", loaded.hash))
+    check_true("a limits document loads and applies to the template it names",
+               limits.against([loaded]) == [])
+
+    def refused(**knobs: float) -> list[str]:
+        rendered = template_module.render(loaded, knobs, {})
+        return check(rendered.method, rendered, limits, Ledger(), real=True)
+
+    check_true("a render inside the standing limits is refused nothing",
+               refused(b_ticks=300) == [])
+    outside = refused(b_ticks=500)
+    check_true(f"a knob outside the limits is refused ({outside[:1]})",
+               len(outside) == 1 and "outside the standing limits" in outside[0])
+    moved = refused(b_ticks=300, level_v=6.0)
+    check_true("a fixed knob moved is refused",
+               len(moved) == 1 and "is fixed at 5.0 V" in moved[0])
+    rendered = template_module.render(loaded, {"b_ticks": 300}, {})
+    renamed = dataclasses.replace(rendered.method, boxes=(dataclasses.replace(
+        rendered.method.boxes[0], name="box9"),))
+    boxed = check(renamed, rendered, limits, Ledger(), real=True)
+    check_true("a box the limits do not allow is refused",
+               any("do not allow box9" in line for line in boxed))
+    spent = check(rendered.method, rendered, limits, Ledger(runs=1), real=True)
+    check_true("the budget refuses the acquisition after its last",
+               len(spent) == 1 and "made its 1 acquisitions" in spent[0])
+    check_true("a hand-written method is refused against the instrument, not in a "
+               "rehearsal",
+               check(rendered.method, None, limits, Ledger(), real=True) == [HAND_WRITTEN]
+               and check(rendered.method, None, limits, Ledger(), real=False) == [])
+
+    sequencer = Box(transport=FakeBox(rf_channels=2), name="box1")
+    arb = Box(transport=FakeBox(arb_modules=4, rf_channels=2, dcb_channels=0), name="box2")
+    try:
+        states = [read_state(sequencer), read_state(arb)]
+    finally:
+        sequencer.close()
+        arb.close()
+    refusals, _ = judge(cold_start(rendered.method, states), "refuse")
+    check_true(
+        "the cold-start check refuses the one DC bias channel the method leaves "
+        f"undeclared ({refusals})",
+        len(refusals) == 1 and "holds 15: 0.00 V" in refusals[0])
+    arb_only = dataclasses.replace(rendered.method, boxes=(dataclasses.replace(
+        rendered.method.boxes[0], name="box2", setup=(), dc_bias=()),))
+    check_true("an ARB box's RF heads at 0 % drive and its missing DC bias bank are not "
+               "findings",
+               not any(finding.setting in ("rf", "dc_bias")
+                       for finding in cold_start(arb_only, states)))
+
+    with tempfile.TemporaryDirectory() as scratch:
+        library = os.path.join(scratch, "library")
+        output = os.path.join(scratch, "runs")
+        os.makedirs(library)
+        for name, text in (("fifteen.toml", template_text), ("sixteen.toml", full_text)):
+            with open(os.path.join(library, name), "w", encoding="utf-8",
+                      newline="\n") as handle:
+                handle.write(text)
+        both = envelope.loads(head + entry("fifteen", loaded.hash)
+                              + entry("sixteen", full.hash))
+        owner = LocalOwner(fake=True, program="clockwork envelope self-check").start()
+        owner.submit(StartConsole())
+        try:
+            toolbox = Toolbox(owner, library=library, output=output, instrument=SIMULATED,
+                              limits=both)
+            asked = {"request": "one self-check run", "initials": "sc",
+                     "knobs": {"b_ticks": 300}}
+            toolbox.call("discover_boxes", {"template": "fifteen.toml"})
+            try:
+                toolbox.call("arm", {**asked, "template": "fifteen.toml"})
+                cold = ""
+            except ToolFailure as exc:
+                cold = str(exc)
+            check_true(
+                "through the tools, arm refuses the undeclared channel before any send",
+                "holds 15: 0.00 V" in cold and "Nothing was sent" in cold
+                and toolbox.call("status")["last_armed"] is None)
+            armed = toolbox.call("arm", {**asked, "template": "sixteen.toml",
+                                         "plan": "arm once to prove the record"})
+            with open(armed["record"], encoding="utf-8") as handle:
+                written = json.load(handle)
+            check_true(
+                "the arm it accepts begins the request's run record beside the files",
+                written["request"]["text"] == asked["request"]
+                and written["plans"][0]["text"] == "arm once to prove the record"
+                and written["arms"][0]["template"]["knobs"]["b_ticks"] == 300)
+        except Exception as exc:  # noqa: BLE001 -- reporting, not handling
+            check_true(f"the tools apply the standing envelope over the stand-ins ({exc})",
+                       False)
+        finally:
+            owner.shutdown()
+            owner.join(30)
 
 
 def _ended(owner: object, handle: object, timeout: float = 10.0) -> object | None:
@@ -508,7 +665,8 @@ LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method",
                 "clockwork.method.template", "clockwork.instrument", "clockwork.transcript",
                 "clockwork.naming", "clockwork.owner", "clockwork.owner.wire",
                 "clockwork.owner.remote", "clockwork.owner.daemon", "clockwork.summary",
-                "clockwork.mcp", "clockwork.mcp.server")
+                "clockwork.mcp", "clockwork.mcp.server", "clockwork.envelope",
+                "clockwork.record")
 QT_PREFIXES = ("PySide6", "PyQt", "pyqtgraph", "shiboken")
 
 # --- opaque lab references ------------------------------------------------------------
@@ -2418,6 +2576,9 @@ def main() -> int:
 
     section("the MCP server")
     check_mcp()
+
+    section("the standing envelope")
+    check_envelope()
 
     section("the window")
     # Task 50. Nothing here opens a window: what a clone can establish without a

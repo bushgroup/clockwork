@@ -91,6 +91,9 @@ record behind it.
   the boxes and the console with no window, and the loopback protocol its clients speak.
 - [`docs/mcp-server.md`](docs/mcp-server.md): `clockwork mcp`, the tools an agent such as a
   Claude Code session uses to turn a person's request into an experiment.
+- [`docs/instrument-limits.md`](docs/instrument-limits.md): the standing limits beside the
+  instrument file that bound what an agent may send, the cold-start check against what the boxes
+  hold, and the run record each request leaves beside its files.
 - [`docs/method-file-format.md`](docs/method-file-format.md): the flat TOML method a trainee
   loads, and the stamp that traces an acquisition back to it.
 - [`docs/template-file-format.md`](docs/template-file-format.md): a method with holes in its

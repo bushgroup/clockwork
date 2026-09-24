@@ -7,7 +7,8 @@ is a line or two over a function the package already has, through the owner prot
 so the agent drives exactly what the window drives (lab record, task 69).
 
     tools.py   the registry and `Toolbox`, the tools themselves; no SDK import
-    guard.py   the interlock every send passes before it is submitted
+    guard.py   the interlock every send passes before it is submitted, over
+               `clockwork.envelope`
     audit.py   one JSON line per call, beside the files
     server.py  the tools registered with the MCP SDK, and `clockwork mcp`
 
@@ -17,13 +18,15 @@ window.
 
 from __future__ import annotations
 
+from ..envelope import HAND_WRITTEN, NO_LIMITS
 from .audit import LOG_NAME, AuditLog
-from .guard import NOT_YET, guard_acquisition
+from .guard import guard_acquisition
 from .tools import TOOLS, Tool, Toolbox, ToolFailure
 
 __all__ = [
+    "HAND_WRITTEN",
     "LOG_NAME",
-    "NOT_YET",
+    "NO_LIMITS",
     "TOOLS",
     "AuditLog",
     "Tool",

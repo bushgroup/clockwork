@@ -1,9 +1,10 @@
 """The MCP server: the tool registry, a whole request through the SDK's own client, the
-interlock, the audit log, the tools over a daemon, and `clockwork mcp` as a process.
+interlock, the standing envelope and the run record, the audit log, the tools over a
+daemon, and `clockwork mcp` as a process.
 
 Every owner here is `--fake` except the one the interlock is tested against, which is
 built with a stand-in scan and never discovers, sends or starts anything: the refusal
-is pinned before a job exists (lab record, task 69).
+is pinned before a job exists (lab record, tasks 69 and 71).
 """
 
 from __future__ import annotations
@@ -19,9 +20,17 @@ import time
 import pytest
 from mcp import Client, StdioServerParameters
 
+from clockwork import envelope
 from clockwork import method as method_module
 from clockwork.acq.uimf import SUMMED_SUFFIX
-from clockwork.mcp import NOT_YET, TOOLS, Toolbox, ToolFailure, guard_acquisition
+from clockwork.mcp import (
+    HAND_WRITTEN,
+    NO_LIMITS,
+    TOOLS,
+    Toolbox,
+    ToolFailure,
+    guard_acquisition,
+)
 from clockwork.mcp.audit import AuditLog, hashed
 from clockwork.mcp.server import SIMULATED, build_server
 from clockwork.method import template as template_module
@@ -126,6 +135,31 @@ async def follow(client: Client, job: int, timeout: float = 120.0) -> dict:
 def audit_lines(output: str) -> list[dict]:
     with open(os.path.join(output, "mcp-calls.log"), encoding="utf-8") as handle:
         return [json.loads(line) for line in handle]
+
+
+def limits_text(library: str, *, templates: tuple[str, ...] = ("line-b.toml",),
+                cold_start: str = "caution", max_runs: int = 1) -> str:
+    """Limits over the library's templates: `b_ticks` 200 to 450, box1 only."""
+    entries = []
+    for name in templates:
+        loaded = template_module.load_template(os.path.join(library, name))
+        key = name.removesuffix(".toml")
+        entries.append(f'[templates.{key}]\nhash = "{loaded.hash[:12]}"\n'
+                       f"[templates.{key}.knobs]\nb_ticks = {{ min = 200, max = 450 }}\n")
+    return (f'schema_version = 1\ncold_start = "{cold_start}"\n[allow]\nboxes = ["box1"]\n'
+            f"[budget]\nmax_runs = {max_runs}\nmax_replicates_per_run = 2\nmax_hours = 8\n"
+            + "".join(entries))
+
+
+def followed(toolbox: Toolbox, job: int, timeout: float = 120.0) -> dict:
+    """`progress` until the job is done, straight through the toolbox."""
+    answer, last = {"done": False}, 0
+    deadline = time.monotonic() + timeout
+    while not answer["done"]:
+        assert time.monotonic() < deadline, f"job {job} did not finish"
+        answer = toolbox.call("progress", {"job": job, "after": last, "wait_s": 5})
+        last = answer["last"]
+    return answer
 
 
 # --- the registry -------------------------------------------------------------------
@@ -276,19 +310,29 @@ def test_the_interlock_refuses_a_real_owner_and_an_empty_request(fake_owner, lib
         return Discovery()
 
     real = LocalOwner(program="clockwork mcp interlock test", discover=no_scan)
-    assert guard_acquisition(real, None, REQUEST) == [NOT_YET]
+    assert guard_acquisition(real, None, REQUEST) == [NO_LIMITS]
     assert guard_acquisition(fake_owner, None, REQUEST) == []
     assert len(guard_acquisition(fake_owner, None, "  ")) == 1
 
     toolbox = Toolbox(real, library=library, output=str(tmp_path))
     chosen = {"template": "line-b.toml", "labels": LABELS, "initials": "zz"}
     for name in ("arm", "acquire"):
-        with pytest.raises(ToolFailure, match="does not yet let an agent send"):
+        with pytest.raises(ToolFailure, match="no standing limits are in force"):
             toolbox.call(name, {"request": REQUEST, **chosen})
-    assert toolbox.call("status", {})["sends_refused"] == NOT_YET
-    assert real.status().queued == () and real.status().running is None
+    assert toolbox.call("status", {})["sends_refused"] == NO_LIMITS
     assert toolbox.call("validate_method", {"template": "line-b.toml",
                                             "labels": LABELS})["ok"]
+
+    limited = Toolbox(real, library=library, output=str(tmp_path),
+                      limits=envelope.loads(limits_text(library)))
+    with pytest.raises(ToolFailure) as caught:
+        limited.call("arm", {"request": REQUEST, "initials": "zz",
+                             "method": "line-b-default.toml"})
+    assert str(caught.value) == HAND_WRITTEN
+    with pytest.raises(ToolFailure, match="outside the standing limits"):
+        limited.call("arm", {"request": REQUEST, **chosen, "knobs": {"b_ticks": 500}})
+    assert limited.call("status", {})["sends_refused"] is None
+    assert real.status().queued == () and real.status().running is None
     real.shutdown()
     real.serve()
 
@@ -297,6 +341,101 @@ def test_the_interlock_refuses_a_real_owner_and_an_empty_request(fake_owner, lib
         fake.call("arm", {"request": "", **chosen})
     with pytest.raises(ToolFailure, match="initials"):
         fake.call("arm", {"request": REQUEST, **{**chosen, "initials": "-"}})
+
+
+def test_inside_the_standing_limits_a_request_proceeds_until_the_budget_ends_it(
+        fake_owner, library, tmp_path):
+    output = str(tmp_path / "runs")
+    toolbox = Toolbox(fake_owner, library=library, output=output, instrument=SIMULATED,
+                      limits=envelope.loads(limits_text(library)))
+    chosen = {"template": "line-b.toml", "knobs": {"b_ticks": 400}, "labels": LABELS}
+    asked = {"request": REQUEST, "initials": "zz", **chosen}
+
+    [listed] = toolbox.call("list_templates")["templates"]
+    assert listed["limits"]["allowed"]
+    assert listed["limits"]["knobs"] == {"b_ticks": {"min": 200, "max": 450}}
+    outside = toolbox.call("render_template", {**chosen, "knobs": {"b_ticks": 500}})
+    assert not outside["ok"] and outside["knobs"] == {"b_ticks": 500}
+    assert "outside the standing limits" in outside["limits"][0]
+
+    toolbox.call("discover_boxes", chosen)
+    with pytest.raises(ToolFailure, match="outside the standing limits"):
+        toolbox.call("arm", {**asked, "knobs": {"b_ticks": 500}})
+    assert toolbox.call("status")["last_armed"] is None
+
+    armed = toolbox.call("arm", {**asked, "plan": "one run at 400 ticks, then report"})
+    assert any("box1 DC bias channels are not declared" in line
+               for line in armed["cold_start"]), armed["cold_start"]
+    with pytest.raises(ToolFailure, match="3 replicates is more than the 2"):
+        toolbox.call("acquire", {**asked, "replicates": 3})
+    started = toolbox.call("acquire", asked)
+    assert started["record"] == armed["record"]
+    assert followed(toolbox, started["job"])["runs"][0]["complete"]
+
+    for name in ("acquire", "arm"):
+        with pytest.raises(ToolFailure, match="made its 1 acquisitions"):
+            toolbox.call(name, asked)
+    status = toolbox.call("status")
+    assert status["budget"]["acquisitions_made"] == 1
+    assert "made its 1 acquisitions" in status["sends_refused"]
+
+    noted = toolbox.call("note", {"request_id": armed["request_id"],
+                                  "text": "the budget ended the request after one run"})
+    assert noted["record"] == armed["record"] and noted["notes"] == 1
+    with pytest.raises(ToolFailure, match="has no run record"):
+        toolbox.call("note", {"request_id": "no-such-request", "text": "hello"})
+    deadline = time.monotonic() + 30
+    while True:
+        with open(armed["record"], encoding="utf-8") as handle:
+            written = json.load(handle)
+        if written["files"] or time.monotonic() > deadline:
+            break
+        time.sleep(0.1)
+    assert written["request"]["id"] == armed["request_id"]
+    assert written["request"]["text"] == REQUEST
+    assert [plan["text"] for plan in written["plans"]] == ["one run at 400 ticks, then report"]
+    [arming] = written["arms"]
+    assert arming["template"]["knobs"] == {"b_ticks": 400} and arming["finished"]
+    assert written["acquisitions"][0]["replicates"] == 1
+    [made] = written["files"]
+    assert made["stem"] == armed["stem"] and made["complete"]
+    assert made["summary"]["frames"] >= 1
+    assert written["notes"][0]["text"].startswith("the budget ended")
+    [run] = toolbox.call("list_files")["runs"]
+    assert run["record"] == os.path.basename(armed["record"])
+    assert [line["session"] for line in audit_lines(output)
+            if line["tool"] == "acquire"] == [status["budget"]["daemon_session"]] * 3
+
+
+def test_the_cold_start_check_refuses_an_undeclared_dc_bias_before_anything_is_sent(
+        fake_owner, tmp_path):
+    folder = tmp_path / "library"
+    folder.mkdir()
+    fifteen = "".join(f"{channel} = 0.0\n" for channel in range(1, 16))
+    (folder / "fifteen.toml").write_text(
+        TEMPLATE + "\n[boxes.dc_bias]\n" + fifteen, encoding="utf-8")
+    (folder / "sixteen.toml").write_text(
+        TEMPLATE + "\n[boxes.dc_bias]\n" + fifteen + "16 = 0.0\n", encoding="utf-8")
+    library = str(folder)
+    toolbox = Toolbox(fake_owner, library=library, output=str(tmp_path / "runs"),
+                      instrument=SIMULATED, limits=envelope.loads(limits_text(
+                          library, templates=("fifteen.toml", "sixteen.toml"),
+                          cold_start="refuse")))
+    asked = {"request": REQUEST, "initials": "zz", "knobs": {"b_ticks": 400},
+             "labels": LABELS}
+    toolbox.call("discover_boxes", {"template": "fifteen.toml", "labels": LABELS})
+    with pytest.raises(ToolFailure) as caught:
+        toolbox.call("arm", {**asked, "template": "fifteen.toml"})
+    assert "box1 DC bias channel is not declared by the method and holds 16: 0.00 V" \
+        in str(caught.value)
+    assert "Nothing was sent" in str(caught.value)
+    assert toolbox.call("status")["last_armed"] is None
+    assert not os.path.isdir(tmp_path / "runs") or not any(
+        name.endswith(".request.json") for name in os.listdir(tmp_path / "runs"))
+
+    armed = toolbox.call("arm", {**asked, "template": "sixteen.toml"})
+    assert armed["cold_start"] == []
+    assert toolbox.call("status")["last_armed"]["stem"] == armed["stem"]
 
 
 def test_an_owner_refuses_a_render_that_does_not_reproduce_the_method(fake_owner, library,

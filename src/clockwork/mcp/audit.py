@@ -2,9 +2,11 @@
 
 `<output>/mcp-calls.log`, appended, UTF-8, LF. Each line is one call: when it ended, the
 tool, its arguments, the request it served, a summary of what it answered, how long it
-took, and the error sentence if it failed. A person who was away reads what was done
-from it, and `list_files` reads the words of each request back from it, since a file
-stamps only the request's id (lab record, task 69).
+took, the error sentence if it failed, and the daemon session it was made in. A person
+who was away reads what was done from it, `list_files` reads the words of each request
+back from it, since a file stamps only the request's id (lab record, task 69), and the
+standing envelope's budget is counted from it: the accepted `acquire` lines of one
+daemon session (lab record, task 71).
 
 **A long text argument is hashed, never quoted.** A method's or a template's text is
 kilobytes, and what an auditor needs is whether two calls were given the same one; the
@@ -66,6 +68,8 @@ class AuditLog:
 
     def __init__(self, path: str) -> None:
         self.path = path
+        self.session = ""
+        """The daemon session every line is written under; set by the toolbox."""
         self._guard = threading.Lock()
 
     @classmethod
@@ -85,12 +89,29 @@ class AuditLog:
             "result": summarised(result) if error is None else None,
             "error": error,
             "seconds": round(seconds, 3),
+            "session": self.session or None,
         }
         text = json.dumps(line, ensure_ascii=False, separators=(",", ":"))
         with self._guard:
             os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
             with open(self.path, "a", encoding="utf-8", newline="\n") as handle:
                 handle.write(text + "\n")
+
+    def acquisitions(self, session: str) -> int:
+        """How many `acquire` calls were accepted in daemon session `session`."""
+        if not session or not self.path or not os.path.isfile(self.path):
+            return 0
+        count = 0
+        with open(self.path, encoding="utf-8") as handle:
+            for text in handle:
+                try:
+                    line = json.loads(text)
+                except ValueError:
+                    continue
+                if (isinstance(line, dict) and line.get("tool") == "acquire"
+                        and line.get("error") is None and line.get("session") == session):
+                    count += 1
+        return count
 
     def requests(self) -> dict[str, str]:
         """Every request id this log has seen, with its words, the latest words winning."""

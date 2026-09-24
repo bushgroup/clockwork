@@ -19,7 +19,16 @@ anything raised into a sentence and writes the audit line.
 `guard_acquisition` before they submit anything, and `acquire` also refuses a method
 the boxes are not holding: arming is its own tool (Matt, 2026-09-23), so one request
 arms once and acquires as often as it needs to, as the window's Replicate does, and a
-failed send is reported before any acquisition starts.
+failed send is reported before any acquisition starts. Then the cold-start check
+(`clockwork.envelope.cold_start`): `arm` reads the boxes back -- getters only, as
+`read_box_state` does -- and refuses or cautions on what they hold that the method does
+not declare before the `Send` job exists, and `acquire` repeats it against what that
+`arm`'s send read back, declared values included (lab record, task 71).
+
+**Every request leaves a run record** (`clockwork.record`) beside its files: `arm` opens
+it with the request, the plan and the arming, `acquire` adds the acquisition, a thread
+per acquisition adds each file with its summary as the owner reports it, and `note` adds
+the session's notes.
 
 **A request is the unit of work.** Every `arm` and `acquire` carries the words of the
 person it is for; the first use of a set of words mints a request id, which every run
@@ -37,6 +46,7 @@ import datetime as _dt
 import glob
 import hashlib
 import inspect
+import json
 import os
 import threading
 import time
@@ -45,15 +55,16 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from .. import envelope, summary
 from .. import method as method_module
-from .. import summary
 from ..acq import BatchSeen, Event, Run, Snapshot, cautions, refusals
 from ..acq.uimf import RAW_SUFFIX, SUMMED_SUFFIX
 from ..app import methodlib
+from ..envelope import Ledger, Limits
 from ..instrument import UNCALIBRATED, Instrument
 from ..method import Method, MethodError
 from ..method import template as template_module
-from ..method.template import Rendered, TemplateError
+from ..method.template import Rendered, Template, TemplateError
 from ..mips import BoxState, Discovery
 from ..naming import clean_initials, next_stem
 from ..owner import (
@@ -75,6 +86,8 @@ from ..owner import (
 )
 from ..owner.remote import DaemonError
 from ..owner.wire import TYPE_KEY, to_wire
+from ..record import RECORD_SUFFIX, RunRecord, brief
+from ..record import find as find_record
 from ..transcript import send_log_name
 from .audit import AuditLog
 from .guard import guard_acquisition
@@ -157,6 +170,7 @@ class Toolbox:
         instrument: Instrument = UNCALIBRATED,
         instrument_path: str = "",
         log: AuditLog | None = None,
+        limits: Limits | None = None,
     ) -> None:
         self.owner = owner
         self.library = os.path.abspath(library) if library else ""
@@ -164,7 +178,14 @@ class Toolbox:
         self.instrument = instrument
         self.instrument_path = instrument_path
         self.log = log if log is not None else AuditLog.beside(self.output)
+        self.limits = limits
+        """The standing limits in force, or None: every send refused against the
+        instrument, nothing refused in a rehearsal (`clockwork.envelope.check`)."""
         self._guard = threading.Lock()
+        self._session: tuple[str, _dt.datetime] | None = None
+        """The daemon session's id and start, asked for once: the budget's window."""
+        self._armed_states: tuple[BoxState, ...] = ()
+        """What the last `arm`'s send read back, after its `setup` or else before."""
         self._handles: dict[int, Handle] = {}
         self._words: dict[str, str] = {}
         """Request id to the words it was minted for."""
@@ -195,6 +216,10 @@ class Toolbox:
         started = time.monotonic()
         result: dict | None = None
         error: str | None = None
+        try:
+            self.log.session = self._session_of()[0]
+        except DaemonError:
+            pass  # the call below meets the same daemon, and says so in its own words
         try:
             try:
                 found.signature.bind(**arguments)
@@ -235,7 +260,10 @@ class Toolbox:
         allowed range and a description of what it does physically. Labels name the
         data (such as the sample) and render nothing; marks are the moments a run
         records, such as when the final mobility separation starts. Start here to
-        turn a person's request into knob values, then `render_template`.
+        turn a person's request into knob values, then `render_template`. When the
+        instrument's standing limits are in force, `limits` says whether an agent may
+        run the template at all and how far each knob may be turned: narrower than the
+        template's own range, or fixed.
         """
         templates = []
         for path in self._library_files():
@@ -262,6 +290,7 @@ class Toolbox:
                 "marks": [{"name": mark.name, "description": mark.description}
                           for mark in loaded.marks],
                 "tick_us": constants.get(template_module.TICK_NAME),
+                "limits": self._limits_of(loaded),
             })
         return {"library": self.library, "templates": templates}
 
@@ -324,24 +353,28 @@ class Toolbox:
         Name either `method` (a path in the library) or `template` with `knobs` and
         `labels`. `problems` are why the document does not load or render; `refusals`
         are why clockwork would refuse to acquire it; `cautions` are strings it could
-        not check and will not stop for. `ok` is true when the first two are empty.
-        `warnings` are repairs clockwork made while loading, such as whitespace stripped
-        from a string; they never stop a run.
+        not check and will not stop for. `limits` are why the instrument's standing
+        limits would stop this server sending it: a template they do not list, a knob
+        outside their range. `ok` is true when problems, refusals and limits are all
+        empty. `warnings` are repairs clockwork made while loading, such as whitespace
+        stripped from a string; they never stop a run.
         """
         try:
             loaded, rendered, _ = self._method(method, template, knobs, labels)
         except (MethodError, TemplateError) as exc:
             return {"ok": False, "problems": list(exc.problems), "refusals": [],
-                    "cautions": [], "warnings": []}
+                    "cautions": [], "limits": [], "warnings": []}
         found = refusals(loaded)
+        outside = self._outside_limits(loaded, rendered)
         return {
-            "ok": not found,
+            "ok": not found and not outside,
             "name": loaded.metadata.name,
             "hash": method_module.stamp(loaded)["method_hash"][:HASH_DIGITS],
             "rendered": rendered is not None,
             "problems": [],
             "refusals": found,
             "cautions": cautions(loaded),
+            "limits": outside,
             "warnings": list(loaded.warnings),
         }
 
@@ -354,7 +387,9 @@ class Toolbox:
         values, the marks (each in ms and as the expected scan), the rendered method's
         text and hash, and its refusals and cautions. A knob outside its range, an
         unknown knob or a missing required label comes back in `problems`, with `ok`
-        false. `warnings` are repairs made while loading; they never stop a run.
+        false. A knob inside the template's range and outside the instrument's standing
+        limits is rendered, not clamped, and comes back in `limits`, with `ok` false.
+        `warnings` are repairs made while loading; they never stop a run.
         """
         try:
             loaded, rendered, _ = self._method("", template, knobs, labels)
@@ -362,9 +397,11 @@ class Toolbox:
             return {"ok": False, "problems": list(exc.problems)}
         assert rendered is not None
         found = refusals(loaded)
+        outside = self._outside_limits(loaded, rendered)
         return {
-            "ok": not found,
+            "ok": not found and not outside,
             "problems": [],
+            "limits": outside,
             "template": template,
             "template_hash": rendered.template_hash[:HASH_DIGITS],
             "name": loaded.metadata.name,
@@ -423,7 +460,8 @@ class Toolbox:
     @tool("hardware", read_only=False)
     def arm(self, request: str, initials: str, method: str = "", template: str = "",
             knobs: dict[str, int | float] | None = None, labels: dict[str, str] | None = None,
-            setup: bool = True, conditions: str = "", request_id: str = "") -> dict:
+            setup: bool = True, conditions: str = "", request_id: str = "",
+            plan: str = "") -> dict:
         """Send a method to every box and leave them armed, waiting for `acquire`.
 
         Run `discover_boxes` once first, so the server knows which boxes answer.
@@ -434,38 +472,71 @@ class Toolbox:
         the mode change. `conditions` is free text about the sample and source (for
         example concentration, solvent, spray voltage), stamped into every file acquired
         from this arming; empty is allowed. `request_id` continues an earlier request
-        instead of starting one. Refused outside --fake until the standing-limits check
-        exists. Answers the request id, the stem the first file will take, and what the
-        boxes read back.
+        instead of starting one. `plan` is what you intend to do for the request, as you
+        stated it to the person: which knob values, how many acquisitions, what you
+        will report; it goes in the request's run record.
+
+        Refused, before anything is sent, outside the instrument's standing limits:
+        a template they do not list, a knob outside their range, a box they do not
+        allow, a spent budget, or on the instrument a hand-written method. Then the
+        boxes are read back and compared with what the method declares: what a box
+        holds that the method leaves as found is refused or cautioned by the limits'
+        cold-start rule, and the cautions come back under `cold_start` for you to
+        report. Answers the request id, the stem the first file will take, what the
+        boxes read back, and the run record's path.
         """
         loaded, rendered, path = self._method(method, template, knobs, labels)
-        self._refuse_unless_allowed(rendered, request)
+        self._refuse_unless_allowed(loaded, rendered, request)
         who = self._initials(initials)
-        identity, _ = self._request(request, request_id)
+        found = self._read_boxes(loaded)
+        refused, cautioned = envelope.judge(envelope.cold_start(loaded, found),
+                                            self._cold_start_mode(rendered))
+        if refused:
+            raise ToolFailure(_cold_start_refusal(refused))
+        identity, words = self._request(request, request_id)
         stem = next_stem(self.output, who)
+        record = RunRecord.open(self.output, stem, request_id=identity, text=words,
+                                initials=who)
+        if plan.strip():
+            record.append("plans", {"text": plan.strip()})
         event, handle = self._run(Send(
             label=f"arming for {identity}", method=loaded, setup=setup,
             conditions=conditions, directory=self.output, stem=stem,
             method_path=path, instrument=self.instrument,
             instrument_path=self.instrument_path), JOB_WAIT_S)
         result = event.result if isinstance(event, JobFinished) else None
+        arming = {
+            "stem": stem, "method": loaded.metadata.name,
+            "hash": method_module.stamp(loaded)["method_hash"][:HASH_DIGITS],
+            "template": _template_entry(rendered, path), "setup": setup,
+            "conditions": conditions, "cold_start": cautioned,
+        }
         if not isinstance(result, SendResult):
-            return {"request_id": identity, **self._unfinished(handle, event)}
+            record.append("arms", {**arming, "job": handle.id, "finished": False})
+            return {"request_id": identity, "record": record.path,
+                    **self._unfinished(handle, event)}
+        snapshot = result.snapshot
         with self._guard:
             self._armed = result.armed
             self._armed_stem = stem
             self._armed_name = loaded.metadata.name
             self._armed_conditions = conditions
+            self._armed_states = (snapshot.after or snapshot.before) if snapshot else ()
+        record.append("arms", {**arming, "finished": True,
+                               "seconds": round(result.seconds, 2),
+                               "send_log": result.send_log})
         return {
             "request_id": identity,
             "stem": stem,
             "method": loaded.metadata.name,
-            "hash": method_module.stamp(loaded)["method_hash"][:HASH_DIGITS],
+            "hash": arming["hash"],
             "setup": result.setup,
             "seconds": round(result.seconds, 2),
             "send_log": result.send_log,
             "transcript": result.transcript_path,
             "read_back": _snapshot_text(result.snapshot),
+            "cold_start": cautioned,
+            "record": record.path,
         }
 
     # -- acquisition -------------------------------------------------------------
@@ -483,22 +554,31 @@ class Toolbox:
         is 3, three files, of which the first is the run and the rest its technical
         replicates. The conditions given to `arm` are stamped into every file. Every
         file also stamps the request id and its place in the request. Follow the job
-        with `progress` until `done`; stop it with `stop`. Refused outside --fake until
-        the standing-limits check exists.
+        with `progress` until `done`; stop it with `stop`. Refused as `arm` is outside
+        the standing limits, and for more replicates than they allow in one acquisition
+        or once the budget is spent; the cold-start comparison is repeated against what
+        the boxes read back when `arm` sent the method, including any declared value a
+        box does not hold, and its cautions come back under `cold_start`.
         """
         if replicates < 1:
             raise ToolFailure("replicates counts files, from 1")
         loaded, rendered, path = self._method(method, template, knobs, labels)
-        self._refuse_unless_allowed(rendered, request)
+        self._refuse_unless_allowed(loaded, rendered, request, replicates=replicates)
         who = self._initials(initials)
         with self._guard:
             armed, armed_stem = self._armed, self._armed_stem
             conditions = self._armed_conditions
+            states = self._armed_states
         if not (matches_wire(armed, loaded)
                 and self.owner.status().snapshot):  # type: ignore[attr-defined]
             raise ToolFailure(
                 "the boxes are not holding this method: arm it first, with the same "
                 "method or template and knob values")
+        refused, cautioned = envelope.judge(
+            envelope.cold_start(loaded, states, declared=True),
+            self._cold_start_mode(rendered))
+        if refused:
+            raise ToolFailure(_cold_start_refusal(refused))
         identity, words = self._request(request, request_id)
         with self._guard:
             place = self._places.get(identity) or self._next_place_on_disk(identity)
@@ -515,8 +595,17 @@ class Toolbox:
         handle = self._submit(job)
         with self._guard:
             self._planned[handle.id] = replicates
+        record = RunRecord.open(self.output, stem or next_stem(self.output, who),
+                                request_id=identity, text=words, initials=who)
+        record.append("acquisitions", {
+            "job": handle.id, "replicates": replicates, "first_place": place,
+            "method": loaded.metadata.name,
+            "template": _template_entry(rendered, path), "cold_start": cautioned})
+        threading.Thread(target=self._record_runs, args=(handle, record),
+                         name=f"run record, job {handle.id}", daemon=True).start()
         return {"job": handle.id, "request_id": identity, "first_place": place,
                 "replicates": replicates, "label": handle.label,
+                "cold_start": cautioned, "record": record.path,
                 "follow": f"call progress with job={handle.id}"}
 
     @tool("acquisition")
@@ -595,14 +684,32 @@ class Toolbox:
     def status(self) -> dict:
         """The instrument as the server sees it: simulated or real, the console, the
         boxes, the job running and those queued, the method this server last armed and
-        the stem it named then, and whether sends through this server are refused and
-        why."""
+        the stem it named then, whether sends through this server are refused and why,
+        the standing limits in force, and how much of this daemon session's budget is
+        left."""
         state = self.owner.status()  # type: ignore[attr-defined]
         with self._guard:
             armed = ({"method": self._armed_name, "stem": self._armed_stem}
                      if self._armed else None)
-        refused = [] if state.fake else guard_acquisition(self.owner, None, "status")
+        ledger = self._ledger()
+        refused = guard_acquisition(self.owner, None, "status", limits=self.limits,
+                                    ledger=ledger)
+        limits = self.limits
         return {
+            "limits": None if limits is None else {
+                "path": limits.path, "description": limits.description,
+                "cold_start": limits.cold_start, "boxes": list(limits.boxes),
+                "templates": [entry.key for entry in limits.templates],
+                "problems": limits.against(self._templates()),
+            },
+            "budget": None if limits is None else {
+                "acquisitions_made": ledger.runs,
+                "max_acquisitions": limits.budget.max_runs,
+                "hours_since_start": round(ledger.hours, 2),
+                "max_hours": limits.budget.max_hours,
+                "max_replicates_per_acquisition": limits.budget.max_replicates_per_run,
+                "daemon_session": self._session_of()[0],
+            },
             "fake": state.fake,
             "program": state.program,
             "console": state.console.text,
@@ -613,10 +720,29 @@ class Toolbox:
             "last_armed": armed,
             "holder": state.holder.text if state.holder is not None else None,
             "lock_refused": state.refused or None,
-            "sends_refused": refused[0] if refused else None,
+            "sends_refused": "; ".join(refused) if refused else None,
             "library": self.library,
             "output": self.output,
         }
+
+    @tool("acquisition", read_only=False)
+    def note(self, request_id: str, text: str) -> dict:
+        """Add a note to a request's run record, beside its files.
+
+        For what the files alone will not say: why the next acquisition is the one you
+        chose, what you told the person, a judgement on a file, why you stopped. One
+        note per call; `request_id` is the one `arm` answered. Answers the record's path
+        and how many notes it holds.
+        """
+        if not text.strip():
+            raise ToolFailure("a note says something: pass its text")
+        found = find_record(self.output, request_id)
+        if found is None:
+            raise ToolFailure(f"request {request_id} has no run record in {self.output}; "
+                              "a record is begun by the request's first arm")
+        record = RunRecord(found)
+        record.append("notes", {"text": text.strip(), "by": "session"})
+        return {"record": record.path, "notes": len(record.read().get("notes", []))}
 
     # -- data --------------------------------------------------------------------
 
@@ -626,10 +752,12 @@ class Toolbox:
 
         For each stem: the raw per-repetition file and the summed file with sizes and
         times, the send log and the wire transcript, the request the run served (read
-        from the file's own stamp, with the request's words from the audit log), and
-        `folded`: whether the summed file exists, which a run cut short never writes.
+        from the file's own stamp, with the request's words from the audit log), the
+        request's run record, and `folded`: whether the summed file exists, which a
+        run cut short never writes.
         """
         where = self._in_output(directory) if directory else self.output
+        records = _records(where)
         stems: dict[str, dict[str, Any]] = {}
         for path in glob.glob(os.path.join(where, "*.uimf")):
             name = os.path.basename(path)
@@ -650,6 +778,7 @@ class Toolbox:
             if stamped is not None:
                 stamped["text"] = words.get(stamped["id"], "")
             run["request"] = stamped
+            run["record"] = records.get(stamped["id"]) if stamped is not None else None
             run["folded"] = "summed" in run
             runs.append(run)
         runs.sort(key=lambda run: max(part.get("modified", "") for part in
@@ -752,10 +881,120 @@ class Toolbox:
                                           dict(knobs or {}), dict(labels or {}))
         return rendered.method, rendered, path
 
-    def _refuse_unless_allowed(self, rendered: Rendered | None, request: str) -> None:
-        problems = guard_acquisition(self.owner, rendered, request)
+    def _refuse_unless_allowed(self, loaded: Method, rendered: Rendered | None, request: str,
+                               *, replicates: int | None = None) -> None:
+        problems = guard_acquisition(self.owner, rendered, request, method=loaded,
+                                     limits=self.limits, ledger=self._ledger(),
+                                     replicates=replicates)
         if problems:
             raise ToolFailure("; ".join(problems))
+
+    # -- the standing envelope ---------------------------------------------------
+
+    def _session_of(self) -> tuple[str, _dt.datetime]:
+        """The daemon session this server works in, and when it began.
+
+        A daemon's own, from `hello`, so every server and every restart of one over
+        the same daemon spends one budget; an owner in this process is a session of
+        its own, begun when this toolbox first asked."""
+        with self._guard:
+            if self._session is not None:
+                return self._session
+        hello = getattr(self.owner, "hello", None)
+        session: tuple[str, _dt.datetime]
+        if hello is not None:
+            said = hello()
+            try:
+                began = _dt.datetime.fromisoformat(str(said.started))
+            except ValueError:
+                began = _dt.datetime.now()
+            session = (str(said.session), began)
+        else:
+            session = (f"local-{os.getpid()}-{id(self.owner):x}", _dt.datetime.now())
+        with self._guard:
+            if self._session is None:
+                self._session = session
+            return self._session
+
+    def _ledger(self) -> Ledger:
+        """What this daemon session has spent, off the audit log."""
+        if self.limits is None:
+            return Ledger()
+        session, began = self._session_of()
+        return Ledger(runs=self.log.acquisitions(session), started=began)
+
+    def _cold_start_mode(self, rendered: Rendered | None) -> str:
+        """The limits' rule for this method, or `caution` with none: a real owner with
+        no limits never gets this far, and a rehearsal with none refuses nothing."""
+        return self.limits.mode_for(rendered) if self.limits is not None else "caution"
+
+    def _outside_limits(self, loaded: Method, rendered: Rendered | None) -> list[str]:
+        """What the limits say about this method itself, leaving the budget out."""
+        if self.limits is None:
+            return []
+        real = not self.owner.status().fake  # type: ignore[attr-defined]
+        return envelope.check(loaded, rendered, self.limits, Ledger(), real=real)
+
+    def _limits_of(self, template: Template) -> dict | None:
+        if self.limits is None:
+            return None
+        entry = self.limits.entry_for(template.hash)
+        if entry is None:
+            return {"allowed": False, "problems": []}
+        return {
+            "allowed": True,
+            "knobs": {limit.name: {"min": limit.min, "max": limit.max}
+                      for limit in entry.knobs},
+            "fixed": dict(entry.fixed),
+            "cold_start": entry.cold_start or self.limits.cold_start,
+            "problems": entry.problems_against(template),
+        }
+
+    def _templates(self) -> list[Template]:
+        found = []
+        for path in self._library_files():
+            if not self._is_template(path):
+                continue
+            try:
+                found.append(template_module.load_template(path))
+            except (OSError, TemplateError):
+                continue
+        return found
+
+    def _read_boxes(self, loaded: Method) -> tuple[BoxState, ...]:
+        """Every box the method names, read back with getters only, for the cold-start
+        check. Nothing is sent to a box that does not answer."""
+        event, handle = self._run(
+            ReadState(label="reading the boxes before a send",
+                      names=tuple(box.name for box in loaded.boxes)), JOB_WAIT_S)
+        states = event.result if isinstance(event, JobFinished) else None
+        if not isinstance(states, Mapping):
+            raise ToolFailure(
+                f"the boxes did not finish reading back within {JOB_WAIT_S:.0f} s (job "
+                f"{handle.id}), so nothing was sent; call status to see what is running")
+        return tuple(state for state in states.values() if isinstance(state, BoxState))
+
+    def _record_runs(self, handle: Handle, record: RunRecord) -> None:
+        """Add each file an acquisition writes to its request's record, as the owner
+        reports it, until the job ends. On a thread of its own; a record it cannot
+        write is not a reason to disturb the run."""
+        seen = 0
+        try:
+            while True:
+                entries = self._wait(handle, seen, 30.0)
+                for entry in entries:
+                    seen = entry.seq
+                    event = entry.event
+                    if isinstance(event, RunDone):
+                        record.add_file(_file_entry(event.run))
+                    elif isinstance(event, JobFailed):
+                        record.append("notes", {"text": f"job {handle.id} failed: "
+                                                        f"{event.message}", "by": "server"})
+                        return
+                    elif isinstance(event, JobFinished):
+                        return
+        except Exception:  # noqa: BLE001 -- the record is the run's, never its end
+            return
 
     @staticmethod
     def _initials(initials: str) -> str:
@@ -888,6 +1127,54 @@ def _run_summary(run: Run) -> dict:
         "scans_published": run.scans_published,
         "warnings": list(run.warnings),
     }
+
+
+def _cold_start_refusal(refused: list[str]) -> str:
+    return ("the boxes hold settings the method does not declare, and the standing "
+            "limits refuse a cold start on them: " + "; ".join(refused)
+            + ". Nothing was sent. Declare them in the template, or ask the person who "
+            "keeps the instrument's limits")
+
+
+def _template_entry(rendered: Rendered | None, path: str) -> dict | None:
+    """A render as its run record keeps it: which template, and every value it took."""
+    if rendered is None:
+        return None
+    return {"path": path, "hash": rendered.template_hash, "knobs": dict(rendered.knobs),
+            "labels": dict(rendered.labels)}
+
+
+def _file_entry(run: Run) -> dict:
+    """One finished run as its request's record keeps it, with its file's summary: the
+    summed file's, or the raw file's for a run that never folded and so wrote none."""
+    path = next((candidate for candidate in (run.summed_path, run.raw_path)
+                 if candidate and os.path.isfile(candidate)), "")
+    try:
+        numbers: dict[str, Any] = brief(summary.summarize(path)) if path else {}
+    except Exception as exc:  # noqa: BLE001 -- the record says why, never raises
+        numbers = {"problem": sentence(exc)}
+    stem = os.path.basename(run.raw_path or path or "")
+    for suffix in (RAW_SUFFIX, SUMMED_SUFFIX):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+    return {"stem": stem, "raw": run.raw_path, "summed": run.summed_path,
+            "complete": run.complete, "stopped_early": run.stopped_early,
+            "replicate": run.replicate, "seconds": round(run.seconds, 2),
+            "summary": numbers}
+
+
+def _records(directory: str) -> dict[str, str]:
+    """Every run record in `directory`, by the request id it records."""
+    found: dict[str, str] = {}
+    for path in glob.glob(os.path.join(glob.escape(directory), "*" + RECORD_SUFFIX)):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                identity = json.load(handle).get("request", {}).get("id")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if identity:
+            found[str(identity)] = os.path.basename(path)
+    return found
 
 
 def _snapshot_text(snapshot: Snapshot | None) -> str:

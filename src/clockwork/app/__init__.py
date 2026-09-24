@@ -270,6 +270,9 @@ def main(argv: list[str] | None = None) -> int:
                      help="where runs are written and read back (default: the daemon's)")
     mcp.add_argument("--instrument", metavar="PATH", default="",
                      help="the instrument document runs are acquired under")
+    mcp.add_argument("--limits", metavar="PATH", default="",
+                     help="the instrument's standing limits (default: limits.toml beside "
+                          "--instrument; docs/instrument-limits.md)")
     mcp.add_argument("--endpoint", metavar="ADDRESS", default="",
                      help="the daemon's command socket (default: tcp://127.0.0.1:5570)")
     args = parser.parse_args(argv)
@@ -305,7 +308,8 @@ def main(argv: list[str] | None = None) -> int:
         from clockwork.mcp import server
 
         return server.run(fake=args.mcp_fake, library=args.library, output=args.output,
-                          endpoint=args.endpoint, instrument_path=args.instrument)
+                          endpoint=args.endpoint, instrument_path=args.instrument,
+                          limits_path=args.limits)
 
     if args.self_check:
         report_path = None if _attach_parent_console() else _open_report_file()

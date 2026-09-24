@@ -25,6 +25,7 @@ from collections.abc import Callable
 from typing import Any, TextIO
 
 from .. import __version__
+from ..envelope import Limits
 from ..instrument import UNCALIBRATED, Instrument, Vertical
 from .audit import AuditLog
 from .tools import TOOLS, Tool, Toolbox, ToolFailure
@@ -51,11 +52,16 @@ experiment can vary; render_template and validate_method check a choice before a
 is sent; arm sends it to the boxes; acquire records it and answers a job number to
 follow with progress; list_files and the data tools read the files back as numbers.
 Run discover_boxes once before the first arm. Every arm and acquire carries the
-request, quoted in the person's own words, and their initials. Knobs the person does not
-mention take their defaults; say which defaults were used when reporting back. On the
-real instrument the person owns the sample and the source: confirm with them that the
-sample is spraying before acquiring. When status says fake is true, nothing is real: the
-boxes and the digitizer are simulated."""
+request, quoted in the person's own words, and their initials; state your plan to the
+person and pass it to arm as plan. Knobs the person does not mention take their
+defaults; say which defaults were used when reporting back. The instrument's standing
+limits bound which templates may run and how far each knob may turn: list_templates
+shows them, and a refusal from them is final for this session, not something to work
+around. Report every cold_start caution arm and acquire answer. Use note to record why
+you chose the next acquisition, and what you told the person. On the real instrument
+the person owns the sample and the source: confirm with them that the sample is
+spraying before acquiring. When status says fake is true, nothing is real: the boxes
+and the digitizer are simulated."""
 
 
 def server_for(toolbox: Toolbox) -> object:
@@ -74,10 +80,10 @@ def server_for(toolbox: Toolbox) -> object:
 
 def build_server(owner: object, library: str = "", output: str = "", *,
                  instrument: Instrument = UNCALIBRATED, instrument_path: str = "",
-                 log: AuditLog | None = None) -> object:
+                 log: AuditLog | None = None, limits: Limits | None = None) -> object:
     """An `MCPServer` over `owner`, listing `library` and writing into `output`."""
     return server_for(Toolbox(owner, library=library, output=output, instrument=instrument,
-                              instrument_path=instrument_path, log=log))
+                              instrument_path=instrument_path, log=log, limits=limits))
 
 
 def _adapter(toolbox: Toolbox, entry: Tool) -> Callable[..., dict]:
@@ -113,7 +119,8 @@ def fake_output() -> str:
 
 
 def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: str = "",
-        instrument_path: str = "", stream: TextIO | None = None) -> int:
+        instrument_path: str = "", limits_path: str = "",
+        stream: TextIO | None = None) -> int:
     """Serve the tools on stdio until the client closes. Returns the exit code.
 
     Under `fake` an owner of simulated boxes and a simulated console lives in this
@@ -122,10 +129,17 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
     not answer is one sentence on stderr and exit code 1. `library` and `output`
     default to the daemon's own (`hello`), or under `fake` to the lab's golden
     experiments where a lab checkout is beside this one and to `fake_output()`.
+
+    `limits_path` is the instrument's standing limits (`clockwork.envelope`), by default
+    the `limits.toml` beside `instrument_path` if there is one. Limits named and not
+    found, or found and not valid, are one sentence and exit code 1: a server that
+    quietly ran without the limits it was pointed at would refuse every send and not
+    say why. With none, every send to the instrument is refused, and a rehearsal is
+    refused nothing.
     """
     say = stream if stream is not None else sys.stderr
+    from .. import envelope, lab_dir
     from .. import instrument as instrument_module
-    from .. import lab_dir
     from ..owner import LocalOwner, RemoteOwner, StartConsole
     from ..owner.remote import DEFAULT_COMMAND, DaemonError
 
@@ -136,6 +150,16 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
         except (OSError, ValueError) as exc:
             print(f"{PROGRAM}: the instrument document {instrument_path} could not be read: "
                   f"{exc}", file=say)
+            return 1
+
+    limits: Limits | None = None
+    chosen = limits_path or envelope.default_path(instrument_path)
+    if chosen and (limits_path or os.path.isfile(chosen)):
+        try:
+            limits = envelope.load(chosen)
+        except (OSError, envelope.LimitsError) as exc:
+            print(f"{PROGRAM}: the standing limits {chosen} could not be read: {exc}",
+                  file=say)
             return 1
 
     if fake:
@@ -156,10 +180,12 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
     os.makedirs(output, exist_ok=True)
     print(f"{PROGRAM} {__version__}{' --fake' if fake else ''}: library {library or '(none)'}"
           f", files to {output}, calls logged to "
-          f"{AuditLog.beside(output).path}", file=say)
+          f"{AuditLog.beside(output).path}, limits "
+          f"{limits.path if limits is not None else '(none)'}", file=say)
     try:
         build_server(owner, library, output, instrument=instrument,
-                     instrument_path=instrument_path).run("stdio")  # type: ignore[attr-defined]
+                     instrument_path=instrument_path,
+                     limits=limits).run("stdio")  # type: ignore[attr-defined]
     finally:
         if fake:
             owner.shutdown("the MCP client closed")  # type: ignore[attr-defined]
