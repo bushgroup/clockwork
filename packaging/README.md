@@ -103,7 +103,10 @@ wording -- carries no promise.
   one came from.
 - **A build handed to the bench for trial** is a release candidate, `X.Y.ZrcN`. It is cut by the
   same steps as a stable release, and its GitHub release is marked *pre-release*, so "Latest" keeps
-  naming the last stable one.
+  naming the last stable one. After a candidate, `main` moves to the *next candidate's* development
+  number, `X.Y.Zrc(N+1).dev0`, since PEP 440 orders `X.Y.Z.devN` below every `X.Y.ZrcN` and a
+  development build must never sort below the candidate it follows (`1.1.0rc2.dev0` after
+  `1.1.0rc1`); the stable release that ends the series moves it to `X.(Y+1).0.dev0` as usual.
 - **A pushed tag is never moved or deleted.** A mistake in a release is fixed by the next patch
   or candidate number.
 
