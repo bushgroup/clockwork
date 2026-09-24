@@ -324,6 +324,153 @@ def check_daemon() -> None:
                    code == 1 and "owned by the clockwork window" in log.getvalue())
 
 
+def check_mcp() -> None:
+    """The MCP server over the stand-ins, through the SDK's own client (lab record, task 69).
+
+    A `--fake` owner in this process and the server built over it, driven by
+    `mcp.Client` in process exactly as a Claude Code session drives it over stdio: the
+    tool list is the registry, a template is rendered, the boxes are armed for a
+    request, one run is acquired and followed to its end, and the file it wrote names
+    the request. Then the interlock: an owner that is not `--fake` -- built with a
+    stand-in scan, so nothing is opened -- is refused `arm` before any job exists.
+    """
+    import asyncio
+    import datetime as dt
+    import json
+    import tempfile
+
+    from mcp import Client
+
+    from clockwork import summary
+    from clockwork.mcp import NOT_YET, TOOLS, Toolbox, ToolFailure
+    from clockwork.mcp.server import SIMULATED, build_server
+    from clockwork.mips import Discovery
+    from clockwork.owner import LocalOwner, StartConsole
+
+    template = f"""\
+template_schema = 1
+renders = 2
+start = [["box1", "TBLSTRT"]]
+reset = [["box1", "SMOD,LOC"], ["box1", "SMOD,TBL"]]
+[knobs]
+b_ticks = {{ default = 500, min = 100, max = 520, unit = "ticks", description = "line B" }}
+[labels]
+sample = {{ required = true, description = "what was sprayed" }}
+[metadata]
+name = "mcp self-check"
+created = {dt.date(2026, 9, 23).isoformat()}
+[acquisition]
+frames = 1
+scans = 32
+accumulations = 2
+repetition_mode = "per_repetition"
+keep_raw = true
+file_stem = "mcp-self-check"
+enable = {{ box = "box1", channel = "A" }}
+[[boxes]]
+name = "box1"
+port = "COM3"
+setup = ["STBLCLK,EXT"]
+load = ["STBLDAT;0:[A:1,0:A:1:B:1,{{b_ticks}}:B:0,532:A:0,533:];"]
+arm = ["SMOD,TBL"]
+"""
+    request = "one self-check run with line B held for 400 ticks"
+    chosen = {"template": "line-b.toml", "knobs": {"b_ticks": 400},
+              "labels": {"sample": "nothing"}}
+
+    async def drive(owner: object, library: str, output: str) -> dict:
+        async with Client(build_server(owner, library, output,
+                                       instrument=SIMULATED)) as client:
+            async def call(name: str, **arguments: object) -> dict:
+                result = await client.call_tool(name, arguments)
+                if result.is_error:
+                    raise RuntimeError(result.content[0].text)
+                return result.structured_content
+
+            seen: dict = {"tools": [entry.name for entry in
+                                    (await client.list_tools()).tools]}
+            seen["rendered"] = await call("render_template", **chosen)
+            await call("discover_boxes", **chosen)
+            seen["armed"] = await call("arm", request=request, initials="sc", **chosen)
+            started = await call("acquire", request=request, initials="sc", **chosen)
+            seen["started"] = started
+            last, answer = 0, {"done": False}
+            for _ in range(24):
+                answer = await call("progress", job=started["job"], after=last, wait_s=5)
+                last = answer["last"]
+                if answer["done"]:
+                    break
+            seen["done"] = answer
+            seen["files"] = await call("list_files")
+            return seen
+
+    with tempfile.TemporaryDirectory() as scratch:
+        library = os.path.join(scratch, "library")
+        output = os.path.join(scratch, "runs")
+        os.makedirs(library)
+        with open(os.path.join(library, "line-b.toml"), "w", encoding="utf-8",
+                  newline="\n") as handle:
+            handle.write(template)
+        owner = LocalOwner(fake=True, program="clockwork mcp self-check").start()
+        owner.submit(StartConsole())
+        try:
+            seen = asyncio.run(drive(owner, library, output))
+        except Exception as exc:  # noqa: BLE001 -- reporting, not handling
+            check_true(f"the MCP server drives a whole request over the stand-ins ({exc})",
+                       False)
+            seen = None
+        finally:
+            owner.shutdown()
+            owner.join(30)
+        if seen is not None:
+            check_true(f"the server lists every tool in the registry ({len(TOOLS)})",
+                       seen["tools"] == [entry.name for entry in TOOLS])
+            check_true("render_template answers the knob values and the method's hash",
+                       seen["rendered"]["ok"] and seen["rendered"]["knobs"] == {"b_ticks": 400})
+            runs = seen["done"].get("runs") or []
+            check_true(
+                "arm, then acquire for a request, followed with progress to a complete run "
+                f"({seen['done'].get('failed') or (runs[0]['text'] if runs else 'no run')})",
+                seen["done"]["done"] and len(runs) == 1 and runs[0]["complete"])
+            listed = seen["files"]["runs"]
+            request_seen = listed[0]["request"] if listed else None
+            check_true(
+                f"list_files names the request each run served ({request_seen})",
+                request_seen is not None and request_seen["text"] == request
+                and request_seen["id"] == seen["started"]["request_id"])
+            stamped = (summary.summarize(runs[0]["summed_path"])["clockwork"]
+                       .get("ClockworkSeriesId") if runs else None)
+            check_true("the file stamps the request's id as its series",
+                       stamped == seen["started"]["request_id"])
+            with open(os.path.join(output, "mcp-calls.log"), encoding="utf-8") as handle:
+                lines = [json.loads(line) for line in handle]
+            check_true(
+                f"every call is one line of the audit log ({len(lines)} lines), the request "
+                "on the acquire",
+                [line["tool"] for line in lines][:2] == ["render_template", "discover_boxes"]
+                and any(line["tool"] == "acquire" and line["request"]
+                        and line["request"]["text"] == request for line in lines))
+
+        def no_scan(**_: object) -> Discovery:
+            return Discovery()
+
+        real = LocalOwner(program="clockwork mcp self-check", discover=no_scan,
+                          lock_path=os.path.join(scratch, "instrument.lock"))
+        toolbox = Toolbox(real, library=library, output=scratch)
+        try:
+            toolbox.call("arm", {"request": request, "initials": "sc", **chosen})
+            refusal = ""
+        except ToolFailure as exc:
+            refusal = str(exc)
+        check_true(
+            "against an owner that is not --fake, arm is refused by the interlock before "
+            "any job is submitted",
+            refusal == NOT_YET and real.status().queued == ()
+            and real.status().running is None)
+        real.shutdown()
+        real.serve()
+
+
 def _ended(owner: object, handle: object, timeout: float = 10.0) -> object | None:
     """The `JobFinished` or `JobFailed` of `handle`, polled for; None on a timeout."""
     import time as _time
@@ -360,7 +507,8 @@ def declared_versions() -> dict[str, str]:
 LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method",
                 "clockwork.method.template", "clockwork.instrument", "clockwork.transcript",
                 "clockwork.naming", "clockwork.owner", "clockwork.owner.wire",
-                "clockwork.owner.remote", "clockwork.owner.daemon", "clockwork.summary")
+                "clockwork.owner.remote", "clockwork.owner.daemon", "clockwork.summary",
+                "clockwork.mcp", "clockwork.mcp.server")
 QT_PREFIXES = ("PySide6", "PyQt", "pyqtgraph", "shiboken")
 
 # --- opaque lab references ------------------------------------------------------------
@@ -506,6 +654,21 @@ def main() -> int:
         + ", ".join(f"{where} {what}" for where, what in declared.items()) + ")",
         len(set(declared.values())) == 1,
     )
+    from importlib import metadata
+
+    with open(os.path.join(ROOT, "pyproject.toml"), "rb") as handle:
+        wanted = next((spec for spec in tomllib.load(handle)["project"]["dependencies"]
+                       if re.match(r"mcp\b", spec)), "")
+    try:
+        importlib.import_module("mcp.server")
+        installed = metadata.version("mcp")
+    except Exception as exc:  # noqa: BLE001 -- reporting, not handling
+        installed = f"(not importable: {exc!r})"
+    pinned = re.search(r"~=\s*(\d+)\.", wanted)
+    check_true(
+        f"the MCP SDK imports and is the major version pyproject.toml asks for "
+        f"({installed} against {wanted!r})",
+        bool(pinned) and installed.split(".")[0] == pinned.group(1))
 
     payload_dir = os.path.join(ROOT, "packaging", "console_payload")
     app_h = os.path.join(payload_dir, "app.h")
@@ -2252,6 +2415,9 @@ def main() -> int:
 
     section("the daemon")
     check_daemon()
+
+    section("the MCP server")
+    check_mcp()
 
     section("the window")
     # Task 50. Nothing here opens a window: what a clone can establish without a

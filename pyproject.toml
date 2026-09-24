@@ -39,6 +39,7 @@ dependencies = [
     "python-snappy~=0.7.3",
     "PySide6~=6.11.2",
     "tomli-w~=1.2.0",
+    "mcp~=2.2",
 ]
 # pyqtgraph was a direct dependency here for a plotting pane clockwork never grew:
 # mainspring is the only viewer (Matt, 2026-09-10) and clockwork.app draws nothing.

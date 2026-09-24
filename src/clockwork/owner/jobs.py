@@ -133,6 +133,23 @@ class Acquire(Job):
     """True for the Replicate button: one more run off the last one's snapshot,
     walking the reset list first. False for Acquire, whose first run is not a
     replicate of anything."""
+    request: str = ""
+    """What the series is for, in the words of whoever asked for it, or a routine's
+    name. Written into every run's log header; empty for a trainee's button press."""
+    series: str = ""
+    """The id every run of the series stamps as `ClockworkSeriesId`: a request's own id
+    (lab record, task 69). Empty stamps no series at all."""
+    series_index: int = 1
+    """The first run's place in its series, counted from 1; each replicate is one more.
+    A request acquired over several jobs passes where the last one left off."""
+    template: str = ""
+    """The template text `method` was rendered from, or empty for a hand-written
+    method. A `Rendered` holds a `Template` and cannot cross a process boundary, so
+    the text, `knobs` and `labels` cross instead and the owner renders again: the
+    render stamped is always the owner's own, and one that does not reproduce `method`
+    is refused before a file exists (`clockwork.acq.uimf.stamp_globals`)."""
+    knobs: Mapping[str, float] = field(default_factory=dict)
+    labels: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

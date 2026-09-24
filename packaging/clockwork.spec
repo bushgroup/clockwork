@@ -120,6 +120,14 @@ PYSERIAL_EXCLUDES = [
     "serial.tools.list_ports_osx",
 ]
 
+# The MCP SDK (`mcp`; lab record, task 69) and what it imports -- pydantic, starlette,
+# uvicorn, httpx2 and pywin32 among them -- reach the bundle through `clockwork.mcp.server`'s
+# own imports, which Analysis follows into the function bodies that hold them; nothing is
+# listed by hand. None of it can be excluded: `mcp.server` imports its HTTP transports at
+# import time although `clockwork mcp` serves only stdio. Not yet verified in a frozen
+# build: that the windowed executable (`console=False` below) hands the SDK usable stdin
+# and stdout pipes when an MCP client launches `clockwork.exe mcp`. Until a build is tried,
+# a session runs `clockwork mcp` from a checkout (docs/mcp-server.md).
 a = Analysis(
     [ENTRYPOINT],
     pathex=[],

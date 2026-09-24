@@ -61,7 +61,9 @@ from ..acq import (
     DataStream,
     Event,
     FakeConsoleProcess,
+    Provenance,
     Run,
+    Series,
     Snapshot,
     Warned,
     prepare_console,
@@ -72,6 +74,7 @@ from ..acq import (
 )
 from ..instrument import Instrument
 from ..method import Method
+from ..method.template import Rendered, loads_template, render
 from ..mips import (
     Box,
     BoxState,
@@ -674,6 +677,7 @@ class LocalOwner:
         problems = refusals(method)
         if problems:
             raise AcqError("; ".join(problems))
+        rendered = _rendered(job)
         command_endpoint, data_endpoint = self._endpoints()
         directory = job.directory or os.getcwd()
         os.makedirs(directory, exist_ok=True)
@@ -717,11 +721,18 @@ class LocalOwner:
                         directory, job.initials, taken=taken)
                     taken.append(stem)
                     replicate = job.replicate_only or index > 0
+                    series = None
+                    if job.series:
+                        place = max(1, job.series_index) + index
+                        series = Series(id=job.series, index=place, position=place)
+                    provenance = (Provenance(rendered=rendered, series=series)
+                                  if rendered is not None or series is not None else None)
                     run = self._one_run(
                         method, job, console, stream, width, directory, stem,
                         replicate=replicate,
                         first_log=self._send_log if not replicate else None,
                         prologue=prologue if index == 0 else None,
+                        provenance=provenance,
                     )
                     runs.append(run)
                     self._last_run = run
@@ -755,6 +766,7 @@ class LocalOwner:
         replicate: bool,
         first_log: tuple[str, str] | None,
         prologue: Callable[[], object] | None = None,
+        provenance: Provenance | None = None,
     ) -> Run:
         """One `run_acquisition` with its two log files open around it.
 
@@ -771,7 +783,7 @@ class LocalOwner:
         then configures the card inside it.
         """
         header = self._header(method, job.method_path, job.instrument,
-                              job.instrument_path, job.conditions)
+                              job.instrument_path, job.conditions, request=job.request)
         # A replicate re-sends neither `setup` nor `load`, so its send log carries its
         # reset and start lists and a line saying where the others went -- which is how
         # the bench script's replicate logs read and what makes them findable. Its stem
@@ -803,6 +815,7 @@ class LocalOwner:
                 progress=self._report,
                 instrument=job.instrument,
                 snapshot=self._snapshot,
+                provenance=provenance,
                 stop=self._stop_check,
             )
 
@@ -863,13 +876,14 @@ class LocalOwner:
             yield (transcript_path, send_path)
 
     def _header(self, method: Method, method_path: str, instrument: Instrument,
-                instrument_path: str, conditions: str) -> str:
+                instrument_path: str, conditions: str, *, request: str = "") -> str:
         return transcript.run_header(
             method=method, method_path=method_path or None,
             instrument=instrument, instrument_path=instrument_path or None,
             console=getattr(self.console, "info", None),
             boxes=[(name, row[0], row[1], row[2]) for name, row in _identities(self.boxes)],
             conditions=conditions,
+            request=request,
         )
 
     # -- housekeeping --------------------------------------------------------
@@ -930,6 +944,18 @@ def _needs_method(method: Method | None) -> Method:
     if method is None:
         raise ValueError("there is no method to send; open or write one first")
     return method
+
+
+def _rendered(job: Acquire) -> Rendered | None:
+    """The render an `Acquire` names, done again here, or None for a hand-written method.
+
+    Rendered on this side rather than carried, because a `Rendered` holds its `Template`
+    and the owner may be in another process. The template text and the values are
+    enough to reproduce it exactly; a render that does not reproduce the job's method
+    is refused by the stamp, before a file exists."""
+    if not job.template:
+        return None
+    return render(loads_template(job.template), dict(job.knobs), dict(job.labels))
 
 
 def sentence(exc: BaseException) -> str:

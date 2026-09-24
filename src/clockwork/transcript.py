@@ -275,6 +275,7 @@ def run_header(
     console: object = None,
     boxes: Iterable[Sequence[str]] = (),
     conditions: str = "",
+    request: str = "",
 ) -> str:
     """The block that says what this run was, for the top of a log.
 
@@ -302,6 +303,10 @@ def run_header(
     experiment that exists only if somebody typed it (lab record, task 40). It is
     in the header rather than written mid-run so that a replicate's log carries
     it too, without the run that wrote it having to say it twice.
+
+    `request` is what the run was for, in the words of whoever asked for it through
+    the MCP server, or a routine's name; the file stamps only the request's id, as its
+    series (lab record, task 69), so this is where the words sit beside the file.
     """
     lines: list[str] = []
     if method is not None:
@@ -337,6 +342,9 @@ def run_header(
     for row in boxes:
         name, rest = row[0], [str(part) for part in row[1:] if part]
         lines.append(f"{name:<11} {'  '.join(rest)}".rstrip())
+    if request.strip():
+        lines.append("request")
+        lines += [f"  {line}".rstrip() for line in request.strip().splitlines()]
     if conditions.strip():
         lines.append("conditions")
         lines += [f"  {line}".rstrip() for line in conditions.strip().splitlines()]

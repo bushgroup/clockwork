@@ -254,6 +254,24 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--console", metavar="PATH", default="",
                        help="the acquisition console executable, or a directory holding "
                             "it (default: $CLOCKWORK_CONSOLE, then the installer's)")
+    mcp = commands.add_parser(
+        "mcp", help="serve the instrument's tools to an MCP client, such as Claude Code, "
+                    "over stdio (docs/mcp-server.md)",
+        description="Serve clockwork's tools over stdio to an MCP client: templates and "
+                    "methods, the boxes, acquisition, and reading the files back. Drives "
+                    "`clockwork serve`, or simulated hardware of its own under --fake.")
+    mcp.add_argument(
+        "--fake", dest="mcp_fake", action="store_true",
+        help="simulated boxes and console in this process; no daemon needed. Nothing it "
+             "reports is evidence about a MIPS box or a digitizer.")
+    mcp.add_argument("--library", metavar="DIR", default="",
+                     help="the method and template library (default: the daemon's)")
+    mcp.add_argument("--output", metavar="DIR", default="",
+                     help="where runs are written and read back (default: the daemon's)")
+    mcp.add_argument("--instrument", metavar="PATH", default="",
+                     help="the instrument document runs are acquired under")
+    mcp.add_argument("--endpoint", metavar="ADDRESS", default="",
+                     help="the daemon's command socket (default: tcp://127.0.0.1:5570)")
     args = parser.parse_args(argv)
 
     # Before anything imports numba, lazily or otherwise: `_self_check` folds, and the
@@ -275,6 +293,19 @@ def main(argv: list[str] | None = None) -> int:
 
         return daemon.run(fake=args.serve_fake, output=args.output, library=args.library,
                           console=args.console)
+
+    if args.command == "mcp":
+        # The protocol is stdin and stdout, and the SDK claims the real streams by their
+        # file descriptors: the guard put round them above has neither, and attaching a
+        # parent console, as `serve` does, would take them from the client.
+        for name in ("stdout", "stderr"):
+            real = getattr(sys, f"__{name}__")
+            if real is not None:
+                setattr(sys, name, real)
+        from clockwork.mcp import server
+
+        return server.run(fake=args.mcp_fake, library=args.library, output=args.output,
+                          endpoint=args.endpoint, instrument_path=args.instrument)
 
     if args.self_check:
         report_path = None if _attach_parent_console() else _open_report_file()

@@ -11,6 +11,10 @@
   and the acquisition console with no window, and the loopback ZeroMQ protocol its clients use:
   the requests and replies, the event stream, the instrument lock, shutdown, and what happens when
   either side dies.
+- [**MCP server**](mcp-server.md). `clockwork mcp`, the tools an agent such as a Claude Code
+  session uses to turn a person's request into an experiment: templates and methods, the boxes,
+  acquisition and reading the files back, the interlock that decides what may be sent, and the
+  audit log of every call.
 - [**Method file and provenance**](method-file-format.md). The flat TOML document a trainee loads
   to run an experiment: each box's strings in three phases, the ordered sequence that starts and
   restarts them, and the stamp that traces every acquisition back to the method that produced it.
