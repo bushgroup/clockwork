@@ -85,7 +85,7 @@ One command per call of the owner protocol, and `hello`.
 | `events` | `handle`, `after` (default 0) | That job's progress numbered after `after`, oldest first, as a list of `Progress` |
 | `stop` | `reason` (optional) | null. The run in flight ends after its current repetition and its fold |
 | `snapshot` | none | The `Snapshot` the next run will be stamped with, or null before any send |
-| `status` | none | An `OwnerStatus`: console, boxes, ports held, running and queued handles, stopping, the lock holder, and the lock's refusal if there is one |
+| `status` | none | An `OwnerStatus`: console, boxes, ports held, running and queued handles, stopping, the lock holder, the lock's refusal if there is one, and `armed`, what the last send that finished left the boxes holding (the method's name, what went on the wire, and the stem the send named), or null before any send and while one is under way |
 | `shutdown` | `reason` (optional) | null, sent before the shutdown begins (under Shutting down) |
 
 A client checks `protocol` in the `hello` reply and refuses to go on if it is not the version it
@@ -103,7 +103,9 @@ time stamps cross. A box found by a scan crosses as its name, port and firmware 
 the open port, which stays with the daemon that opened it.
 
 An event the codec cannot carry is replaced by a `Said` event of the same number saying so, so a
-new kind of event can never stall the stream.
+new kind of event can never stall the stream. The event that ends a job is the exception: a
+`JobFinished` whose result cannot cross is sent without its result, since a client following the
+job is waiting for exactly that event.
 
 ## The event stream
 

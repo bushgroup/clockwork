@@ -41,6 +41,7 @@ from .interface import (
 )
 from .jobs import (
     Acquire,
+    Armed,
     ConsoleStatus,
     Discover,
     Job,
@@ -66,6 +67,7 @@ from .remote import (
 __all__ = [
     "FAKE_FRAME_HOLD_S",
     "Acquire",
+    "Armed",
     "BoxStateRead",
     "ConsoleChanged",
     "ConsoleStatus",

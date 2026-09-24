@@ -8,7 +8,8 @@ numbers. Each tool is a thin layer over a function the window already uses, reac
 same owner of the hardware, so an agent drives exactly what a trainee drives and is refused in
 the same places. The server itself carries the guardrails: the interlock that decides what is sent
 to the boxes, the audit log of every call, and, through the daemon, the rule that one process owns
-the instrument.
+the instrument. Every tool is also a subcommand of `clockwork` for a terminal or a script
+([command line](command-line.md)), over the same functions and refused in the same places.
 
 ## Starting it
 
@@ -91,7 +92,7 @@ relative to the output directory, unless it is absolute.
 | Acquisition | `acquire` | as `arm` without `setup` and `conditions`, plus `replicates` | A job number, at once; the run proceeds on the owner |
 | | `progress` | `job`, `after`, `wait_s` | The job's events since number `after`, how many files are done of how many were asked for, and whether it is done |
 | | `stop` | `reason` | Whether a run was in flight; it ends after its current repetition and fold |
-| | `status` | none | Simulated or real, the console, the boxes, the running and queued jobs, the method this server last armed, why sends are refused if they are, the standing limits in force and the budget left |
+| | `status` | none | Simulated or real, the console, the boxes, the running and queued jobs, the method the boxes were last armed with, why sends are refused if they are, the standing limits in force and the budget left |
 | | `note` | `request_id`, `text` | Adds one note to the request's run record |
 | Data | `list_files` | `directory` (optional) | Each run's files with sizes and times, its logs, the request it served, and whether its summed file was written |
 | | `summarize_file` | `path`, `frames`, `points`, `texts` | Frames, scans, total counts, total ion current, base peak, calibration, pusher period, saturation, every clockwork stamp, and the request the run served |
@@ -109,7 +110,9 @@ To acquire, first `arm`, then `acquire` with the same method or template and the
 `arm` sends every box its `setup`, `load` and `arm` strings, as the window's Send setup does, and
 waits for the send to finish; `setup: false` sends only the table and the mode change, as Load and
 arm does. `acquire` refuses a method the boxes are not holding, i.e., one that differs in any
-string from what the last `arm` put on the wire. The two are separate so that one request arms
+string from what the last send put on the wire. The daemon, not the server, remembers that send,
+so an `acquire` may follow an `arm` made by another client of the same daemon, such as a command
+line in another process. The two are separate so that one request arms
 once and acquires as often as it needs to, as the window's Replicate button does, and so that a
 failed send is reported before any acquisition begins. The `conditions` given to `arm`, free text
 about the sample and source, are stamped into every file acquired from that arming, which is why
@@ -131,8 +134,9 @@ failed under `failed`.
 Every `arm` and `acquire` carries `request`, what the experiment is for in the words of the person
 it is for, and `initials`, theirs, which name the files (`YYMMDD_INITIALS_NNN`, as the window names
 them). The first use of a set of words mints a request id, such as `260923-141502-3fa2c1`, which
-`arm` and `acquire` both answer. Using the same words again, or passing `request_id`, continues the
-same request, so one request can span several acquisitions and several sessions.
+`arm` and `acquire` both answer. Using the same words again within one daemon session, from any
+client, continues the same request, and passing `request_id` continues it from any session, so one
+request can span several acquisitions and several sessions.
 
 The request travels with every file it produces. Each run stamps the request id as its series,
 `ClockworkSeriesId`, and its place in the request, counted from 1 across every acquisition of the
@@ -156,7 +160,7 @@ send under `sends_refused`, and the budget left under `budget`.
 holds with what the method declares. A setting the method leaves as found is refused or returned
 as a caution by the limits' cold-start rule, so a template that leaves a DC bias channel, a live
 RF head or an ARB module's frequency or range to whatever the last experiment left is refused
-before any string is sent. `acquire` repeats the comparison against what `arm`'s send read back,
+before any string is sent. `acquire` repeats the comparison against what the last send read back,
 which also catches a declared value a box did not take. Cautions come back under `cold_start`,
 and an agent reports them to the person the request is for.
 
@@ -179,8 +183,9 @@ each run's record.
 
 Every call is one line of `mcp-calls.log` in the output directory, appended: the time, the tool,
 its arguments, the request it served, a summary of what it answered, how long it took, the
-error sentence if it failed, and the daemon session it was made in, which is what the standing
-budget is counted from. A long text argument, such as a method's text, is recorded as its
+error sentence if it failed, the daemon session it was made in, which is what the standing
+budget is counted from, and `via`, which is `mcp` for this server's calls and `cli` for the
+command line's. A long text argument, such as a method's text, is recorded as its
 SHA-256 and length rather than quoted, and a result is summarised to its numbers and the lengths
 of its lists. The files and their logs hold everything else, so a person who was away can read
 what an agent did, and why, from the audit log and the files alone.

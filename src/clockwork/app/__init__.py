@@ -23,7 +23,9 @@ Three arguments and one command. `--fake` builds the whole window over `FakeBox`
 `--self-check` is the installer's proof that the lower layers work inside a frozen
 build, with no window shown; and no argument at all is the trainee's launch.
 `clockwork serve` is the daemon (`clockwork.owner.daemon`), which owns the instrument
-with no window at all and never imports Qt.
+with no window at all and never imports Qt; `clockwork mcp` serves its tools to an MCP
+client, and every one of those tools is also a verb of its own, `clockwork status`,
+`clockwork arm` and the rest (`clockwork.mcp.cli`), over the same daemon.
 """
 
 from __future__ import annotations
@@ -57,6 +59,11 @@ class _GuardedStream:
 
     def __init__(self, stream: object | None = None) -> None:
         self._stream = stream
+
+    @property
+    def encoding(self) -> str | None:
+        """The stream's, so a writer can tell what it will be able to encode."""
+        return getattr(self._stream, "encoding", None)
 
     def write(self, text: str) -> None:
         if self._stream is None:
@@ -275,7 +282,21 @@ def main(argv: list[str] | None = None) -> int:
                           "--instrument; docs/instrument-limits.md)")
     mcp.add_argument("--endpoint", metavar="ADDRESS", default="",
                      help="the daemon's command socket (default: tcp://127.0.0.1:5570)")
+    # The verbs are built from the tool registry, which costs half a second of imports
+    # (the toolbox, the loop, mainspring's reader): paid only when the command line
+    # could name a verb or asks for help, never by the window's own launch.
+    words = list(sys.argv[1:] if argv is None else argv)
+    command = next((word for word in words if not word.startswith("-")), None)
+    cli = None
+    if command not in (None, "serve", "mcp") or {"-h", "--help"} & set(words[:1]):
+        from clockwork.mcp import cli
+
+        cli.add_verbs(commands)
     args = parser.parse_args(argv)
+    if cli is not None and cli.is_verb(args.command) and (args.fake or args.self_check):
+        parser.error(f"{'--fake' if args.fake else '--self-check'} opens the window or "
+                     f"checks the build; a verb such as {args.command} drives a daemon, and "
+                     "a rehearsal is `clockwork serve --fake` with the verbs over it")
 
     # Before anything imports numba, lazily or otherwise: `_self_check` folds, and the
     # real window will too, and both need the cache pointed somewhere that survives a
@@ -310,6 +331,13 @@ def main(argv: list[str] | None = None) -> int:
         return server.run(fake=args.mcp_fake, library=args.library, output=args.output,
                           endpoint=args.endpoint, instrument_path=args.instrument,
                           limits_path=args.limits)
+
+    if cli is not None and cli.is_verb(args.command):
+        # As `serve`: a windowed build has no stdout of its own, and the answer belongs
+        # in the terminal the verb was typed at (task 60).
+        if getattr(sys, "frozen", False):
+            _attach_parent_console()
+        return cli.run(args)
 
     if args.self_check:
         report_path = None if _attach_parent_console() else _open_report_file()

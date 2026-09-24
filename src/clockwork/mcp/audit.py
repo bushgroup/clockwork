@@ -2,7 +2,8 @@
 
 `<output>/mcp-calls.log`, appended, UTF-8, LF. Each line is one call: when it ended, the
 tool, its arguments, the request it served, a summary of what it answered, how long it
-took, the error sentence if it failed, and the daemon session it was made in. A person
+took, the error sentence if it failed, the daemon session it was made in, and the
+surface that made it (`mcp` or `cli`; lab record, task 73). A person
 who was away reads what was done from it, `list_files` reads the words of each request
 back from it, since a file stamps only the request's id (lab record, task 69), and the
 standing envelope's budget is counted from it: the accepted `acquire` lines of one
@@ -66,15 +67,17 @@ def summarised(result: object) -> object:
 class AuditLog:
     """The log file, written from any thread; `path` empty writes nothing."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, via: str = "") -> None:
         self.path = path
+        self.via = via
+        """Which surface made the calls: `mcp`, `cli`, or empty for a caller in process."""
         self.session = ""
         """The daemon session every line is written under; set by the toolbox."""
         self._guard = threading.Lock()
 
     @classmethod
-    def beside(cls, output: str) -> AuditLog:
-        return cls(os.path.join(output, LOG_NAME) if output else "")
+    def beside(cls, output: str, via: str = "") -> AuditLog:
+        return cls(os.path.join(output, LOG_NAME) if output else "", via)
 
     def write(self, *, tool: str, arguments: Mapping[str, object], seconds: float,
               result: object = None, error: str | None = None,
@@ -90,6 +93,7 @@ class AuditLog:
             "error": error,
             "seconds": round(seconds, 3),
             "session": self.session or None,
+            "via": self.via or None,
         }
         text = json.dumps(line, ensure_ascii=False, separators=(",", ":"))
         with self._guard:
@@ -113,8 +117,30 @@ class AuditLog:
                     count += 1
         return count
 
+    def request_for(self, words: str, session: str) -> str | None:
+        """The latest request id minted for exactly these words in daemon session
+        `session`, or None: how a request begun by one process is continued by the next
+        without its id, as the command line's `arm` and `acquire` are."""
+        if not words or not session or not self.path or not os.path.isfile(self.path):
+            return None
+        found = None
+        with open(self.path, encoding="utf-8") as handle:
+            for text in handle:
+                try:
+                    line = json.loads(text)
+                except ValueError:
+                    continue
+                request = line.get("request") if isinstance(line, dict) else None
+                if (isinstance(request, dict) and request.get("id")
+                        and request.get("text") == words and line.get("session") == session):
+                    found = str(request["id"])
+        return found
+
     def requests(self) -> dict[str, str]:
-        """Every request id this log has seen, with its words, the latest words winning."""
+        """Every request id this log has seen, with its words, the latest words winning.
+
+        A line that names a request by id alone -- a `note` from a process that never
+        saw the words -- records them empty, and never blanks words already read."""
         found: dict[str, str] = {}
         if not self.path or not os.path.isfile(self.path):
             return found
@@ -125,5 +151,7 @@ class AuditLog:
                 except (ValueError, AttributeError):
                     continue
                 if isinstance(request, dict) and request.get("id"):
-                    found[str(request["id"])] = str(request.get("text", ""))
+                    words = str(request.get("text") or "")
+                    if words or str(request["id"]) not in found:
+                        found[str(request["id"])] = words
         return found

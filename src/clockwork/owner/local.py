@@ -102,6 +102,7 @@ from .interface import (
 )
 from .jobs import (
     Acquire,
+    Armed,
     ConsoleStatus,
     Discover,
     Job,
@@ -218,6 +219,9 @@ class LocalOwner:
         """What the last `Send` read off the boxes, and what every run until the next
         send is stamped with."""
 
+        self._armed: Armed | None = None
+        """What the last `Send` that finished put on the boxes (`OwnerStatus.armed`)."""
+
         self.console: ConsoleSupervisor | None = None
         self.console_status = ConsoleStatus()
 
@@ -331,6 +335,7 @@ class LocalOwner:
             queued=queued,
             stopping=self.stopping,
             snapshot=self._snapshot is not None,
+            armed=self._armed,
             holder=self._lock.holder if held else self._refused_by,
             refused=self._refused,
         )
@@ -639,6 +644,9 @@ class LocalOwner:
         # Before the work and not after it, so a send that raises part way through does
         # not leave the next one free to overwrite what it managed to write.
         self._send_log = (directory, stem)
+        # Cleared before the first string goes out: a send that raises part way leaves
+        # boxes holding some of one method and some of another, which is not armed.
+        self._armed = None
         with self._logs(directory, stem, header, append=append) as paths:
             snapshot = send_phases(
                 method, self.boxes, setup=job.setup, progress=self._report,
@@ -647,10 +655,13 @@ class LocalOwner:
         self._snapshot = snapshot
         if job.setup:
             self._setup_log = (directory, stem)
+        fingerprint = wire_fingerprint(method, setup=job.setup)
+        self._armed = Armed(method=method.metadata.name, fingerprint=fingerprint,
+                            directory=directory, stem=stem, setup=job.setup)
         return SendResult(snapshot=snapshot, setup=job.setup, send_log=paths[1],
                           transcript_path=paths[0],
                           seconds=time.perf_counter() - started,
-                          armed=wire_fingerprint(method, setup=job.setup))
+                          armed=fingerprint)
 
     # -- acquiring -----------------------------------------------------------
 

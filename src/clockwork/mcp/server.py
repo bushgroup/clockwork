@@ -30,8 +30,8 @@ from ..instrument import UNCALIBRATED, Instrument, Vertical
 from .audit import AuditLog
 from .tools import TOOLS, Tool, Toolbox, ToolFailure
 
-__all__ = ["INSTRUCTIONS", "PROGRAM", "SIMULATED", "build_server", "fake_output", "run",
-           "server_for"]
+__all__ = ["INSTRUCTIONS", "PROGRAM", "SIMULATED", "build_server", "fake_output",
+           "instrument_and_limits", "run", "server_for"]
 
 PROGRAM = "clockwork mcp"
 
@@ -118,6 +118,34 @@ def fake_output() -> str:
     return os.path.join(base, "clockwork", "fake-runs")
 
 
+def instrument_and_limits(*, fake: bool, instrument_path: str = "",
+                          limits_path: str = "") -> tuple[Instrument, Limits | None]:
+    """The instrument document runs are acquired under, and the standing limits in force.
+
+    `SIMULATED` under `fake` and `UNCALIBRATED` otherwise when no document is named.
+    `limits_path` defaults to the `limits.toml` beside `instrument_path` if there is one.
+    `ValueError` with one sentence for a document or limits that were named or found and
+    could not be read: a server that quietly ran without the limits it was pointed at
+    would refuse every send and not say why. Shared by `clockwork mcp` and the verbs."""
+    from .. import envelope
+    from .. import instrument as instrument_module
+
+    instrument = SIMULATED if fake else UNCALIBRATED
+    if instrument_path:
+        try:
+            instrument = instrument_module.load(instrument_path)
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"the instrument document {instrument_path} could not be "
+                             f"read: {exc}") from exc
+    chosen = limits_path or envelope.default_path(instrument_path)
+    if not chosen or not (limits_path or os.path.isfile(chosen)):
+        return instrument, None
+    try:
+        return instrument, envelope.load(chosen)
+    except (OSError, envelope.LimitsError) as exc:
+        raise ValueError(f"the standing limits {chosen} could not be read: {exc}") from exc
+
+
 def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: str = "",
         instrument_path: str = "", limits_path: str = "",
         stream: TextIO | None = None) -> int:
@@ -138,29 +166,16 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
     refused nothing.
     """
     say = stream if stream is not None else sys.stderr
-    from .. import envelope, lab_dir
-    from .. import instrument as instrument_module
+    from .. import lab_dir
     from ..owner import LocalOwner, RemoteOwner, StartConsole
     from ..owner.remote import DEFAULT_COMMAND, DaemonError
 
-    instrument = SIMULATED if fake else UNCALIBRATED
-    if instrument_path:
-        try:
-            instrument = instrument_module.load(instrument_path)
-        except (OSError, ValueError) as exc:
-            print(f"{PROGRAM}: the instrument document {instrument_path} could not be read: "
-                  f"{exc}", file=say)
-            return 1
-
-    limits: Limits | None = None
-    chosen = limits_path or envelope.default_path(instrument_path)
-    if chosen and (limits_path or os.path.isfile(chosen)):
-        try:
-            limits = envelope.load(chosen)
-        except (OSError, envelope.LimitsError) as exc:
-            print(f"{PROGRAM}: the standing limits {chosen} could not be read: {exc}",
-                  file=say)
-            return 1
+    try:
+        instrument, limits = instrument_and_limits(
+            fake=fake, instrument_path=instrument_path, limits_path=limits_path)
+    except ValueError as exc:
+        print(f"{PROGRAM}: {exc}", file=say)
+        return 1
 
     if fake:
         owner: object = LocalOwner(fake=True, program=f"{PROGRAM} --fake").start()
@@ -184,7 +199,7 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
           f"{limits.path if limits is not None else '(none)'}", file=say)
     try:
         build_server(owner, library, output, instrument=instrument,
-                     instrument_path=instrument_path,
+                     instrument_path=instrument_path, log=AuditLog.beside(output, via="mcp"),
                      limits=limits).run("stdio")  # type: ignore[attr-defined]
     finally:
         if fake:

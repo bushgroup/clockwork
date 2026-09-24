@@ -15,6 +15,9 @@
   session uses to turn a person's request into an experiment: templates and methods, the boxes,
   acquisition and reading the files back, the interlock that decides what may be sent, and the
   audit log of every call.
+- [**Command line**](command-line.md). `clockwork <verb>`, every tool of the MCP server as a
+  subcommand for a terminal or a script: how its flags are written, the JSON it answers and its
+  exit statuses, and following a run from a shell.
 - [**Standing limits**](instrument-limits.md). The `limits.toml` beside the instrument file that
   bounds what an agent may send: the templates it may run and how far each knob may turn, the
   boxes it may address, the budget per daemon session, the cold-start check against what the

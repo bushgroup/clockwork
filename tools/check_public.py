@@ -191,15 +191,20 @@ def check_daemon() -> None:
     from the client. Then the lock: a daemon that is not `--fake` holds it and refuses a
     second owner by name, and a daemon started under someone else's lock exits naming
     them. The daemons that are not `--fake` scan no port, clear no console port and start
-    no console, so this is as safe on the instrument PC as on a bare clone.
+    no console, so this is as safe on the instrument PC as on a bare clone. Between the
+    two, the command line's round trip: `clockwork status` and `clockwork progress
+    --follow` as verbs over the `--fake` daemon, each a toolbox of its own (task 73).
     """
+    import contextlib
     import datetime as dt
     import io
+    import json
     import tempfile
     import threading
 
     from clockwork import instrument as instrument_module
     from clockwork import method as method_module
+    from clockwork.app import main as clockwork_main
     from clockwork.mips import Discovery
     from clockwork.owner import (
         Acquire,
@@ -283,6 +288,32 @@ def check_daemon() -> None:
                 and isinstance(progress[0].event, JobStarted)
                 and isinstance(progress[-1].event, JobFinished)
                 and sum(isinstance(e.event, RunDone) for e in progress) == 2)
+
+            def verb(*words: str) -> tuple[int, str, str]:
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = clockwork_main([*words, "--endpoint", server.command_endpoint])
+                return code, out.getvalue(), err.getvalue()
+
+            # The command line's round trip (lab record, task 73): verbs in toolboxes of
+            # their own, over the same daemon, reading what another client did to it.
+            code, out, err = verb("status")
+            said = json.loads(out) if code == 0 else {}
+            check_true(
+                "clockwork status, a verb over the daemon, answers JSON naming what another "
+                f"client armed ({(said.get('last_armed') or {}).get('method')!r})",
+                said.get("fake") is True
+                and (said.get("last_armed") or {}).get("method") == "daemon self-check")
+            job = str(handle.id) if handle is not None else "0"
+            code, out, err = verb("progress", "--job", job, "--follow")
+            last = json.loads(out.splitlines()[-1]) if code == 0 and out else {}
+            check_true(
+                "clockwork progress --follow reads out another client's finished job, "
+                "one JSON line per event and the answer last",
+                last.get("done") is True and len(last.get("runs", [])) == 2)
+            code, out, err = verb("progress", "--job", "999")
+            check_true(f"a refused verb is exit 1 and one sentence ({err.strip()!r})",
+                       code == 1 and out == "" and err.count("\n") == 1)
             client.shutdown("the self-check is done")
             thread.join(60)
         finally:
@@ -665,8 +696,8 @@ LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method",
                 "clockwork.method.template", "clockwork.instrument", "clockwork.transcript",
                 "clockwork.naming", "clockwork.owner", "clockwork.owner.wire",
                 "clockwork.owner.remote", "clockwork.owner.daemon", "clockwork.summary",
-                "clockwork.mcp", "clockwork.mcp.server", "clockwork.envelope",
-                "clockwork.record")
+                "clockwork.mcp", "clockwork.mcp.server", "clockwork.mcp.cli",
+                "clockwork.envelope", "clockwork.record")
 QT_PREFIXES = ("PySide6", "PyQt", "pyqtgraph", "shiboken")
 
 # --- opaque lab references ------------------------------------------------------------

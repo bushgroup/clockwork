@@ -27,7 +27,7 @@ from typing import Protocol
 
 from ..acq import Event, Run, Snapshot
 from ..mips import BoxState, Discovery
-from .jobs import ConsoleStatus, Job
+from .jobs import Armed, ConsoleStatus, Job
 from .lock import Holder
 
 __all__ = [
@@ -92,6 +92,9 @@ class OwnerStatus:
     stopping: bool = False
     snapshot: bool = False
     """Whether a send has left a snapshot for the next run to be stamped with."""
+    armed: Armed | None = None
+    """What the last send that finished left the boxes holding, or None before one and
+    while one is under way; `acquire` from any client is checked against it."""
     holder: Holder | None = None
     """Who holds the instrument lock as far as this owner knows: itself, the owner that
     refused it, or None under `--fake`, which never takes it."""

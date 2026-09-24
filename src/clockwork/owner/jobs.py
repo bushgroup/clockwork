@@ -18,6 +18,7 @@ from ..method import Method
 
 __all__ = [
     "Acquire",
+    "Armed",
     "ConsoleStatus",
     "Discover",
     "Job",
@@ -209,6 +210,28 @@ class SendResult:
     cold boxes is three refused `TBLSTRT`s and a run that stopped after three frames,
     which is a true report of a mistake nobody was warned about.
     """
+
+
+@dataclass(frozen=True, slots=True)
+class Armed:
+    """What the last send left the boxes holding, as the owner remembers it for every
+    client: `OwnerStatus.armed`.
+
+    Kept by the owner and not by a front end, because the boxes are the owner's: a
+    command line that arms in one process and acquires in the next, or two clients of
+    one daemon, would otherwise each know only what they sent themselves (lab record,
+    task 73). Cleared when a send begins and set only when one finishes, so a send that
+    failed part way leaves nothing that looks armed.
+    """
+
+    method: str
+    """The method's name."""
+    fingerprint: tuple
+    """`SendResult.armed`: what was put on the wire, for `matches_wire`."""
+    directory: str = ""
+    stem: str = ""
+    """Where the send's log went, which is the stem the send meant the next file for."""
+    setup: bool = True
 
 
 def wire_fingerprint(method: Method, *, setup: bool = True) -> tuple:

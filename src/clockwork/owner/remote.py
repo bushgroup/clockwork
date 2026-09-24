@@ -40,7 +40,7 @@ import zmq
 
 from .. import __version__
 from ..acq import BatchSeen, Snapshot
-from .interface import Handle, OwnerStatus, Progress, Said, StaleHandle
+from .interface import Handle, JobFinished, OwnerStatus, Progress, Said, StaleHandle
 from .jobs import Acquire, Job, Send
 from .local import sentence
 from .wire import from_wire, to_wire
@@ -367,10 +367,21 @@ def serve(owner: object, *, command: str = DEFAULT_COMMAND,
 
 def _carried(progress: Progress) -> object:
     """A `Progress` as its wire form, or a `Said` of the same number where the event has
-    none: a new kind of event must not be able to stall the stream or an `events` reply."""
+    none: a new kind of event must not be able to stall the stream or an `events` reply.
+
+    **A `JobFinished` stays a `JobFinished`**, without its result, since the event that
+    ends a job is the one a client is waiting for; as a `Said` it left every client
+    waiting on a job the daemon had finished (lab record, task 73)."""
     try:
         return to_wire(progress)
     except TypeError as exc:
+        event = progress.event
+        if isinstance(event, JobFinished):
+            try:
+                return to_wire(Progress(seq=progress.seq,
+                                        event=replace(event, result=None)))
+            except TypeError:
+                pass
         return to_wire(Progress(seq=progress.seq, event=Said(
             line=f"(a {type(progress.event).__name__} event could not cross to another "
                  f"process: {exc})")))

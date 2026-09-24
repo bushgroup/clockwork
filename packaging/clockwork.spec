@@ -127,7 +127,11 @@ PYSERIAL_EXCLUDES = [
 # import time although `clockwork mcp` serves only stdio. Not yet verified in a frozen
 # build: that the windowed executable (`console=False` below) hands the SDK usable stdin
 # and stdout pipes when an MCP client launches `clockwork.exe mcp`. Until a build is tried,
-# a session runs `clockwork mcp` from a checkout (docs/mcp-server.md).
+# a session runs `clockwork mcp` from a checkout (docs/mcp-server.md). The verbs
+# (`clockwork.mcp.cli`, task 73) reach the bundle the same way, from `main`'s own import;
+# unverified frozen likewise, since a windowed executable attaches to its parent console
+# for what it prints and a shell does not wait for it (docs/command-line.md runs them from
+# a checkout).
 a = Analysis(
     [ENTRYPOINT],
     pathex=[],

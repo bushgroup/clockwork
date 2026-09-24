@@ -51,11 +51,11 @@ from .. import method as _method
 from ..acq import Event, FoldRecord, FrameRecord, Run, Snapshot
 from ..acq.wire import Batch
 from ..instrument import Instrument
-from ..method import Method
+from ..method import Method, RfChannel
 from ..mips import BoxState, Discovery, Found, Silent
 from ..mips.discovery import PortInfo
 from .interface import Handle, OwnerStatus, Progress, Said
-from .jobs import ConsoleStatus, Discover, Job, SendResult
+from .jobs import Armed, ConsoleStatus, Discover, Job, SendResult
 from .lock import Holder
 
 __all__ = ["TYPE_KEY", "dumps", "example", "from_wire", "loads", "to_wire", "wire_types"]
@@ -65,10 +65,15 @@ TYPE_KEY = "@type"
 cannot collide with a key a mapping here holds: box commands, `config.txt` keys and box
 names never begin with `@`."""
 
-_PLAIN = (Snapshot, BoxState, Run, FrameRecord, FoldRecord, SendResult, ConsoleStatus,
-          Discovery, Found, Silent, PortInfo, Handle, Progress, OwnerStatus, Holder)
+_PLAIN = (Snapshot, BoxState, Run, FrameRecord, FoldRecord, SendResult, Armed,
+          ConsoleStatus, Discovery, Found, Silent, PortInfo, Handle, Progress, OwnerStatus,
+          Holder, RfChannel)
 """The dataclasses that cross the interface other than jobs and events, which are
-collected by walking their subclasses so a new one is included without a list."""
+collected by walking their subclasses so a new one is included without a list.
+`RfChannel` is here for `wire_fingerprint`, which carries a method's RF declarations
+as they are: without it a `Send` of any method that declares an RF head finished in
+the daemon and never, as far as a client could tell, anywhere else (lab record,
+task 73)."""
 
 _LEFT_BEHIND = {(Found, "box")}
 """Fields that never cross a process boundary, beside the private ones."""

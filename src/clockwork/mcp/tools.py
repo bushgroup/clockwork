@@ -157,8 +157,10 @@ class Toolbox:
 
     Any thread may call any tool: the MCP SDK runs each call on a worker thread of its
     own, and two can overlap. What this object remembers -- the handles it issued, the
-    requests it has minted and how many runs each has had, what it last armed -- is
-    kept under one lock.
+    requests it has minted and how many runs each has had -- is kept under one lock.
+    **What the boxes are holding is not among it**: that is the owner's
+    (`OwnerStatus.armed`, the send's `Snapshot`), so an `acquire` in one process follows
+    an `arm` in another, as the command line's verbs do (lab record, task 73).
     """
 
     def __init__(
@@ -184,8 +186,6 @@ class Toolbox:
         self._guard = threading.Lock()
         self._session: tuple[str, _dt.datetime] | None = None
         """The daemon session's id and start, asked for once: the budget's window."""
-        self._armed_states: tuple[BoxState, ...] = ()
-        """What the last `arm`'s send read back, after its `setup` or else before."""
         self._handles: dict[int, Handle] = {}
         self._words: dict[str, str] = {}
         """Request id to the words it was minted for."""
@@ -194,12 +194,10 @@ class Toolbox:
         continues the same request."""
         self._places: dict[str, int] = {}
         """Request id to the place its next run takes, counted from 1."""
-        self._armed: tuple = ()
-        self._armed_stem = ""
-        self._armed_name = ""
-        self._armed_conditions = ""
         self._planned: dict[int, int] = {}
         """Job number to the replicates it was asked for, for `progress`'s position."""
+        self._recorders: dict[int, threading.Thread] = {}
+        """Job number to the thread adding its files to its request's run record."""
 
     # -- the one way in ----------------------------------------------------------
 
@@ -515,13 +513,6 @@ class Toolbox:
             record.append("arms", {**arming, "job": handle.id, "finished": False})
             return {"request_id": identity, "record": record.path,
                     **self._unfinished(handle, event)}
-        snapshot = result.snapshot
-        with self._guard:
-            self._armed = result.armed
-            self._armed_stem = stem
-            self._armed_name = loaded.metadata.name
-            self._armed_conditions = conditions
-            self._armed_states = (snapshot.after or snapshot.before) if snapshot else ()
         record.append("arms", {**arming, "finished": True,
                                "seconds": round(result.seconds, 2),
                                "send_log": result.send_log})
@@ -565,15 +556,15 @@ class Toolbox:
         loaded, rendered, path = self._method(method, template, knobs, labels)
         self._refuse_unless_allowed(loaded, rendered, request, replicates=replicates)
         who = self._initials(initials)
-        with self._guard:
-            armed, armed_stem = self._armed, self._armed_stem
-            conditions = self._armed_conditions
-            states = self._armed_states
-        if not (matches_wire(armed, loaded)
-                and self.owner.status().snapshot):  # type: ignore[attr-defined]
+        armed = self.owner.status().armed  # type: ignore[attr-defined]
+        snapshot = self.owner.snapshot()  # type: ignore[attr-defined]
+        if armed is None or snapshot is None or not matches_wire(armed.fingerprint, loaded):
             raise ToolFailure(
                 "the boxes are not holding this method: arm it first, with the same "
                 "method or template and knob values")
+        states = snapshot.after or snapshot.before
+        conditions = snapshot.conditions
+        armed_stem = armed.stem if _same_directory(armed.directory, self.output) else ""
         refused, cautioned = envelope.judge(
             envelope.cold_start(loaded, states, declared=True),
             self._cold_start_mode(rendered))
@@ -601,8 +592,11 @@ class Toolbox:
             "job": handle.id, "replicates": replicates, "first_place": place,
             "method": loaded.metadata.name,
             "template": _template_entry(rendered, path), "cold_start": cautioned})
-        threading.Thread(target=self._record_runs, args=(handle, record),
-                         name=f"run record, job {handle.id}", daemon=True).start()
+        recorder = threading.Thread(target=self._record_runs, args=(handle, record),
+                                    name=f"run record, job {handle.id}", daemon=True)
+        with self._guard:
+            self._recorders[handle.id] = recorder
+        recorder.start()
         return {"job": handle.id, "request_id": identity, "first_place": place,
                 "replicates": replicates, "label": handle.label,
                 "cold_start": cautioned, "record": record.path,
@@ -620,10 +614,7 @@ class Toolbox:
         true once the job has finished or failed; a finished acquisition lists its files
         under `runs`, and a failed job says why under `failed`.
         """
-        with self._guard:
-            handle = self._handles.get(job)
-        if handle is None:
-            raise ToolFailure(f"job {job} was not started through this server")
+        handle = self._known(job)
         wait = max(0.0, min(float(wait_s), PROGRESS_WAIT_MAX_S))
         deadline = time.monotonic() + wait
         entries: list[Progress] = []
@@ -643,8 +634,16 @@ class Toolbox:
                          and isinstance(entries[number + 1].event, BatchSeen))]
         counter = next((entry.event for entry in reversed(history)
                         if isinstance(entry.event, BatchSeen)), None)
+        started = next((entry.event.job for entry in history
+                        if isinstance(entry.event, JobStarted)), None)
         with self._guard:
             planned = self._planned.get(job)
+            recorded = job in self._recorders
+        if planned is None and isinstance(started, Acquire):
+            planned = started.replicates
+        if not recorded and isinstance(started, Acquire):
+            self._record_seen(started, [entry.event.run for entry in entries
+                                        if isinstance(entry.event, RunDone)])
         answer: dict[str, Any] = {
             "job": job, "label": handle.label,
             "events": [_entry(entry) for entry in shown],
@@ -683,14 +682,13 @@ class Toolbox:
     @tool("acquisition")
     def status(self) -> dict:
         """The instrument as the server sees it: simulated or real, the console, the
-        boxes, the job running and those queued, the method this server last armed and
-        the stem it named then, whether sends through this server are refused and why,
+        boxes, the job running and those queued, the method the boxes were last armed
+        with and the stem that arming named, whether sends through this server are refused and why,
         the standing limits in force, and how much of this daemon session's budget is
         left."""
         state = self.owner.status()  # type: ignore[attr-defined]
-        with self._guard:
-            armed = ({"method": self._armed_name, "stem": self._armed_stem}
-                     if self._armed else None)
+        armed = ({"method": state.armed.method, "stem": state.armed.stem}
+                 if state.armed is not None else None)
         ledger = self._ledger()
         refused = guard_acquisition(self.owner, None, "status", limits=self.limits,
                                     ledger=ledger)
@@ -974,6 +972,30 @@ class Toolbox:
                 f"{handle.id}), so nothing was sent; call status to see what is running")
         return tuple(state for state in states.values() if isinstance(state, BoxState))
 
+    def recorder(self, job: int) -> threading.Thread | None:
+        """The thread adding job `job`'s files to its run record, if this toolbox
+        started the job: what a process that must not exit before the record is whole
+        -- a command line's `acquire` -- joins."""
+        with self._guard:
+            return self._recorders.get(job)
+
+    def _record_seen(self, job: Acquire, runs: list[Run]) -> None:
+        """Add files a `progress` call saw to their request's run record, for a job
+        another process started and so no thread here is recording: an `acquire` verb
+        run with `--no-wait`, followed later. Replaces by stem, so a file seen twice is
+        entered once; never raises."""
+        if not runs or not job.series:
+            return
+        try:
+            found = find_record(job.directory or self.output, job.series)
+            if found is None:
+                return
+            record = RunRecord(found)
+            for run in runs:
+                record.add_file(_file_entry(run))
+        except Exception:  # noqa: BLE001 -- the record is the run's, never the answer's
+            return
+
     def _record_runs(self, handle: Handle, record: RunRecord) -> None:
         """Add each file an acquisition writes to its request's record, as the owner
         reports it, until the job ends. On a thread of its own; a record it cannot
@@ -1005,7 +1027,9 @@ class Toolbox:
         return cleaned
 
     def _request(self, words: str, identity: str) -> tuple[str, str]:
-        """The request id for these words, minted on first use, and the words."""
+        """The request id for these words, and the words: `identity` when one is given,
+        else the id these words already have -- in this toolbox, or in this daemon
+        session's audit log from another process -- else a new one."""
         words = words.strip()
         with self._guard:
             if identity:
@@ -1013,13 +1037,26 @@ class Toolbox:
                 self._ids.setdefault(words, identity)
                 return identity, words
             known = self._ids.get(words)
-            if known is not None:
-                return known, words
-            digest = hashlib.sha256(f"{time.time_ns()}{words}".encode()).hexdigest()[:6]
-            identity = f"{_dt.datetime.now():%y%m%d-%H%M%S}-{digest}"
-            self._ids[words] = identity
-            self._words[identity] = words
-            return identity, words
+        if known is None:
+            known = self._logged_request(words)
+        with self._guard:
+            if known is None:
+                known = self._ids.get(words)
+            if known is None:
+                digest = hashlib.sha256(f"{time.time_ns()}{words}".encode()).hexdigest()[:6]
+                known = f"{_dt.datetime.now():%y%m%d-%H%M%S}-{digest}"
+            self._ids.setdefault(words, known)
+            self._words.setdefault(known, words)
+            return known, words
+
+    def _logged_request(self, words: str) -> str | None:
+        """An id these words were given earlier in this daemon session by another
+        toolbox -- another process's -- off the audit log."""
+        try:
+            session = self._session_of()[0]
+        except DaemonError:
+            return None
+        return self.log.request_for(words, session)
 
     def _next_place_on_disk(self, identity: str) -> int:
         """One past the highest place this request's files already hold, for a request
@@ -1034,6 +1071,29 @@ class Toolbox:
     def _stem_taken(self, stem: str) -> bool:
         return any(os.path.exists(os.path.join(self.output, stem + suffix))
                    for suffix in (RAW_SUFFIX, SUMMED_SUFFIX))
+
+    def _known(self, job: int) -> Handle:
+        """The handle for job number `job`: one this toolbox issued, or else one the
+        owner still knows, running, queued or with its progress kept -- a job another
+        process started, such as an `acquire` verb's that a `progress` verb follows."""
+        with self._guard:
+            handle = self._handles.get(job)
+        if handle is not None:
+            return handle
+        state = self.owner.status()  # type: ignore[attr-defined]
+        found = next((candidate for candidate in (state.running, *state.queued)
+                      if candidate is not None and candidate.id == job), None)
+        if found is None:
+            bare = Handle(id=job, kind="", label="")
+            found = next((entry.event.handle for entry in self.owner.events(bare, 0)  # type: ignore[attr-defined]
+                          if isinstance(entry.event, (JobStarted, JobFinished, JobFailed))),
+                         None)
+        if found is None:
+            raise ToolFailure(f"job {job} is not one the owner knows: never submitted, or "
+                              "finished long enough ago that its progress was let go")
+        with self._guard:
+            self._handles.setdefault(found.id, found)
+        return found
 
     def _submit(self, job: object) -> Handle:
         handle = self.owner.submit(job)  # type: ignore[attr-defined]
@@ -1127,6 +1187,13 @@ def _run_summary(run: Run) -> dict:
         "scans_published": run.scans_published,
         "warnings": list(run.warnings),
     }
+
+
+def _same_directory(first: str, second: str) -> bool:
+    if not first or not second:
+        return False
+    return (os.path.normcase(os.path.abspath(first))
+            == os.path.normcase(os.path.abspath(second)))
 
 
 def _cold_start_refusal(refused: list[str]) -> str:
