@@ -76,7 +76,7 @@ wheels = [
 
 [[package]]
 name = "clockwork"
-version = "1.0.0"
+version = "1.1.0.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "mainspring", extra = ["fast"] },

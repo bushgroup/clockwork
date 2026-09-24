@@ -91,7 +91,21 @@ wording -- carries no promise.
 
 4. Only then, an annotated tag on the bump commit, pushed: `git tag -a v<version> <commit> -m
    "clockwork <version>"`, `git push origin v<version>`. The tag always names the commit the
-   installer was built from.
+   installer was built from. Then attach the installer to a GitHub release on that tag.
+5. Straight after, a second version-only commit moves `main` to the next development version
+   (`1.1.0.dev0` after `1.0.0`), in the same three places plus `uv lock`. After that, no build from
+   `main` can carry the number of the release before it.
+
+**Versions between releases** follow PEP 440, in its normalized spelling in all three declarations
+(`1.1.0rc1`, not `1.1.0-rc.1`), since `check_public.py` compares them as strings:
+
+- **Development builds** (`X.Y.Z.devN`) get no tag and no release. `_commit.py` names the commit
+  one came from.
+- **A build handed to the bench for trial** is a release candidate, `X.Y.ZrcN`. It is cut by the
+  same steps as a stable release, and its GitHub release is marked *pre-release*, so "Latest" keeps
+  naming the last stable one.
+- **A pushed tag is never moved or deleted.** A mistake in a release is fixed by the next patch
+  or candidate number.
 
 ## What differs from mainspring's chain
 
