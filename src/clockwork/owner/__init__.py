@@ -11,11 +11,15 @@ it never imports Qt (enforced by `tests/test_architecture.py` and
     local.py      `LocalOwner`: the queue, the thread, every wire call, in this process
     lock.py       the instrument lock: one owner per user, refused before any port
     wire.py       every job, event and result to and from JSON-ready data
+    remote.py     `DaemonServer`, an owner behind two loopback ZeroMQ sockets, and
+                  `RemoteOwner`, the same protocol spoken to it from another process
+    daemon.py     `clockwork serve`: the lock, the orphaned console, the log, Ctrl-C
 
 `send_phases` and `run_acquisition` stay the only two entry points onto the wire, and
 `LocalOwner` is the only caller of either outside a bench script. The window's `Worker`
-is an adapter over a `LocalOwner`; the daemon's client will be a second implementation
-of the same protocol (lab record, task 68).
+is an adapter over a `LocalOwner`; `RemoteOwner` is a second implementation of the same
+protocol, over `docs/daemon-protocol.md` to a `LocalOwner` in `clockwork serve` (lab
+record, task 68).
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ from .interface import (
     Progress,
     RunDone,
     Said,
+    StaleHandle,
 )
 from .jobs import (
     Acquire,
@@ -49,6 +54,14 @@ from .jobs import (
 )
 from .local import FAKE_FRAME_HOLD_S, LocalOwner, fake_rack, sentence
 from .lock import Holder, InstrumentLock, LockError, LockHeld
+from .remote import (
+    DaemonError,
+    DaemonRefused,
+    DaemonServer,
+    DaemonUnavailable,
+    Hello,
+    RemoteOwner,
+)
 
 __all__ = [
     "FAKE_FRAME_HOLD_S",
@@ -56,9 +69,14 @@ __all__ = [
     "BoxStateRead",
     "ConsoleChanged",
     "ConsoleStatus",
+    "DaemonError",
+    "DaemonRefused",
+    "DaemonServer",
+    "DaemonUnavailable",
     "Discover",
     "Discovered",
     "Handle",
+    "Hello",
     "Holder",
     "InstrumentLock",
     "Job",
@@ -72,11 +90,13 @@ __all__ = [
     "OwnerStatus",
     "Progress",
     "ReadState",
+    "RemoteOwner",
     "RestartConsole",
     "RunDone",
     "Said",
     "Send",
     "SendResult",
+    "StaleHandle",
     "StartConsole",
     "fake_rack",
     "matches_wire",

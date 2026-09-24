@@ -182,6 +182,148 @@ def check_owner() -> None:
                    read_holder(path) is None)
 
 
+def check_daemon() -> None:
+    """`clockwork serve` over the stand-ins, driven through its socket (lab record, task 68).
+
+    A `--fake` daemon on ports the operating system picks, so a real daemon on this
+    machine is never met, driven by `RemoteOwner` exactly as a client in another process
+    would drive it: discover, send, two replicates, the events in order, and a shutdown
+    from the client. Then the lock: a daemon that is not `--fake` holds it and refuses a
+    second owner by name, and a daemon started under someone else's lock exits naming
+    them. The daemons that are not `--fake` scan no port, clear no console port and start
+    no console, so this is as safe on the instrument PC as on a bare clone.
+    """
+    import datetime as dt
+    import io
+    import tempfile
+    import threading
+
+    from clockwork import instrument as instrument_module
+    from clockwork import method as method_module
+    from clockwork.mips import Discovery
+    from clockwork.owner import (
+        Acquire,
+        Discover,
+        InstrumentLock,
+        JobFinished,
+        JobStarted,
+        LocalOwner,
+        RunDone,
+        Send,
+        daemon,
+    )
+    from clockwork.owner.lock import read_holder
+    from clockwork.owner.remote import PROTOCOL, RemoteOwner
+
+    scans = 32
+    table = (f"STBLDAT;0:[A:1,0:A:1:B:1,500:B:0,{method_module.enable_fall_tick(scans)}:"
+             f"A:0,{method_module.table_period(scans)}:];")
+    method = method_module.from_dict({
+        "schema_version": 2,
+        "metadata": {"name": "daemon self-check", "created": dt.date(2026, 9, 23)},
+        "acquisition": {"frames": 1, "scans": scans, "accumulations": 2,
+                        "file_stem": "260923_SC_001", "repetition_mode": "per_repetition",
+                        "keep_raw": True, "enable": {"box": "box1", "channel": "A"}},
+        "boxes": [{"name": "box1", "port": "COM3", "setup": ["STBLCLK,EXT"],
+                   "load": [table], "arm": ["SMOD,TBL"]}],
+        "start": [["box1", "TBLSTRT"]],
+        "reset": [["box1", "SMOD,LOC"], ["box1", "SMOD,TBL"]],
+    })
+    instrument = instrument_module.from_dict({
+        "schema_version": 1, "instrument": {"name": "daemon self-check"},
+        "vertical": {"full_scale_v": 0.5, "offset_v": 0.251, "inverted": False}})
+
+    def start(scratch: str, **options: object) -> tuple[threading.Thread, list, io.StringIO]:
+        bound: list[object] = []
+        codes: list[int] = []
+        log = io.StringIO()
+        ready = threading.Event()
+
+        def body() -> None:
+            codes.append(daemon.run(
+                command="tcp://127.0.0.1:*", events="tcp://127.0.0.1:*", output=scratch,
+                log_file=os.path.join(scratch, "serve.log"), stream=log,
+                on_ready=lambda server: (bound.append(server), ready.set()),
+                handle_signals=False, **options))
+            ready.set()
+
+        thread = threading.Thread(target=body, name="self-check daemon")
+        thread.start()
+        ready.wait(30)
+        return thread, bound + codes, log
+
+    def no_scan(**_: object) -> Discovery:
+        return Discovery()
+
+    with tempfile.TemporaryDirectory() as scratch:
+        thread, (server, *_), log = start(scratch, fake=True)
+        client = RemoteOwner(server.command_endpoint, timeout=10)
+        try:
+            hello = client.hello()
+            check_true(f"a --fake daemon answers hello with protocol {hello.protocol}",
+                       hello.protocol == PROTOCOL and hello.fake and hello.holder is None)
+            finished = [_ended(client, client.submit(job), 180) for job in (
+                Discover(method=method), Send(method=method),
+                Acquire(method=method, instrument=instrument, initials="SC",
+                        replicates=2))]
+            runs = finished[-1].result if isinstance(finished[-1], JobFinished) else ()
+            check_true(
+                "a client in another process's shoes discovers, sends and acquires two "
+                f"replicates through it ({[type(f).__name__ for f in finished]}, "
+                f"{len(runs)} runs)",
+                all(isinstance(f, JobFinished) for f in finished) and len(runs) == 2
+                and all(run.complete and os.path.isfile(run.summed_path) for run in runs))
+            handle = finished[-1].handle if finished[-1] is not None else None
+            progress = client.events(handle) if handle is not None else []
+            seqs = [entry.seq for entry in progress]
+            check_true(
+                "the series' events arrive numbered in order, started first, finished "
+                "last, one RunDone per replicate",
+                bool(progress) and seqs == sorted(set(seqs))
+                and isinstance(progress[0].event, JobStarted)
+                and isinstance(progress[-1].event, JobFinished)
+                and sum(isinstance(e.event, RunDone) for e in progress) == 2)
+            client.shutdown("the self-check is done")
+            thread.join(60)
+        finally:
+            client.close()
+            if thread.is_alive():
+                server.request_shutdown("the self-check is done")
+                thread.join(60)
+        check_true("a client's shutdown ends the daemon cleanly",
+                   not thread.is_alive() and "clockwork serve stopped" in log.getvalue())
+
+        lock = os.path.join(scratch, "instrument.lock")
+        quiet = {"fake": False, "lock_path": lock, "discover": no_scan,
+                 "clear_port": False, "start_console": False}
+        thread, (server, *_), log = start(scratch, **quiet)
+        try:
+            holder = read_holder(lock)
+            second = LocalOwner(program="the clockwork window", lock_path=lock,
+                                discover=no_scan)
+            check_true(
+                f"a daemon that is not --fake holds the lock and a second owner is refused "
+                f"by name ({second.refused!r})",
+                holder is not None and holder.program == "clockwork serve"
+                and "clockwork serve" in second.refused)
+        finally:
+            server.request_shutdown("the self-check is done")
+            thread.join(60)
+        check_true("and lets go of it when it stops", read_holder(lock) is None)
+
+        window = InstrumentLock("the clockwork window", lock)
+        window.acquire()
+        try:
+            log = io.StringIO()
+            code = daemon.run(command="tcp://127.0.0.1:*", events="tcp://127.0.0.1:*",
+                              log_file=os.path.join(scratch, "refused.log"), stream=log,
+                              handle_signals=False, **quiet)
+        finally:
+            window.release()
+        check_true("a daemon started under someone else's lock exits 1 naming them",
+                   code == 1 and "owned by the clockwork window" in log.getvalue())
+
+
 def _ended(owner: object, handle: object, timeout: float = 10.0) -> object | None:
     """The `JobFinished` or `JobFailed` of `handle`, polled for; None on a timeout."""
     import time as _time
@@ -218,7 +360,7 @@ def declared_versions() -> dict[str, str]:
 LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method",
                 "clockwork.method.template", "clockwork.instrument", "clockwork.transcript",
                 "clockwork.naming", "clockwork.owner", "clockwork.owner.wire",
-                "clockwork.summary")
+                "clockwork.owner.remote", "clockwork.owner.daemon", "clockwork.summary")
 QT_PREFIXES = ("PySide6", "PyQt", "pyqtgraph", "shiboken")
 
 # --- opaque lab references ------------------------------------------------------------
@@ -2107,6 +2249,9 @@ def main() -> int:
 
     section("the owner")
     check_owner()
+
+    section("the daemon")
+    check_daemon()
 
     section("the window")
     # Task 50. Nothing here opens a window: what a clone can establish without a

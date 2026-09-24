@@ -18,10 +18,12 @@ the tests that assert the seam cost nothing for it.
 is opened and where a traceback goes are questions a test can ask without a window, and
 the last of them has to be answerable before `QApplication` exists.
 
-Three arguments. `--fake` builds the whole window over `FakeBox` and `FakeConsole`, so
-every path above the wire runs with no instrument on the bench; `--self-check` is the
-installer's proof that the lower layers work inside a frozen build, with no window
-shown; and no argument at all is the trainee's launch.
+Three arguments and one command. `--fake` builds the whole window over `FakeBox` and
+`FakeConsole`, so every path above the wire runs with no instrument on the bench;
+`--self-check` is the installer's proof that the lower layers work inside a frozen
+build, with no window shown; and no argument at all is the trainee's launch.
+`clockwork serve` is the daemon (`clockwork.owner.daemon`), which owns the instrument
+with no window at all and never imports Qt.
 """
 
 from __future__ import annotations
@@ -233,6 +235,25 @@ def main(argv: list[str] | None = None) -> int:
              "instrument on it. Nothing a --fake run reports is evidence about a MIPS "
              "box or a digitizer.",
     )
+    commands = parser.add_subparsers(dest="command", metavar="COMMAND")
+    serve = commands.add_parser(
+        "serve", help="own the instrument with no window and serve clients over a "
+                      "loopback socket (docs/daemon-protocol.md)",
+        description="Own the boxes and the acquisition console, and serve the window, "
+                    "the command line and the MCP server over a loopback socket, until "
+                    "Ctrl-C or a client's shutdown.")
+    serve.add_argument(
+        "--fake", dest="serve_fake", action="store_true",
+        help="simulated boxes and console; takes no lock. Nothing it reports is "
+             "evidence about a MIPS box or a digitizer.")
+    serve.add_argument("--output", metavar="DIR", default="",
+                       help="where a run's files go when a job names no directory "
+                            "(default: the working directory)")
+    serve.add_argument("--library", metavar="DIR", default="",
+                       help="the method library clients may list")
+    serve.add_argument("--console", metavar="PATH", default="",
+                       help="the acquisition console executable, or a directory holding "
+                            "it (default: $CLOCKWORK_CONSOLE, then the installer's)")
     args = parser.parse_args(argv)
 
     # Before anything imports numba, lazily or otherwise: `_self_check` folds, and the
@@ -243,6 +264,17 @@ def main(argv: list[str] | None = None) -> int:
     _seed_numba_cache(os.environ["NUMBA_CACHE_DIR"])
 
     import clockwork
+
+    if args.command == "serve":
+        # A windowed build has no stdout of its own; the daemon's log belongs in the
+        # terminal it was started from, as `--self-check`'s report does (task 60). A
+        # checkout already has one, and attaching would take it from pytest.
+        if getattr(sys, "frozen", False):
+            _attach_parent_console()
+        from clockwork.owner import daemon
+
+        return daemon.run(fake=args.serve_fake, output=args.output, library=args.library,
+                          console=args.console)
 
     if args.self_check:
         report_path = None if _attach_parent_console() else _open_report_file()

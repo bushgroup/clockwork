@@ -43,6 +43,7 @@ import os
 import queue
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
 
@@ -94,6 +95,7 @@ from .interface import (
     Progress,
     RunDone,
     Said,
+    StaleHandle,
 )
 from .jobs import (
     Acquire,
@@ -121,6 +123,8 @@ Taken from the bench script that first needed it (lab record, task 28).
 """
 
 _NO_SPECTRUM = np.zeros(0)
+
+_CLOSING = "clockwork is shutting down, so this job was never started"
 
 
 # -- the rack ----------------------------------------------------------------------
@@ -176,7 +180,12 @@ class LocalOwner:
     ) -> None:
         self.fake = fake
         self.program = program
+        self.session = uuid.uuid4().hex[:12]
+        """This owner's own name for itself, stamped into every handle it issues, so
+        that a handle from an owner that has since stopped is refused rather than read
+        as this one's job of the same number (lab record, task 68)."""
         self._on_event = on_event
+        self._listeners: list[Callable[[Handle, Progress], None]] = []
         self._scan = discover
         self._limit = limit
         self._history_jobs = history
@@ -203,6 +212,10 @@ class LocalOwner:
         self.console_status = ConsoleStatus()
 
         self._queue: queue.Queue[tuple[Handle, Job] | None] = queue.Queue()
+        self._closing = False
+        """Set by `shutdown`: every job still queued behind it fails unstarted. Without
+        it a queued Acquire would begin after the stop meant to end the session, since
+        `_acquire` clears the stop flag for its own series."""
         self._stop = threading.Event()
         self._stop_reason = ""
         self._setup_log: tuple[str, str] | None = None
@@ -252,16 +265,30 @@ class LocalOwner:
     # -- the protocol --------------------------------------------------------
 
     def submit(self, job: Job) -> Handle:
-        """Queue a job. Never blocks; any thread may call it."""
-        handle = Handle(id=next(self._ids), kind=type(job).__name__, label=job.label)
+        """Queue a job. Never blocks; any thread may call it.
+
+        After `shutdown` the job is not queued at all: it is reported failed at once,
+        because the thread that would have run it may already be gone.
+        """
+        handle = Handle(id=next(self._ids), kind=type(job).__name__, label=job.label,
+                        owner=self.session)
         with self._guard:
-            self._pending.append(handle)
             self._history[handle.id] = []
+            if not self._closing:
+                self._pending.append(handle)
             self._forget_old_jobs()
-        self._queue.put((handle, job))
+        if self._closing:
+            self._report(JobFailed(handle=handle, job=job, message=_CLOSING), handle)
+        else:
+            self._queue.put((handle, job))
         return handle
 
     def events(self, handle: Handle, after: int = 0) -> list[Progress]:
+        if handle.owner and handle.owner != self.session:
+            raise StaleHandle(
+                f"job {handle.id} ({handle.label}) was submitted to a different clockwork "
+                "owner, most likely one that has since stopped, and its progress went "
+                "with it")
         with self._guard:
             return [entry for entry in self._history.get(handle.id, ())
                     if entry.seq > after]
@@ -299,7 +326,12 @@ class LocalOwner:
         )
 
     def shutdown(self, reason: str = "the owner is shutting down") -> None:
-        """Stop the thread and let go of everything it owns. Idempotent."""
+        """Stop the thread and let go of everything it owns. Idempotent.
+
+        The run in flight ends after its current repetition and its fold, as a Stop
+        would end it; every job queued behind it fails without starting.
+        """
+        self._closing = True
         self.stop(reason)
         self._queue.put(None)
 
@@ -313,6 +345,25 @@ class LocalOwner:
     def refused(self) -> str:
         """The lock's sentence while another owner holds the instrument, else empty."""
         return self._refused
+
+    @property
+    def closing(self) -> bool:
+        """Whether `shutdown` has been asked for."""
+        return self._closing
+
+    def listen(self, callback: Callable[[Handle, Progress], None]) -> None:
+        """Also hand every numbered entry to `callback`, as it is kept.
+
+        For the daemon's event stream (`clockwork.owner.remote`), which has to publish
+        the entries in the order they were numbered: `on_event` is called outside the
+        owner's lock, so two threads reporting at once (the loop and the folding worker)
+        can reach it out of order. **`callback` is called with that lock held** and must
+        do nothing but hand the entry on (a `queue.put`); calling back into this owner
+        from it deadlocks. What it is given is what `events` would return, a `BatchSeen`
+        without its spectrum included.
+        """
+        with self._guard:
+            self._listeners.append(callback)
 
     def start(self) -> LocalOwner:
         """Run `serve` on a thread of this owner's own."""
@@ -341,6 +392,10 @@ class LocalOwner:
                 with self._guard:
                     if handle in self._pending:
                         self._pending.remove(handle)
+                if self._closing:
+                    self._report(JobFailed(handle=handle, job=job, message=_CLOSING),
+                                 handle)
+                    continue
                 self._running = self._current = handle
                 self._report(JobStarted(handle=handle, job=job))
                 try:
@@ -371,9 +426,14 @@ class LocalOwner:
             return self._read_state(job)
         raise TypeError(f"no owner handler for {type(job).__name__}")
 
-    def _report(self, event: Event) -> None:
-        """Keep an event against its job and hand it to `on_event`. Any thread."""
-        handle = self._current or Handle(id=0, kind="", label="")
+    def _report(self, event: Event, handle: Handle | None = None) -> None:
+        """Keep an event against its job and hand it to `on_event`. Any thread.
+
+        `handle` is the job's, where it is not the one running: a job refused before it
+        starts is reported against itself.
+        """
+        handle = handle or self._current or Handle(id=0, kind="", label="",
+                                                    owner=self.session)
         kept = event
         if isinstance(event, BatchSeen) and event.batch.mz.size:
             kept = replace(event, batch=replace(event.batch, mz=_NO_SPECTRUM))
@@ -387,6 +447,8 @@ class LocalOwner:
                 entries.append(entry)
                 if len(entries) > self._limit:
                     del entries[:len(entries) - self._limit]
+            for listener in self._listeners:
+                listener(handle, entry)
         if self._on_event is not None:
             self._on_event(handle, event)
 

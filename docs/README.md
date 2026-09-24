@@ -7,6 +7,10 @@
 - [**Acquisition console protocol**](console-protocol.md). The ZeroMQ command set, message
   formats and data stream of PNNL's AqMD3 Acquisition Console for the SA220P digitizer, and the
   division of UIMF writing between the console and its client. Derived from the console's source.
+- [**Daemon protocol**](daemon-protocol.md). `clockwork serve`, the process that owns the boxes
+  and the acquisition console with no window, and the loopback ZeroMQ protocol its clients use:
+  the requests and replies, the event stream, the instrument lock, shutdown, and what happens when
+  either side dies.
 - [**Method file and provenance**](method-file-format.md). The flat TOML document a trainee loads
   to run an experiment: each box's strings in three phases, the ordered sequence that starts and
   restarts them, and the stamp that traces every acquisition back to the method that produced it.

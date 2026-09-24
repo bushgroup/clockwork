@@ -1284,6 +1284,109 @@ def _executable_in(where: str) -> str | None:
     return None
 
 
+# -- one left behind -------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Listener:
+    """Whatever is listening on a port: its process id and executable name.
+
+    `pid` is 0 and `image` empty where the operating system would not say, which off
+    Windows is always: nothing here asks anything but `netstat` and `tasklist`.
+    """
+
+    port: int
+    pid: int = 0
+    image: str = ""
+
+    @property
+    def is_console(self) -> bool:
+        return self.image.lower() == EXECUTABLE_NAME.lower()
+
+    @property
+    def text(self) -> str:
+        who = self.image or "an unidentified program"
+        return f"{who} (pid {self.pid})" if self.pid else who
+
+
+def listening_on(port: int = COMMAND_PORT, host: str = "127.0.0.1") -> Listener | None:
+    """Who holds `port`, or None where nothing accepts a connection on it.
+
+    For the console left behind by an owner that died: its process is the child of
+    `cmd`, not of the owner, so it outlives a killed window or daemon and keeps port
+    5555 against the next start, which then fails to bind (lab record, task 68). The
+    connect comes first because it is cheap and decisive; the process is named only
+    when something is there.
+    """
+    if not _port_answers(host, port):
+        return None
+    if os.name != "nt":
+        return Listener(port=port)
+    try:
+        netstat = subprocess.run(  # noqa: S603, S607
+            ["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True,
+            check=False, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return Listener(port=port)
+    pid = listening_pid(netstat, port)
+    return Listener(port=port, pid=pid, image=_image_of(pid) if pid else "")
+
+
+def listening_pid(netstat: str, port: int) -> int:
+    """The pid `netstat -ano` gives for a socket listening on `port`, or 0.
+
+    A listening socket is the one whose foreign address is all zeros, which is read
+    rather than the state column because that column is translated on a Windows that
+    is not in English.
+    """
+    for line in netstat.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[0].upper() != "TCP":
+            continue
+        local, foreign, pid = parts[1], parts[2], parts[-1]
+        if local.rsplit(":", 1)[-1] == str(port) and foreign in ("0.0.0.0:0", "[::]:0") \
+                and pid.isdigit():
+            return int(pid)
+    return 0
+
+
+def _image_of(pid: int) -> str:
+    try:
+        out = subprocess.run(  # noqa: S603, S607
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, check=False, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    first = out.strip().splitlines()[0] if out.strip() else ""
+    return first.split('","')[0].strip('"') if first.startswith('"') else ""
+
+
+def stop_listener(listener: Listener, timeout: float = STOP_GRACE_S) -> bool:
+    """Kill the process tree behind `listener` and wait for its port to close.
+
+    True once nothing answers on the port. Called only on a console, by an owner that
+    holds the instrument lock, so no live clockwork can be the one it stops.
+    """
+    if not listener.pid:
+        return False
+    decided(f"stopping {listener.text}, left listening on port {listener.port}")
+    if os.name == "nt":
+        subprocess.run(  # noqa: S603, S607
+            ["taskkill", "/PID", str(listener.pid), "/T", "/F"],
+            capture_output=True, text=True, check=False)
+    else:
+        try:
+            os.kill(listener.pid, 15)
+        except OSError:
+            return False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _port_answers("127.0.0.1", listener.port):
+            return True
+        time.sleep(READY_POLL_S)
+    return False
+
+
 # -- helpers ---------------------------------------------------------------------
 
 
@@ -1350,8 +1453,12 @@ __all__ = [
     "ConsoleSupervisor",
     "FakeConsoleProcess",
     "Key",
+    "Listener",
     "Prepared",
     "find_console",
+    "listening_on",
+    "listening_pid",
     "prepare_console",
     "read_startup_block",
+    "stop_listener",
 ]

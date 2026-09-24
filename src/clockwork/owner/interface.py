@@ -5,7 +5,7 @@ with `events(handle, after)`; `stop` the run in flight; ask for the `snapshot` t
 run will be stamped with and the `status` of the whole owner. A front end that holds an
 `Owner` holds nothing else -- no `Box`, no `Console`, no thread -- which is what lets
 the same front end drive an owner in its own process (`LocalOwner`) or one in another
-(the daemon's client, lab record, task 68) without knowing which.
+(`RemoteOwner`, the client of `clockwork serve`) without knowing which.
 
 **Everything that crosses is plain data.** Jobs are `clockwork.owner.jobs`; progress is
 the loop's own `Event` family plus the eight below, which say what `Worker`'s signals
@@ -43,6 +43,7 @@ __all__ = [
     "Progress",
     "RunDone",
     "Said",
+    "StaleHandle",
 ]
 
 
@@ -54,6 +55,17 @@ class Handle:
     kind: str
     """The job's class name: `Discover`, `Send`, `Acquire` and the rest."""
     label: str
+    owner: str = ""
+    """The session of the owner that issued it. Ids restart at 1 with every owner, so a
+    client holding job 3 of a daemon that has since been restarted would otherwise be
+    told about the new daemon's job 3; with this the new one refuses (`StaleHandle`).
+    Empty means "whichever owner is asked", which is what an in-process caller that
+    builds a handle by id gets (lab record, task 68)."""
+
+
+class StaleHandle(ValueError):
+    """A handle issued by a different owner, almost always one that has since stopped.
+    Its progress went with that owner; nothing can be read for it any more."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,7 +108,8 @@ class Owner(Protocol):
         ...
 
     def events(self, handle: Handle, after: int = 0) -> list[Progress]:
-        """That job's progress numbered after `after`, oldest first; empty if none."""
+        """That job's progress numbered after `after`, oldest first; empty if none.
+        `StaleHandle` for a handle another owner issued."""
         ...
 
     def stop(self, reason: str = "stopped by the operator") -> None:

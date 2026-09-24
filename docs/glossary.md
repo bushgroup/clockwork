@@ -209,6 +209,11 @@ Three terms carry more than one sense and are given both in one entry: *table*, 
   lock is `%LOCALAPPDATA%\clockwork\instrument.lock`, released by Windows with the process however
   that process ends, and Windows' refusal of a second open on a held COM port stays the backstop
   for any program that does not take the lock.
+- **The daemon.** `clockwork serve`, a process with no window that holds the owner and the lock
+  and offers both to clients over two loopback ZeroMQ sockets, so that the window, a command line
+  and an MCP server can drive one instrument without any of them opening a port. Its client,
+  `RemoteOwner`, speaks the same owner protocol as the in-process owner. The protocol is
+  [daemon-protocol.md](daemon-protocol.md).
 - **Method.** The saved experiment a trainee loads: the strings each box needs in three phases, the
   acquisition settings, the order the boxes are started in, and the map from box name to serial
   port, as one flat TOML document. Its shape is
