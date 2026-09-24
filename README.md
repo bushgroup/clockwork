@@ -137,7 +137,7 @@ Clockwork is written to be adopted, not just to be read. The wire format and the
 are documented here so that another instrument can be reasoned about without reading the code, and
 `clockwork.mips`, `clockwork.acq` and `clockwork.method` import no Qt, so a script can drive one
 box without pulling a window in. If you run MIPS boxes and an SA220P and want to try clockwork on
-them, open an issue and say what your instrument looks like. No support is promised, and questions
+them, contact [Matt Bush](https://github.com/mfbush) and say what your instrument looks like. No support is promised, and questions
 are welcome.
 
 ## License

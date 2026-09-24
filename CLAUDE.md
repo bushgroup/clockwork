@@ -44,7 +44,8 @@ you are reading this file *without* that import, you have a public clone — the
   the sibling `../clockwork-lab`. Nothing in this repo, code or docs, refers to lab material except
   in opaque form ("lab record, task NN"); never by a path that only resolves lab-side.
 - **Public commit messages are self-contained statements of the change.** Task IDs may appear as
-  opaque references at most. Trailer is `Assisted-by: <model name>`, no email — never
+  opaque references at most, as are trainee reports, which live in the lab repo's Issues (`lab #N`,
+  never quoted). Trailer is `Assisted-by: <model name>`, no email — never
   `Co-Authored-By:`. `.githooks/commit-msg` rewrites, `.githooks/pre-commit` rejects staged files
   over 5 MiB and any `.uimf` path; both need `git config core.hooksPath .githooks` once per clone.
 - **`.gitattributes` pins `* text=auto eol=lf`.**
