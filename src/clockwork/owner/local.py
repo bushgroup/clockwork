@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import contextlib
 import itertools
+import logging
 import os
 import queue
 import threading
@@ -54,6 +55,7 @@ from ..acq import (
     SECONDS_PER_SAMPLE_2GSPS,
     AcqError,
     BatchSeen,
+    BoxLost,
     Console,
     ConsoleConfig,
     ConsoleProcess,
@@ -129,6 +131,10 @@ Taken from the bench script that first needed it (lab record, task 28).
 _NO_SPECTRUM = np.zeros(0)
 
 _CLOSING = "clockwork is shutting down, so this job was never started"
+
+_LOOP_LOG = logging.getLogger("clockwork.acq.loop")
+"""The loop's own logger, for the one line the owner adds to a run's events: why it
+stopped. The transcript follows `clockwork.acq.loop` and not the owner."""
 
 
 # -- the rack ----------------------------------------------------------------------
@@ -417,6 +423,8 @@ class LocalOwner:
                     result = self._do(job)
                 except Exception as exc:  # noqa: BLE001 -- a message, not a traceback
                     self._running = None
+                    if isinstance(exc, BoxLost):
+                        self._forget(exc.box)
                     self._report(JobFailed(handle=handle, job=job, message=sentence(exc)))
                 else:
                     self._running = None
@@ -817,25 +825,37 @@ class LocalOwner:
             header += ("\nthis is a replicate: its method's setup, load and arm strings "
                        f"went in {transcript.send_log_name(self._setup_log[1])} and were "
                        "not sent again")
+        # Only the boxes the method names: one that is held and not used has no part in
+        # the run, and handing it in made unplugging it end the run (lab #1). Checked
+        # again after the header, which forgets a box it finds unplugged.
+        self._require_boxes(method)
+        boxes = {entry.name: self.boxes[entry.name] for entry in method.boxes}
         with self._logs(directory, stem, header, append=append):
-            if prologue is not None:
-                width = prologue()
-            return run_acquisition(
-                method,
-                boxes=self.boxes,
-                console=console,
-                stream=stream,
-                width=width,  # type: ignore[arg-type]
-                directory=directory,
-                stem=stem,
-                post_trigger_samples=self._post_trigger_samples(console),
-                replicate=replicate,
-                progress=self._report,
-                instrument=job.instrument,
-                snapshot=self._snapshot,
-                provenance=provenance,
-                stop=self._stop_check,
-            )
+            try:
+                if prologue is not None:
+                    width = prologue()
+                return run_acquisition(
+                    method,
+                    boxes=boxes,
+                    console=console,
+                    stream=stream,
+                    width=width,  # type: ignore[arg-type]
+                    directory=directory,
+                    stem=stem,
+                    post_trigger_samples=self._post_trigger_samples(console),
+                    replicate=replicate,
+                    progress=self._report,
+                    instrument=job.instrument,
+                    snapshot=self._snapshot,
+                    provenance=provenance,
+                    stop=self._stop_check,
+                )
+            except Exception as exc:
+                # Written while the transcript is still open: the run log is not the
+                # only record of why a run stopped, and a transcript that just ends
+                # reads as a run that was cut off with no reason given (lab #1).
+                _LOOP_LOG.debug("Stopped: %s", sentence(exc))
+                raise
 
     def _stop_check(self) -> str | None:
         """What `run_acquisition` asks between repetitions. Must not block."""
@@ -899,12 +919,43 @@ class LocalOwner:
             method=method, method_path=method_path or None,
             instrument=instrument, instrument_path=instrument_path or None,
             console=getattr(self.console, "info", None),
-            boxes=[(name, row[0], row[1], row[2]) for name, row in _identities(self.boxes)],
+            boxes=[(name, row[0], row[1], row[2]) for name, row in self._identities()],
             conditions=conditions,
             request=request,
         )
 
+    def _identities(self) -> list[tuple[str, tuple[str, str, str]]]:
+        """`_identities` over the open boxes, forgetting any whose port has gone.
+
+        The header is the one place a run reads every held box, used or not, so it is
+        where one unplugged since the last scan is noticed: before lab #1 such a box
+        stayed held and ended the next run as well as the one it was pulled during.
+        """
+        rows, lost = _identities(self.boxes)
+        for name in lost:
+            self._forget(name)
+        return rows
+
     # -- housekeeping --------------------------------------------------------
+
+    def _forget(self, name: str) -> None:
+        """Close a box whose port has gone and stop holding it.
+
+        Out of `boxes` and `_held` both, so the next run that names it is refused by
+        `_require_boxes` with a sentence rather than failing on a dead handle, and the
+        next scan opens its port afresh once it is plugged back in.
+        """
+        box = self.boxes.pop(name, None)
+        if box is None:
+            return
+        self._held = {port: held for port, held in self._held.items() if held is not box}
+        self.listings.pop(name, None)
+        try:
+            box.close()
+        except Exception:  # noqa: BLE001 -- a port that has gone may not close cleanly
+            pass
+        self._say(f"{name} is no longer held; Find boxes once it is plugged back in")
+
 
     def _require_boxes(self, method: Method) -> None:
         missing = [entry.name for entry in method.boxes if entry.name not in self.boxes]
@@ -940,22 +991,29 @@ class LocalOwner:
 # -- small helpers -----------------------------------------------------------------
 
 
-def _identities(boxes: Mapping[str, Box]) -> list[tuple[str, tuple[str, str, str]]]:
-    """Each box's port, `GNAME` and `GVER` for the run header, asked once.
+def _identities(
+    boxes: Mapping[str, Box],
+) -> tuple[list[tuple[str, tuple[str, str, str]]], list[str]]:
+    """Each box's port, `GNAME` and `GVER` for the run header, asked once, and the
+    names of the boxes whose port raised `OSError` on the way (unplugged).
 
     Two getters per box on a thread that is about to send hundreds of strings; a box
     that will not answer them contributes an empty row rather than stopping the run,
     because a header with a blank firmware is better than no acquisition.
     """
     rows: list[tuple[str, tuple[str, str, str]]] = []
+    lost: list[str] = []
     for name, box in boxes.items():
         port = getattr(box.transport, "port_name", "simulated")
         try:
             with box.summarised():
                 rows.append((name, (port, box.box_name(), box.version())))
-        except (MipsError, OSError, ValueError):
+        except OSError:
             rows.append((name, (port, "", "")))
-    return rows
+            lost.append(name)
+        except (MipsError, ValueError):
+            rows.append((name, (port, "", "")))
+    return rows, lost
 
 
 def _needs_method(method: Method | None) -> Method:

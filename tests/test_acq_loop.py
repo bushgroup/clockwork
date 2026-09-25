@@ -46,6 +46,7 @@ from clockwork import method as method_module
 from clockwork.acq import (
     AcquisitionRefused,
     BatchSeen,
+    BoxLost,
     BoxReady,
     Console,
     DataStream,
@@ -1131,6 +1132,72 @@ def test_a_frame_that_publishes_nothing_is_recorded_and_the_run_goes_on(rig):
     assert not raw.frame_params(2).marked_complete
     assert raw.frame_params(3).marked_complete
     assert len(run.folds) == 1 and run.folds[0].error is None
+
+
+class UnpluggedBox(FakeBox):
+    """A box whose port has gone once `pulled` is set: every read and write raises what
+    pyserial raises for a USB serial port that has disappeared, an `OSError`."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.pulled = False
+        self.touched_after = 0
+
+    def write(self, data: bytes) -> None:
+        if self.pulled:
+            self.touched_after += 1
+            raise OSError("ClearCommError failed (PermissionError(13, 'Access is denied.'))")
+        super().write(data)
+
+    def read_some(self, timeout: float) -> bytes:
+        if self.pulled:
+            self.touched_after += 1
+            raise OSError("ClearCommError failed (PermissionError(13, 'Access is denied.'))")
+        return super().read_some(timeout)
+
+
+def test_unplugging_a_box_the_method_does_not_use_leaves_the_run_alone(rig):
+    """Lab #1: a held box outside the method was unplugged mid-run, and the loop's
+    per-frame drain read it, raised `SerialException` and ended the run."""
+    method = make_method()
+    boxes = make_boxes(BOX)
+    stray = UnpluggedBox()
+    boxes["stray"] = Box(transport=stray, name="stray")
+    send_phases(method, boxes)
+
+    def pull_after_the_first(event: acq.Event) -> None:
+        if isinstance(event, FrameEnded) and event.record.repetition == 1:
+            stray.pulled = True
+
+    run = rig.acquire(method, boxes, progress=pull_after_the_first)
+    assert stray.pulled
+    assert run.complete
+    assert [record.outcome for record in run.frames] == ["acquired"] * ACCUMULATIONS
+    assert stray.touched_after == 0
+
+
+def test_unplugging_a_box_the_method_uses_stops_the_run_and_keeps_what_it_had(rig):
+    method = make_method()
+    pulled = UnpluggedBox()
+    boxes = {BOX: Box(transport=pulled, name=BOX)}
+    send_phases(method, boxes)
+    begun: list[RunBegun] = []
+
+    def pull_after_the_first(event: acq.Event) -> None:
+        if isinstance(event, RunBegun):
+            begun.append(event)
+        if isinstance(event, FrameEnded) and event.record.repetition == 1:
+            pulled.pulled = True
+
+    with pytest.raises(BoxLost, match=f"^{BOX} stopped answering on its port") as caught:
+        rig.acquire(method, boxes, progress=pull_after_the_first)
+    assert caught.value.box == BOX
+    assert "was it unplugged?" in str(caught.value)
+    assert len(rig.fake.frames) < ACCUMULATIONS
+    raw = UimfFile(begun[0].raw_path)
+    assert raw.frame_params(1).marked_complete
+    assert all(not raw.frame_params(n).marked_complete
+               for n in raw.frame_numbers() if n > 1)
 
 
 def test_an_error_the_console_publishes_is_a_frames_outcome_not_the_runs(rig):

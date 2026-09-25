@@ -43,6 +43,7 @@ from clockwork.owner import (
     LockHeld,
     Said,
     Send,
+    StartConsole,
     wire,
 )
 from clockwork.owner.lock import LOCK_ENV, read_holder
@@ -273,6 +274,95 @@ def test_the_snapshot_is_the_last_sends(tmp_path):
     assert owner.snapshot() == Snapshot(conditions="dry N2") and owner.status().snapshot
     owner.shutdown()
     owner.serve()
+
+
+# --- a box that goes away (lab #1) ------------------------------------------------
+
+
+def _acquiring_owner(tmp_path, on_event=None) -> LocalOwner:
+    """A `--fake` owner with the daemon suite's method discovered and sent."""
+    from test_daemon import make_method
+
+    owner = LocalOwner(fake=True, program="clockwork owner test", on_event=on_event).start()
+    owner.submit(StartConsole())
+    method = make_method()
+    assert isinstance(ended(owner, owner.submit(Discover(method=method))), JobFinished)
+    return owner
+
+
+def _transcript_events(directory) -> list[str]:
+    [name] = [name for name in os.listdir(directory) if name.endswith(".transcript.log")]
+    with open(os.path.join(directory, name), encoding="utf-8") as handle:
+        return [line.rstrip("\n") for line in handle if line[:2].isdigit()]
+
+
+def test_a_held_box_unplugged_before_a_run_is_dropped_and_the_run_goes_on(tmp_path):
+    """The 15:52 re-run on lab #1: a box the method does not use had been unplugged, was
+    still held, and ended the next run as well. Now its header read notices the port has
+    gone, the owner lets go of it, and the run never reads it."""
+    from test_acq_loop import UnpluggedBox
+    from test_daemon import make_instrument, make_method
+
+    owner = _acquiring_owner(tmp_path)
+    try:
+        stray = UnpluggedBox()
+        stray.pulled = True
+        owner.boxes["stray"] = Box(transport=stray, name="stray")
+        method = make_method()
+        # The send's own header is the first read of it, so the send lets go of it.
+        sent = owner.submit(Send(method=method, directory=str(tmp_path),
+                                 stem="260925_ZZ_001"))
+        assert isinstance(ended(owner, sent), JobFinished)
+        said = [entry.event.line for entry in owner.events(sent)
+                if isinstance(entry.event, Said)]
+        assert any(line.startswith("stray is no longer held") for line in said)
+        assert "stray" not in owner.boxes and "stray" not in owner.status().boxes
+        handle = owner.submit(Acquire(method=method, instrument=make_instrument(),
+                                      directory=str(tmp_path), stem="260925_ZZ_001"))
+        finished = ended(owner, handle, timeout=120)
+        assert isinstance(finished, JobFinished), finished
+        assert all(run.complete for run in finished.result)
+        assert stray.touched_after == 1  # the one header read that found it gone
+    finally:
+        owner.shutdown()
+        assert owner.join(30)
+
+
+def test_a_used_box_unplugged_mid_run_fails_the_job_in_a_sentence_and_is_dropped(
+        tmp_path):
+    from test_acq_loop import UnpluggedBox
+    from test_daemon import BOX, make_instrument, make_method
+
+    pulled = UnpluggedBox()
+
+    def pull_after_the_first(handle: Handle, event: Event) -> None:
+        if isinstance(event, FrameEnded) and event.record.repetition == 1:
+            pulled.pulled = True
+
+    owner = _acquiring_owner(tmp_path, on_event=pull_after_the_first)
+    try:
+        owner.boxes[BOX] = Box(transport=pulled, name=BOX)
+        method = make_method(accumulations=3)
+        sent = owner.submit(Send(method=method, directory=str(tmp_path),
+                                 stem="260925_ZZ_001"))
+        assert isinstance(ended(owner, sent), JobFinished)
+        handle = owner.submit(Acquire(method=method, instrument=make_instrument(),
+                                      directory=str(tmp_path), stem="260925_ZZ_001",
+                                      replicates=2))
+        failed = ended(owner, handle, timeout=120)
+        assert isinstance(failed, JobFailed), failed
+        assert failed.message.startswith(f"{BOX} stopped answering on its port")
+        assert "SerialException" not in failed.message and "OSError" not in failed.message
+        assert BOX not in owner.boxes
+        assert _transcript_events(tmp_path)[-1].endswith(f"Stopped: {failed.message}")
+        # The next run that names it is refused before anything is sent.
+        refused = ended(owner, owner.submit(Acquire(
+            method=method, instrument=make_instrument(), directory=str(tmp_path),
+            stem="260925_ZZ_002")))
+        assert isinstance(refused, JobFailed) and "Find boxes again" in refused.message
+    finally:
+        owner.shutdown()
+        assert owner.join(30)
 
 
 # --- the window under the lock ----------------------------------------------------

@@ -157,6 +157,7 @@ __all__ = [
     "START_STEP_GAP_S",
     "AcquisitionRefused",
     "BatchSeen",
+    "BoxLost",
     "BoxReady",
     "BoxSaid",
     "EnableGateError",
@@ -449,6 +450,23 @@ class EnableGateError(AcqError):
     card, whose input is pulled up so that an unconnected Control I/O 2 reads high and
     the card acquires every push (lab record, tasks 05 and 18).
     """
+
+
+class BoxLost(AcqError):
+    """A box the method uses stopped answering on its port, so the run cannot go on.
+
+    What an unplugged box looks like from here: its port raises `serial.SerialException`,
+    an `OSError`, on the next read or write. Deliberately not among the outcomes
+    `_one_frame` records and walks past, because every frame after it would be sent to a
+    rack that is missing a box; the `finally` blocks still close the frame as incomplete
+    and fold what was acquired. `box` is the name, so an owner can drop the dead handle
+    rather than hand it to the next run (lab #1).
+    """
+
+    def __init__(self, box: str, cause: BaseException) -> None:
+        self.box = box
+        super().__init__(f"{box} stopped answering on its port ({cause}); "
+                         "was it unplugged?")
 
 
 # --- what the loop says while it works ------------------------------------------------
@@ -1846,6 +1864,11 @@ def _send(
         report(PhaseSent(name, phase, command, time.perf_counter() - started,
                          error=str(exc)))
         raise
+    except OSError as exc:
+        # A port that has gone away: `serial.SerialException` is one (`BoxLost`).
+        report(PhaseSent(name, phase, command, time.perf_counter() - started,
+                         error=str(exc)))
+        raise BoxLost(name, exc) from exc
     report(PhaseSent(name, phase, command, time.perf_counter() - started, detail))
 
 
@@ -2933,9 +2956,20 @@ class _Loop:
         (`_check_witness`). Dating it costs nothing beyond the drain that was happening
         anyway, and the drain runs on `frame_poll` throughout the wait, so the stamp is
         within one poll of the line arriving rather than at the end of the frame.
+
+        Only the method's boxes are read. A box that is held but not used has nothing
+        to say about this run, and reading it made unplugging one end the run (lab #1).
         """
-        for name, box in self.boxes.items():
-            for event in box.drain(0.0):
+        for entry in self.method.boxes:
+            name = entry.name
+            box = self.boxes.get(name)
+            if box is None:
+                continue
+            try:
+                events = box.drain(0.0)
+            except OSError as exc:
+                raise BoxLost(name, exc) from exc
+            for event in events:
                 if event is TableEvent.COMPLETE and name == self.witness_box:
                     self._witnessed_at = self.clock()
                 self.report(BoxSaid(name, event.value))

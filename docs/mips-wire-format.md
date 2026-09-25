@@ -108,6 +108,15 @@ back. Note that the same mechanism fires on any ordinary close, so a
 host that opens and closes the port around each operation makes the box
 re-enumerate every time; open once and keep it.
 
+A port that is kept open can still disappear. When a box is unplugged,
+pyserial raises `serial.SerialException`, an `OSError`, on the next read
+or write to its port, and there is no notice before that. An acquisition
+therefore reads only the boxes its method names, so unplugging a box the
+method does not use changes nothing about the run. Losing a box the
+method does use ends the run: the frame in progress is marked incomplete,
+the frames already acquired are folded and kept, and the box is no longer
+held until the boxes are found again.
+
 A sender must pace deliberately, and the pause can be small. Delivery
 rates from 3.1 kB/s to 39.7 kB/s all loaded an 8572-byte table
 correctly, so only writing with no pause at all fails, and a 10 ms pause
