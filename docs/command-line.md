@@ -145,13 +145,17 @@ clockwork report --transcript D:\data\ZZ-012-2026-09-24.transcript.log --method 
 ```
 
 `--transcript` adds the last 40 lines of a run's wire transcript, and `--method` adds the method's
-name. Neither carries the method itself: every string sent to a box or to the acquisition console
-is removed from the transcript before it goes in, and the method file is never read. The whole
-address is held under 8,000 characters, so a long tail is shortened from its oldest lines, and a
-transcript that still does not fit is replaced by its path and a request to drag the file into the
-report. `--print-only` prints the address without opening a browser. A group running clockwork
-with a tracker of its own points reports there by setting `CLOCKWORK_ISSUES` to the address of
-that tracker's new-issue page.
+name. Neither carries the method itself: every string sent to a box or to the acquisition console is
+removed from the transcript before it goes in, and the method file's contents never go into the
+report. The whole address is held under 8,000 characters, so a long tail is shortened from its
+oldest lines, and a transcript that still does not fit is replaced by its path and a request to drag
+the file into the report. Before the address is made, the run is copied into a folder under the
+kept-files root ([user guide](user-guide.md#what-a-run-leaves-on-disk)): every file sharing the stem
+of the transcript `--transcript` names, the method file when `--method` names one, and the error
+log, with a manifest. The report carries the folder's report id and path, and the folder is named on
+standard error. `--no-keep` copies nothing. `--print-only` prints the address without opening a
+browser, and still copies. A group running clockwork with a tracker of its own points reports there
+by setting `CLOCKWORK_ISSUES` to the address of that tracker's new-issue page.
 
 ## The verbs
 

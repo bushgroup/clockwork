@@ -1,7 +1,7 @@
 """What every test in this suite needs whether or not it asks for it.
 
-Two things so far: the run pointer and the instrument lock go somewhere of this
-session's own.
+Three things so far: the run pointer, the instrument lock and the kept-files root go
+somewhere of this session's own.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import os
 import pytest
 from mainspring.interface import LIVE_POINTER_ENV, LIVE_POINTER_NAME
 
+from clockwork import keep
 from clockwork.owner.lock import LOCK_ENV, LOCK_NAME
 
 
@@ -49,3 +50,14 @@ def isolated_instrument_lock(tmp_path_factory, monkeypatch):
     """
     monkeypatch.setenv(
         LOCK_ENV, os.path.join(str(tmp_path_factory.mktemp("instrument-lock")), LOCK_NAME))
+
+
+@pytest.fixture(autouse=True)
+def isolated_kept_root(tmp_path_factory, monkeypatch):
+    """Point `clockwork.keep` at a root of this test's own (lab record, task 81).
+
+    Every owner that is not `--fake` copies a failed run's files to the configured root,
+    and the default is per user: a suite run on an instrument PC would fill the lab's
+    kept folders with stand-in failures that read as real ones.
+    """
+    monkeypatch.setenv(keep.ENV, str(tmp_path_factory.mktemp("kept")))

@@ -229,6 +229,21 @@ removed from the transcript first. A transcript too long to fit is named by its 
 be dragged into the report. `clockwork report` does the same from a terminal
 ([command line](command-line.md)).
 
+When a run fails, clockwork copies what the run left on disk into a folder of its own before the
+failure is reported: both UIMF files, the send log and the wire transcript, which by then ends on
+the `Stopped:` line giving the reason, together with the method file and the error log. The
+folder sits under the kept-files root, `%LOCALAPPDATA%\clockwork\reports` unless **File > Kept
+files folder...** or the `CLOCKWORK_REPORTS` environment variable names another, and the variable
+takes precedence over the setting. The run log's failure line and the failed row of the run queue
+both end by naming the folder. **Help > Report a problem...** makes the same copy, reusing the
+failed run's folder when there is one, and the report carries the folder's report id and path, so
+the files it names need not be attached. Each folder holds a `manifest.txt` giving why it was
+kept, the version, the PC, the time, and the original path, size and SHA-256 hash of every file
+copied. A run ended with **Stop** is not a failure and is not copied. Folders still named by their
+bare report id are removed 90 days after they were made, when the window next starts; a folder
+renamed after the report it belongs to is left alone. A failed run can therefore be deleted from
+the output directory, or its stem used again, without losing anything a report points to.
+
 ## Opening the result in mainspring
 
 **Open in mainspring** opens the last run's file: the summed companion if the run kept one, the

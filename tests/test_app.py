@@ -2154,3 +2154,42 @@ def test_report_a_problem_sits_above_about_and_names_the_last_run(window, tmp_pa
     text = parse_qs(urlsplit(window.report_url()).query)["attachments"][0]
     assert "bradykinin.toml" in text and "FrameDone: frame 1 finished" in text
     assert "STBLDAT" not in text
+
+
+def test_report_a_problem_keeps_the_last_run_off_the_ui_thread(window, tmp_path, qtbot,
+                                                               monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+
+    from clockwork import keep
+    from clockwork.app import window as window_module
+
+    root = tmp_path / "kept"
+    monkeypatch.setenv(keep.ENV, str(root))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    opened = []
+    monkeypatch.setattr(window_module.QDesktopServices, "openUrl",
+                        lambda address: opened.append(address.toString()) or True)
+    (tmp_path / "ZZ-007.uimf").write_bytes(b"uimf")
+    (tmp_path / "ZZ-007-2026-09-25.transcript.log").write_text(
+        "10:00:00.001 acq.loop         FrameDone: frame 1 finished\n", encoding="utf-8")
+    window._last_run_paths = (str(tmp_path / "ZZ-007.uimf"), "", "ZZ-007")
+    window.report_problem().join(30)
+    qtbot.waitUntil(lambda: bool(opened), timeout=5000)
+    [name] = os.listdir(root)
+    text = parse_qs(urlsplit(opened[0]).query)["attachments"][0]
+    assert f"Report id: {name}" in text and str(root / name) in text
+    assert window.action_report.isEnabled()
+    assert {row.kept for row in keep.read_manifest(str(root / name)).rows
+            if row.status == "copied"} == {"ZZ-007.uimf", "ZZ-007-2026-09-25.transcript.log"}
+
+
+def test_the_kept_root_is_the_setting_unless_the_environment_names_one(window, tmp_path,
+                                                                        monkeypatch):
+    from clockwork import keep
+
+    monkeypatch.delenv(keep.ENV)
+    window.settings.kept_root = str(tmp_path / "chosen")
+    assert window.kept_root() == str(tmp_path / "chosen")
+    monkeypatch.setenv(keep.ENV, str(tmp_path / "env"))
+    assert window.kept_root() == str(tmp_path / "env")
+    assert window.worker.owner.kept_root == ""  # a --fake window's owner keeps nothing

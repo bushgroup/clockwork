@@ -138,3 +138,37 @@ def test_clockwork_report_prints_and_version_says_which_build(capsys, monkeypatc
     assert opened == [capsys.readouterr().out.strip()]
     assert main(["--version"]) == 0
     assert capsys.readouterr().out.startswith(f"clockwork {clockwork.__version__} (")
+
+
+def test_a_report_names_its_kept_folder_within_the_budget(tmp_path):
+    kept = str(tmp_path / "kept" / "R-20260925-154102-MASSTRO")
+    address = made(tmp_path, scans=400, errors=400,
+                   report_id="R-20260925-154102-MASSTRO", kept=kept).url()
+    assert len(address) <= BUDGET
+    text = fields(address)["attachments"]
+    assert "Report id: R-20260925-154102-MASSTRO" in text
+    assert f"Files kept in: `{kept}`" in text and "no need to attach them" in text
+    assert "Report id" not in fields(Report().url())["attachments"]
+
+
+def test_clockwork_report_keeps_the_named_run_unless_told_not_to(capsys, monkeypatch,
+                                                                 tmp_path):
+    from clockwork import keep
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    root = tmp_path / "kept"
+    monkeypatch.setenv(keep.ENV, str(root))
+    stem = "260925_ZZ_040"
+    (tmp_path / f"{stem}.uimf").write_bytes(b"uimf")
+    transcript = write_transcript(tmp_path / f"{stem}-2026-09-25.transcript.log", 3)
+    assert main(["report", "--print-only", "--no-keep", "--transcript", transcript]) == 0
+    assert not root.exists()
+    capsys.readouterr()
+    assert main(["report", "--print-only", "--transcript", transcript]) == 0
+    [name] = os.listdir(root)
+    text = fields(capsys.readouterr().out.strip())["attachments"]
+    assert f"Report id: {name}" in text
+    manifest = keep.read_manifest(str(root / name))
+    assert manifest.fields["reason"] == "reported" and manifest.stems() == [stem]
+    assert {row.kept for row in manifest.rows if row.status == "copied"} >= {
+        f"{stem}.uimf", f"{stem}-2026-09-25.transcript.log"}

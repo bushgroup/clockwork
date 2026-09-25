@@ -221,15 +221,34 @@ def _self_check() -> int:
 
 
 def _report(args: argparse.Namespace) -> int:
-    """`clockwork report`: print the pre-filled issue's address, and open it."""
+    """`clockwork report`: keep the run's files, print the pre-filled issue's address,
+    and open it."""
     import webbrowser
 
+    from clockwork import keep
     from clockwork.report import Report
 
     from . import errors
 
+    errors_log = errors.errors_log_path()
+    report_id = kept = ""
+    if not args.no_keep:
+        from .settings import Settings
+
+        transcript = os.path.abspath(args.transcript) if args.transcript else ""
+        method = args.method if os.path.isfile(args.method) else ""
+        try:
+            kept = keep.for_report(keep.root(Settings().kept_root),
+                                   directory=os.path.dirname(transcript),
+                                   stem=keep.stem_of(transcript),
+                                   method_path=method, errors_log=errors_log)
+            report_id = os.path.basename(kept)
+        except OSError as exc:
+            print(f"the files could not be kept: {exc}", file=sys.stderr)
     address = Report(method=args.method, transcript=args.transcript,
-                     errors_log=errors.errors_log_path()).url()
+                     errors_log=errors_log, report_id=report_id, kept=kept).url()
+    if kept:
+        print(f"files kept in {kept}", file=sys.stderr)
     print(address)
     if not args.print_only and not webbrowser.open(address):
         print("no browser could be opened; paste the address above into one",
@@ -315,9 +334,12 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument("--transcript", metavar="PATH", default="",
                         help="a run's .transcript.log, whose tail goes in the report")
     report.add_argument("--method", metavar="NAME", default="",
-                        help="the method's name, for the report; its contents never go in")
+                        help="the method's name or path, for the report; its contents never "
+                             "go in, but a path's file is kept with the run's")
     report.add_argument("--print-only", action="store_true",
                         help="print the address and open no browser")
+    report.add_argument("--no-keep", action="store_true",
+                        help="copy nothing to the kept-files folder")
     # The verbs are built from the tool registry, which costs half a second of imports
     # (the toolbox, the loop, mainspring's reader): paid only when the command line
     # could name a verb or asks for help, never by the window's own launch.

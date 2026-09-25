@@ -182,12 +182,14 @@ class Worker(QThread):
     """One line for the run log that did not come from the loop: what this thread is
     about to do, and what it found when it did."""
 
-    def __init__(self, *, fake: bool = False, mailbox: Mailbox | None = None) -> None:
+    def __init__(self, *, fake: bool = False, mailbox: Mailbox | None = None,
+                 kept_root: str | None = None, errors_log: str = "") -> None:
         super().__init__()
         self.fake = fake
         self.mailbox = mailbox or Mailbox()
         self.owner = LocalOwner(fake=fake, on_event=self._relay, program=PROGRAM,
-                                discover=_scan)
+                                discover=_scan, kept_root=kept_root,
+                                errors_log=errors_log)
         self.start()
 
     def run(self) -> None:  # noqa: D102 -- QThread's own entry point

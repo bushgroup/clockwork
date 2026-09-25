@@ -179,6 +179,16 @@ class Settings:
     def open_mainspring_on_acquire(self, value: bool) -> None:
         self._settings.setValue("open_mainspring_on_acquire", bool(value))
 
+    @property
+    def kept_root(self) -> str:
+        """Where failed and reported runs' files are copied (`clockwork.keep`), or empty
+        for the default. `$CLOCKWORK_REPORTS` outranks it (task 81)."""
+        return str(self._settings.value("kept_root", "") or "")
+
+    @kept_root.setter
+    def kept_root(self, value: str) -> None:
+        self._settings.setValue("kept_root", value)
+
     # -- the window itself ---------------------------------------------------
 
     @property

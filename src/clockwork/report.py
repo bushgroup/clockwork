@@ -14,6 +14,11 @@ named, never read. The URL is budgeted (`BUDGET`), because a browser or GitHub r
 long one; a tail that does not fit is shortened from its oldest line, and one that still
 does not fit is replaced by the file's path and a request to drag the file in.
 
+**The report names its kept folder.** A report made from the window or `clockwork
+report` first copies the run's files to a folder of their own (`clockwork.keep`), and
+the block carries that folder's report id and path, so the report still points at the
+evidence after the trainee has deleted or re-used the run (lab record, task 81).
+
 One module for both callers, and Qt-free: the window opens the URL with
 `QDesktopServices`, `clockwork report` with `webbrowser`.
 """
@@ -113,7 +118,8 @@ class Report:
 
     def __init__(self, *, version: str = "", commit: str | None = "", pc: str = "",
                  system: str = "", method: str = "", errors_log: str = "",
-                 transcript: str = "", issues: str = "") -> None:
+                 transcript: str = "", issues: str = "", report_id: str = "",
+                 kept: str = "") -> None:
         import clockwork
 
         self.version = version or clockwork.__version__
@@ -124,6 +130,10 @@ class Report:
         self.errors_log = errors_log
         self.transcript = transcript
         self.issues = issues or os.environ.get("CLOCKWORK_ISSUES") or ISSUES
+        self.report_id = report_id
+        """The kept folder's report id (`clockwork.keep`), or empty where none was kept."""
+        self.kept = kept
+        """The kept folder's path on this PC, or empty."""
 
     def url(self, budget: int = BUDGET) -> str:
         """The pre-filled form's URL, no longer than `budget` characters."""
@@ -149,6 +159,12 @@ class Report:
         build = "installed" if getattr(sys, "frozen", False) else "from source"
         version = f"{self.version} ({self.commit or 'unknown commit'}, {build})"
         block = ["Filled in by clockwork:", "", f"- Operating system: {self.system}"]
+        if self.report_id:
+            block.append(f"- Report id: {self.report_id}")
+        if self.kept:
+            block.append(f"- Files kept in: `{self.kept}` (on this PC)")
+        drag = ("it is in the kept folder above" if self.kept
+                else "please drag it in")
         if self.method:
             block.append(f"- Method: {self.method}")
         if self.errors_log and os.path.isfile(self.errors_log):
@@ -159,15 +175,21 @@ class Report:
             block += ["", f"Last {len(errors)} lines of the error log:", "", "```",
                       *errors, "```"]
         elif cut_errors:
-            block += ["", "The error log is too long to include here; please drag it in."]
+            block += ["", f"The error log is too long to include here; {drag}."]
         if chunk:
             block += ["", f"Last {len(chunk)} lines of the run transcript "
                           "(strings sent to the boxes and the console left out):", "",
                       "```", *chunk, "```"]
         elif cut_transcript:
-            block += ["", "The run transcript is too long to include here; please drag "
-                          "it in from the path above."]
-        block += ["", "Add a screenshot or the method file below if you have one."]
+            block += ["", "The run transcript is too long to include here; "
+                          + (f"{drag}." if self.kept else "please drag it in from the path "
+                             "above.")]
+        if self.kept:
+            block += ["", "The run's files, the method and the error log are copied to the "
+                          "kept folder, so there is no need to attach them. Add a "
+                          "screenshot below if you have one."]
+        else:
+            block += ["", "Add a screenshot or the method file below if you have one."]
         fields = {"template": TEMPLATE, "version": version, "pc": self.pc,
                   "attachments": "\n".join(block)}
         return f"{self.issues}?{urlencode(fields)}"

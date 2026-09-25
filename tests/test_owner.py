@@ -15,6 +15,7 @@ built with a stand-in scan or under a lock that refuses it.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
 import signal
@@ -279,11 +280,12 @@ def test_the_snapshot_is_the_last_sends(tmp_path):
 # --- a box that goes away (lab #1) ------------------------------------------------
 
 
-def _acquiring_owner(tmp_path, on_event=None) -> LocalOwner:
+def _acquiring_owner(tmp_path, on_event=None, **options) -> LocalOwner:
     """A `--fake` owner with the daemon suite's method discovered and sent."""
     from test_daemon import make_method
 
-    owner = LocalOwner(fake=True, program="clockwork owner test", on_event=on_event).start()
+    owner = LocalOwner(fake=True, program="clockwork owner test", on_event=on_event,
+                       **options).start()
     owner.submit(StartConsole())
     method = make_method()
     assert isinstance(ended(owner, owner.submit(Discover(method=method))), JobFinished)
@@ -363,6 +365,78 @@ def test_a_used_box_unplugged_mid_run_fails_the_job_in_a_sentence_and_is_dropped
     finally:
         owner.shutdown()
         assert owner.join(30)
+
+
+def test_a_failed_run_is_kept_with_its_method_and_error_log_and_a_finished_one_is_not(
+        tmp_path):
+    """Task 81: the files behind a failure survive the trainee tidying the directory,
+    and the job's sentence says where they went."""
+    from clockwork import keep
+    from test_acq_loop import UnpluggedBox
+    from test_daemon import BOX, make_instrument, make_method
+
+    pulled = UnpluggedBox()
+    armed = [False]
+
+    def pull_after_the_first(handle: Handle, event: Event) -> None:
+        if armed[0] and isinstance(event, FrameEnded) and event.record.repetition == 1:
+            pulled.pulled = True
+
+    data, root = tmp_path / "data", tmp_path / "kept"
+    method_file = tmp_path / "bradykinin.toml"
+    method_file.write_text("# the method\n", encoding="utf-8")
+    errors_log = tmp_path / "errors.log"
+    errors_log.write_text("an earlier traceback\n", encoding="utf-8")
+    owner = _acquiring_owner(tmp_path, on_event=pull_after_the_first,
+                             kept_root=str(root), errors_log=str(errors_log))
+    try:
+        owner.boxes[BOX] = Box(transport=pulled, name=BOX)
+        method = make_method(accumulations=3)
+        job = {"method": method, "instrument": make_instrument(), "directory": str(data),
+               "method_path": str(method_file)}
+        assert isinstance(ended(owner, owner.submit(
+            Send(method=method, directory=str(data), stem="260925_ZZ_001"))), JobFinished)
+        finished = ended(owner, owner.submit(Acquire(stem="260925_ZZ_001", **job)),
+                         timeout=120)
+        assert isinstance(finished, JobFinished), finished
+        assert not root.exists() or os.listdir(root) == []
+
+        armed[0] = True
+        failed = ended(owner, owner.submit(Acquire(stem="260925_ZZ_002", **job)),
+                       timeout=120)
+        assert isinstance(failed, JobFailed), failed
+        [name] = os.listdir(root)
+        folder = str(root / name)
+        assert failed.message.startswith(f"{BOX} stopped answering on its port")
+        assert failed.message.endswith(f". Files kept in {folder}")
+        manifest = keep.read_manifest(folder)
+        assert manifest.stems() == ["260925_ZZ_002"]
+        assert manifest.fields["reason"] in failed.message
+        originals = {row.original for row in manifest.rows if row.status == "copied"}
+        assert str(method_file) in originals and str(errors_log) in originals
+        assert not any("260925_ZZ_001" in path for path in originals)
+        for path in keep.run_files(str(data), "260925_ZZ_002"):
+            os.remove(path)
+        for row in manifest.rows:
+            if row.status == "copied":
+                with open(os.path.join(folder, row.kept), "rb") as stream:
+                    assert hashlib.sha256(stream.read()).hexdigest() == row.sha256
+        [transcript] = [row.kept for row in manifest.rows
+                        if row.kept.endswith(".transcript.log")]
+        with open(os.path.join(folder, transcript), encoding="utf-8") as stream:
+            events = [line.rstrip("\n") for line in stream if line[:2].isdigit()]
+        assert events[-1].endswith(f"Stopped: {manifest.fields['reason']}")
+    finally:
+        owner.shutdown()
+        assert owner.join(30)
+
+
+def test_a_fake_owner_keeps_nothing_unless_given_a_root(tmp_path, monkeypatch):
+    from clockwork import keep
+
+    monkeypatch.setenv(keep.ENV, str(tmp_path / "configured"))
+    assert LocalOwner(fake=True).kept_root == ""
+    assert LocalOwner(fake=True, kept_root=str(tmp_path)).kept_root == str(tmp_path)
 
 
 # --- the window under the lock ----------------------------------------------------

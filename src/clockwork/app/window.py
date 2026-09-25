@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import threading
 import time
 from dataclasses import replace
 
@@ -60,6 +61,7 @@ from PySide6.QtWidgets import (
 import clockwork
 
 from .. import instrument as instrument_module
+from .. import keep
 from .. import method as method_module
 from ..acq import ConsoleProcess, StateRead, find_console
 from ..acq.loop import WHEN_ARMED, RunBegun, cautions, refusals
@@ -145,12 +147,22 @@ class MainWindow(QMainWindow):
     mailbox's own events take.
     """
 
+    report_ready = Signal(str, str, str)
+    """`(address, kept folder, problem)` from the thread that kept a report's files."""
+
+    kept_pruned = Signal(str)
+    """A line about the start-up prune of the kept-files root, for the run log."""
+
     def __init__(self, *, fake: bool = False) -> None:
         super().__init__()
         self.fake = fake
         self.settings = Settings()
         self.mailbox = Mailbox()
-        self.worker = Worker(fake=fake, mailbox=self.mailbox)
+        # A --fake run's failures are no evidence about the instrument, so its owner
+        # keeps nothing; a report made from it still does (task 81).
+        self.worker = Worker(fake=fake, mailbox=self.mailbox,
+                             kept_root="" if fake else self.kept_root(),
+                             errors_log=errors.errors_log_path())
 
         self.method_path = self.settings.method_path
         self.instrument_path = self.settings.instrument_path
@@ -248,6 +260,7 @@ class MainWindow(QMainWindow):
         self._drain_timer.timeout.connect(self._drain)
         self._drain_timer.start()
         self._refresh_actions()
+        self.prune_kept()
 
     # -- construction --------------------------------------------------------
 
@@ -565,6 +578,12 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         self.action_forget_geometry = QAction("Forget the window position", self)
         file_menu.addAction(self.action_forget_geometry)
+        self.action_kept_root = QAction("&Kept files folder…", self)
+        self.action_kept_root.setToolTip(
+            "Where a failed run's files, and a reported one's, are copied with a "
+            "manifest, so tidying the output directory never loses what a report "
+            "points at.")
+        file_menu.addAction(self.action_kept_root)
         file_menu.addAction(self.action_quit)
 
         run_menu = self.menuBar().addMenu("&Run")
@@ -628,6 +647,9 @@ class MainWindow(QMainWindow):
         self.action_report.triggered.connect(self.report_problem)
         self.action_about.triggered.connect(self._about)
         self.action_forget_geometry.triggered.connect(self._forget_geometry)
+        self.action_kept_root.triggered.connect(self.choose_kept_root)
+        self.report_ready.connect(self._report_ready)
+        self.kept_pruned.connect(self.run_panel.say)
 
         self.console_bar.restart_requested.connect(self.restart_console)
         self.console_bar.settings_requested.connect(self.console_settings)
@@ -1576,18 +1598,90 @@ class MainWindow(QMainWindow):
             return
         self.stem.setText(next_stem(self._directory(), initials))
 
-    def report_url(self) -> str:
-        """The pre-filled bug report for this window: the method's name, and the
-        transcript of the run in flight or else of the last one."""
-        from ..report import Report, transcript_beside
+    def kept_root(self) -> str:
+        """The kept-files root in force: `$CLOCKWORK_REPORTS`, the setting, the default."""
+        return keep.root(self.settings.kept_root)
+
+    def choose_kept_root(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Kept files folder", self.kept_root())
+        if not chosen:
+            return
+        self.settings.kept_root = chosen
+        if not self.fake:
+            self.worker.owner.kept_root = self.kept_root()
+        line = f"failed and reported runs' files are kept in {self.kept_root()}"
+        if os.environ.get(keep.ENV, "").strip():
+            line += f" (${keep.ENV} is set, and outranks the folder just chosen)"
+        self.run_panel.say(line)
+
+    def prune_kept(self) -> threading.Thread:
+        """Remove kept folders no report claimed, past their 90 days, on a thread."""
+        root = self.kept_root()
+
+        def work() -> None:
+            removed = keep.prune(root)
+            if removed:
+                self.kept_pruned.emit(
+                    f"removed {len(removed)} kept folder(s) older than "
+                    f"{keep.RETENTION_DAYS} days that no report claimed, from {root}")
+
+        thread = threading.Thread(target=work, name="clockwork-prune", daemon=True)
+        thread.start()
+        return thread
+
+    def _report_inputs(self) -> tuple[str, str, str]:
+        """`(directory, stem, transcript)` of the run in flight or else the last one."""
+        from ..report import transcript_beside
 
         raw, summed, stem = self._live_run if self._live_run[2] else self._last_run_paths
         directory = os.path.dirname(raw or summed) or self._directory()
-        return Report(method=self.method_path or "", errors_log=errors.errors_log_path(),
-                      transcript=transcript_beside(directory, stem)).url()
+        return directory, stem, transcript_beside(directory, stem)
 
-    def report_problem(self) -> None:
-        address = self.report_url()
+    def report_url(self, *, report_id: str = "", kept: str = "") -> str:
+        """The pre-filled bug report for this window: the method's name, and the
+        transcript of the run in flight or else of the last one."""
+        from ..report import Report
+
+        _directory, _stem, transcript = self._report_inputs()
+        return Report(method=self.method_path or "", errors_log=errors.errors_log_path(),
+                      transcript=transcript, report_id=report_id, kept=kept).url()
+
+    def report_problem(self) -> threading.Thread:
+        """Keep the run's files off the UI thread, then open the report
+        (`_report_ready`): copying a UIMF can take a while."""
+        from ..report import Report
+
+        # Read here, on the UI thread: the thread below touches no widget.
+        directory, stem, transcript = self._report_inputs()
+        method, errors_log = self.method_path or "", errors.errors_log_path()
+        root = self.kept_root()
+        self.action_report.setEnabled(False)
+        self.statusBar().showMessage("keeping the run's files for the report…")
+
+        def work() -> None:
+            kept = problem = ""
+            try:
+                kept = keep.for_report(root, directory=directory, stem=stem,
+                                       method_path=method, errors_log=errors_log)
+            except Exception as exc:  # noqa: BLE001 -- the report goes out regardless
+                problem = f"the files could not be kept in {root}: {exc}"
+            address = Report(method=method, errors_log=errors_log, transcript=transcript,
+                             report_id=os.path.basename(kept) if kept else "",
+                             kept=kept).url()
+            self.report_ready.emit(address, kept, problem)
+
+        thread = threading.Thread(target=work, name="clockwork-report", daemon=True)
+        thread.start()
+        return thread
+
+    def _report_ready(self, address: str, kept: str, problem: str) -> None:
+        self.action_report.setEnabled(True)
+        self.statusBar().clearMessage()
+        if kept:
+            self.run_panel.say(f"the report's files are kept in {kept}")
+        if problem:
+            self.run_panel.say(problem, warn=True)
         if not QDesktopServices.openUrl(QUrl.fromEncoded(address.encode("ascii"))):
             # Eight kilobytes of address is no message to read in a dialog.
             QApplication.clipboard().setText(address)

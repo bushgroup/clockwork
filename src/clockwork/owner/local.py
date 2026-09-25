@@ -50,7 +50,7 @@ from dataclasses import replace
 
 import numpy as np
 
-from .. import transcript
+from .. import keep, transcript
 from ..acq import (
     SECONDS_PER_SAMPLE_2GSPS,
     AcqError,
@@ -194,8 +194,21 @@ class LocalOwner:
         discover: Callable[..., Discovery] = discover,
         limit: int = 20000,
         history: int = 64,
+        kept_root: str | None = None,
+        errors_log: str = "",
     ) -> None:
         self.fake = fake
+        self.kept_root = keep.root() if kept_root is None and not fake else (kept_root or "")
+        """Where a failed run's files are copied (`clockwork.keep`), or empty for nowhere.
+
+        The configured root by default; nothing by default under `--fake`, whose
+        failures are not evidence about an instrument. A front end with a setting of its
+        own assigns this; it is read once per failure, on this owner's thread."""
+        self.errors_log = errors_log
+        """A front end's error log, copied with a failed run's files. The owner has
+        none of its own and does not know where the window keeps one."""
+        self._kept = ""
+        """The folder the running job's failure was copied into, for its `JobFailed`."""
         self.program = program
         self.session = uuid.uuid4().hex[:12]
         """This owner's own name for itself, stamped into every handle it issues, so
@@ -418,6 +431,7 @@ class LocalOwner:
                                  handle)
                     continue
                 self._running = self._current = handle
+                self._kept = ""
                 self._report(JobStarted(handle=handle, job=job))
                 try:
                     result = self._do(job)
@@ -425,7 +439,10 @@ class LocalOwner:
                     self._running = None
                     if isinstance(exc, BoxLost):
                         self._forget(exc.box)
-                    self._report(JobFailed(handle=handle, job=job, message=sentence(exc)))
+                    message = sentence(exc)
+                    if self._kept:
+                        message = f"{message.rstrip('.')}. Files kept in {self._kept}"
+                    self._report(JobFailed(handle=handle, job=job, message=message))
                 else:
                     self._running = None
                     self._report(JobFinished(handle=handle, job=job, result=result))
@@ -830,6 +847,21 @@ class LocalOwner:
         # again after the header, which forgets a box it finds unplugged.
         self._require_boxes(method)
         boxes = {entry.name: self.boxes[entry.name] for entry in method.boxes}
+        try:
+            return self._logged_run(method, job, console, stream, width, directory, stem,
+                                    header, boxes, append=append, replicate=replicate,
+                                    prologue=prologue, provenance=provenance)
+        except Exception as exc:
+            # After `_logs` has closed the transcript, so the copy ends on `Stopped:`,
+            # and after `run_acquisition` has folded and closed the files.
+            self._keep_failed(exc, job, directory, stem)
+            raise
+
+    def _logged_run(self, method: Method, job: Acquire, console: Console,
+                    stream: DataStream, width: object, directory: str, stem: str,
+                    header: str, boxes: dict[str, Box], *, append: bool,
+                    replicate: bool, prologue: Callable[[], object] | None,
+                    provenance: Provenance | None) -> Run:
         with self._logs(directory, stem, header, append=append):
             try:
                 if prologue is not None:
@@ -856,6 +888,26 @@ class LocalOwner:
                 # reads as a run that was cut off with no reason given (lab #1).
                 _LOOP_LOG.debug("Stopped: %s", sentence(exc))
                 raise
+
+    def _keep_failed(self, exc: BaseException, job: Acquire, directory: str,
+                     stem: str) -> None:
+        """Copy a failed run's files, its method and the error log (`clockwork.keep`).
+
+        Never raises: a copy that fails is said and logged, and the run's own failure
+        is the one the job reports. A run the operator stopped does not come here; it
+        returns, short, rather than raising.
+        """
+        if not self.kept_root:
+            return
+        paths = [*keep.run_files(directory, stem), job.method_path, self.errors_log]
+        try:
+            self._kept = keep.keep(self.kept_root, paths, reason=sentence(exc),
+                                   stems=[stem])
+        except Exception as problem:  # noqa: BLE001 -- the run's failure comes first
+            _LOOP_LOG.warning("the failed run's files could not be kept in %s: %s",
+                              self.kept_root, problem)
+            self._say(f"the failed run's files could not be kept in {self.kept_root}: "
+                      f"{problem}")
 
     def _stop_check(self) -> str | None:
         """What `run_acquisition` asks between repetitions. Must not block."""
