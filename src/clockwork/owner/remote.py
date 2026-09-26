@@ -310,7 +310,7 @@ class DaemonServer:
             "holder": status.holder.text if status.holder is not None else None,
         }
 
-    def _submit(self, job: object = None) -> object:
+    def _submit(self, job: object = None, origin: object = "") -> object:
         if not isinstance(job, Job):
             raise _Refusal("refused", f"`submit` takes a job, not {type(job).__name__}")
         if self.shutting_down or self.owner.closing:  # type: ignore[attr-defined]
@@ -318,8 +318,10 @@ class DaemonServer:
                                       "more jobs")
         if isinstance(job, (Send, Acquire)) and not job.directory and self._directory:
             job = replace(job, directory=self._directory)
-        handle = self.owner.submit(job)  # type: ignore[attr-defined]
-        self._said(f"submitted job {handle.id}: {job.label} ({handle.kind})")
+        origin = str(origin or "")
+        handle = self.owner.submit(job, origin=origin)  # type: ignore[attr-defined]
+        self._said(f"submitted job {handle.id}: {job.label} ({handle.kind})"
+                   + (f" from {origin}" if origin else ""))
         return to_wire(handle)
 
     def _events(self, handle: object = None, after: object = 0) -> object:
@@ -429,6 +431,10 @@ class RemoteOwner:
     `timeout`. Any thread may call any method. `close()` (or the `with` block) ends the
     subscriber thread and both sockets; nothing here stops the daemon but `shutdown`.
 
+    `origin` names this client in every job it submits (`Handle.origin`), so that the
+    window can say whose job it is showing. A daemon from before `origin` refuses the
+    argument; the client then submits without it for the rest of its life.
+
     A restarted daemon is picked up by the next request, whatever it is: its session is
     new, so every copy of progress is thrown away and a handle from the old one is
     refused with `StaleHandle`.
@@ -440,9 +446,11 @@ class RemoteOwner:
         *,
         timeout: float = DEFAULT_TIMEOUT_S,
         context: zmq.Context | None = None,
+        origin: str = "",
     ) -> None:
         self.endpoint = endpoint
         self.timeout = timeout
+        self.origin = origin
         self._context = context if context is not None else zmq.Context.instance()
         self._ids = itertools.count(1)
         self._request_guard = threading.Lock()
@@ -467,6 +475,13 @@ class RemoteOwner:
     # -- the protocol --------------------------------------------------------------
 
     def submit(self, job: Job) -> Handle:
+        if self.origin:
+            try:
+                return self._request("submit", job=job, origin=self.origin)  # type: ignore[return-value]
+            except DaemonRefused as exc:
+                if exc.kind != "bad-request" or "origin" not in str(exc):
+                    raise
+                self.origin = ""
         return self._request("submit", job=job)  # type: ignore[return-value]
 
     def events(self, handle: Handle, after: int = 0) -> list[Progress]:
@@ -522,6 +537,12 @@ class RemoteOwner:
         self._hello = hello
         self._start_subscriber(hello.events)
         return hello
+
+    @property
+    def session(self) -> str | None:
+        """The session of the daemon last heard from, or None before the first reply.
+        A handle for any of its jobs is `Handle(id, kind, label, owner=session)`."""
+        return self._session
 
     @property
     def streaming(self) -> bool:

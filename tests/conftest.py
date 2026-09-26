@@ -61,3 +61,23 @@ def isolated_kept_root(tmp_path_factory, monkeypatch):
     kept folders with stand-in failures that read as real ones.
     """
     monkeypatch.setenv(keep.ENV, str(tmp_path_factory.mktemp("kept")))
+
+
+@pytest.fixture(autouse=True)
+def no_real_daemon(monkeypatch):
+    """Refuse to start `clockwork serve` from any test (lab record, task 77).
+
+    A window that is not `--fake` is a client of the daemon and starts one when none
+    answers. Started from a test, that daemon is a real one: on an instrument PC it would
+    scan the trainees' boxes and start the real console, and it outlives the test. It
+    happened once, during the first full run after the window became a client: a test's
+    window started a daemon that came up after the test had let go of its lock, found
+    the rack and started the console. A test that means to start a daemon hands the
+    window a launch of its own.
+    """
+    def refused(command: list[str]) -> None:
+        raise OSError("a test tried to start a real clockwork serve; hand the window a "
+                      "launch of its own")
+
+    monkeypatch.setattr("clockwork.app.serving.start_serve", refused)
+    monkeypatch.setattr("clockwork.app.window.start_serve", refused, raising=False)

@@ -21,7 +21,13 @@ leaves the run as its last completed repetition.
 
 The log is `%LOCALAPPDATA%\clockwork\serve.log`, appended, and the terminal. It is not
 the window's `errors.log` (Matt, 2026-09-23): that file is tracebacks for a window with
-nowhere to print them, and a request-by-request narrative would bury them.
+nowhere to print them, and a request-by-request narrative would bury them. A daemon the
+window started has no terminal, and writes to the file alone.
+
+**Nothing it starts outlives it** (`contain_children`). Closing the terminal a daemon
+runs in ends it with a `CTRL_CLOSE_EVENT` the Ctrl-C handler never sees, and before this
+its console was left holding the digitizer (lab record, task 75); the job object ends
+the console with the daemon however the daemon ends.
 
 Qt-free: `clockwork serve` never builds a window and never imports PySide6.
 """
@@ -47,7 +53,8 @@ from .jobs import Discover, RestartConsole, StartConsole
 from .local import LocalOwner
 from .remote import DEFAULT_COMMAND, DEFAULT_EVENTS, DaemonError, DaemonServer
 
-__all__ = ["LOG_NAME", "PROGRAM", "WATCH_S", "ConsoleWatch", "log_path", "run"]
+__all__ = ["LOG_NAME", "PROGRAM", "WATCH_S", "ConsoleWatch", "contain_children",
+           "log_path", "run"]
 
 PROGRAM = "clockwork serve"
 """What the lock tells a refused owner holds the instrument."""
@@ -85,6 +92,9 @@ def run(
     discover: Callable[..., Discovery] | None = None,
     clear_port: bool = True,
     start_console: bool = True,
+    kept_root: str | None = None,
+    errors_log: str = "",
+    contain: bool = False,
 ) -> int:
     """Take the instrument and serve it until shut down. Returns the exit code.
 
@@ -94,13 +104,22 @@ def run(
     are what let a test run a daemon that is not `--fake` on an instrument PC without
     touching the instrument: a stand-in scan, no console port cleared -- which on that
     PC would be the trainee's console -- and no console started.
+
+    `kept_root` and `errors_log` are handed to the owner (`LocalOwner`): the folder a
+    failed run's files are copied into, the configured default when None, and a front
+    end's error log to copy with them. `contain` is `contain_children`, which the command
+    line asks for and a test in pytest's own process must not.
     """
     log = _logger(stream if stream is not None else sys.stdout, log_file or log_path())
+    if contain and not contain_children():
+        log.warning("could not tie the console's life to this process's; a console "
+                    "left behind by a daemon that is killed is stopped by the next one")
     try:
         return _run(log, fake=fake, output=output, library=library, console=console,
                     command=command, events=events, lock_path=lock_path, on_ready=on_ready,
                     handle_signals=handle_signals, discover=discover,
-                    clear_port=clear_port, start_console=start_console)
+                    clear_port=clear_port, start_console=start_console,
+                    kept_root=kept_root, errors_log=errors_log)
     except Exception:  # noqa: BLE001 -- the log is the only place this can be read
         log.error("clockwork serve failed:\n%s", traceback.format_exc().rstrip())
         return 1
@@ -114,7 +133,8 @@ def _run(log: logging.Logger, *, fake: bool, output: str, library: str, console:
          command: str, events: str, lock_path: str | None,
          on_ready: Callable[[DaemonServer], None] | None,
          handle_signals: bool, discover: Callable[..., Discovery] | None,
-         clear_port: bool, start_console: bool) -> int:
+         clear_port: bool, start_console: bool, kept_root: str | None,
+         errors_log: str) -> int:
     def on_event(handle: Handle, event: Event) -> None:
         if isinstance(event, _LOGGED):
             prefix = f"job {handle.id}: " if handle.id else ""
@@ -122,6 +142,7 @@ def _run(log: logging.Logger, *, fake: bool, output: str, library: str, console:
 
     output = os.path.abspath(output or os.getcwd())
     owner = LocalOwner(fake=fake, program=PROGRAM, lock_path=lock_path, on_event=on_event,
+                       kept_root=kept_root, errors_log=errors_log,
                        **({"discover": discover} if discover is not None else {}))
     if owner.refused:
         log.error("%s", owner.refused)
@@ -231,6 +252,77 @@ class ConsoleWatch:
             except Exception:  # noqa: BLE001 -- a watch that raises watches nothing
                 self.log.error("the console watch failed:\n%s",
                                traceback.format_exc().rstrip())
+
+
+_JOB: object = None
+"""The job object `contain_children` made, held for the life of the process: the
+operating system closes the handle when the process ends, which is what ends the rest."""
+
+
+def contain_children() -> bool:
+    """Put this process in a Windows job object that ends every member when it ends.
+
+    Everything this process starts afterwards -- the acquisition console, through the
+    `cmd` that redirects its output -- is a member too, and when the last handle to the
+    job closes, which the operating system does as this process ends however it ends,
+    the members are ended with it. Nested inside whatever job a parent put this process
+    in, which Windows has allowed since 8. True if it took; False off Windows or if
+    Windows refused, in which case the stopping of a left-behind console at the next
+    start is the recovery, as it was before this existed.
+    """
+    global _JOB
+    if _JOB is not None:
+        return True
+    if os.name != "nt":
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    class _Basic(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64),
+                    ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", wintypes.DWORD),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t),
+                    ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD)]
+
+    class _Io(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_uint64) for name in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+    class _Extended(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", _Basic), ("IoInfo", _Io),
+                    ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    kill_on_job_close = 0x2000
+    extended_limit_information = 9
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
+    kernel32.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int,
+                                                 ctypes.c_void_p, wintypes.DWORD)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        return False
+    info = _Extended()
+    info.BasicLimitInformation.LimitFlags = kill_on_job_close
+    if not (kernel32.SetInformationJobObject(job, extended_limit_information,
+                                             ctypes.byref(info), ctypes.sizeof(info))
+            and kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess())):
+        kernel32.CloseHandle(job)
+        return False
+    _JOB = job
+    return True
 
 
 def _clear_console_port(log: logging.Logger) -> None:

@@ -61,6 +61,11 @@ class Handle:
     told about the new daemon's job 3; with this the new one refuses (`StaleHandle`).
     Empty means "whichever owner is asked", which is what an in-process caller that
     builds a handle by id gets (lab record, task 68)."""
+    origin: str = ""
+    """A few words naming the client that submitted it (`the clockwork window (pid
+    5120)`, `Claude, through the MCP server`), carried unexamined, so that every other
+    client can say whose job it is; empty for the owner's own jobs and a caller that
+    named none (lab record, task 77)."""
 
 
 class StaleHandle(ValueError):
@@ -101,6 +106,9 @@ class OwnerStatus:
     refused: str = ""
     """The sentence the lock refused this owner with, or empty while it holds the lock
     or needs none. Non-empty means every hardware job will be refused the same way."""
+    issued: int = 0
+    """The id of the newest handle this owner has issued, 0 before the first. Ids are
+    dense from 1, so with this a client can follow every job, whoever submitted it."""
 
 
 class Owner(Protocol):

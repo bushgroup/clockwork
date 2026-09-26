@@ -5,7 +5,8 @@ the window, and importing this package does not pull PySide6 in, so `--self-chec
 the tests that assert the seam cost nothing for it.
 
     window.py         the window itself; holds no acquisition sequence of its own
-    worker.py         the one thread that talks to the boxes and the console
+    worker.py         the thread that follows `clockwork serve`, or --fake's own owner
+    serving.py        starting `clockwork serve` when the window finds none running
     panes.py          a box's pane, with the phase clockwork read each line as
     runlog.py         the progress bar and the warnings worth reading
     console_panel.py  the console in the status bar, and its six editable settings
@@ -14,18 +15,21 @@ the tests that assert the seam cost nothing for it.
     launch.py         handing a file to mainspring, and the logs to an editor
     errors.py         where a traceback goes in a build with no stderr to print it to
 
-`naming.py`, `launch.py` and `errors.py` import no Qt: what a run is called, how a file
-is opened and where a traceback goes are questions a test can ask without a window, and
-the last of them has to be answerable before `QApplication` exists.
+`naming.py`, `launch.py`, `serving.py` and `errors.py` import no Qt: what a run is
+called, how a file is opened, how the daemon is started and where a traceback goes are
+questions a test can ask without a window, and the last of them has to be answerable
+before `QApplication` exists.
 
 Three arguments and one command. `--fake` builds the whole window over `FakeBox` and
-`FakeConsole`, so every path above the wire runs with no instrument on the bench;
-`--self-check` is the installer's proof that the lower layers work inside a frozen
-build, with no window shown; and no argument at all is the trainee's launch.
-`clockwork serve` is the daemon (`clockwork.owner.daemon`), which owns the instrument
-with no window at all and never imports Qt; `clockwork mcp` serves its tools to an MCP
-client, and every one of those tools is also a verb of its own, `clockwork status`,
-`clockwork arm` and the rest (`clockwork.mcp.cli`), over the same daemon.
+`FakeConsole` in its own process, so every path above the wire runs with no instrument
+on the bench; `--self-check` is the installer's proof that the lower layers work inside
+a frozen build, with no window shown; and no argument at all is the trainee's launch, a
+window that is a client of `clockwork serve` and starts one if none is running (lab
+record, task 77). `clockwork serve` is the daemon (`clockwork.owner.daemon`), which owns
+the instrument with no window at all and never imports Qt; `clockwork mcp` serves its
+tools to an MCP client, and every one of those tools is also a verb of its own,
+`clockwork status`, `clockwork arm` and the rest (`clockwork.mcp.cli`), over the same
+daemon.
 """
 
 from __future__ import annotations
@@ -315,6 +319,11 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--console", metavar="PATH", default="",
                        help="the acquisition console executable, or a directory holding "
                             "it (default: $CLOCKWORK_CONSOLE, then the installer's)")
+    serve.add_argument("--kept", metavar="DIR", default=None,
+                       help="where a failed run's files are copied (default: "
+                            "$CLOCKWORK_REPORTS, then the per-user folder)")
+    serve.add_argument("--errors-log", metavar="PATH", default="",
+                       help="a front end's error log, copied with a failed run's files")
     mcp = commands.add_parser(
         "mcp", help="serve the instrument's tools to an MCP client, such as Claude Code, "
                     "over stdio (docs/mcp-server.md)",
@@ -406,7 +415,8 @@ def main(argv: list[str] | None = None) -> int:
         from clockwork.owner import daemon
 
         return daemon.run(fake=args.serve_fake, output=args.output, library=args.library,
-                          console=args.console)
+                          console=args.console, kept_root=args.kept,
+                          errors_log=args.errors_log, contain=True)
 
     if args.command == "mcp":
         # The protocol is stdin and stdout, and the SDK claims the real streams by their

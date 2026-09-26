@@ -35,6 +35,11 @@ __all__ = ["INSTRUCTIONS", "PROGRAM", "SIMULATED", "build_server", "fake_output"
 
 PROGRAM = "clockwork mcp"
 
+ORIGIN = "Claude, through clockwork mcp"
+"""How this server's jobs are named to the daemon's other clients (`Handle.origin`), so
+that the window can say whose acquisition it is showing. The lab's MCP client is Claude;
+the words would read wrongly for another client, and nothing depends on them."""
+
 SIMULATED = Instrument(
     name="simulated instrument",
     description="The stand-in a --fake session acquires under when given no document.",
@@ -189,7 +194,7 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
         library = library or lab_dir("golden") or ""
         output = output or fake_output()
     else:
-        owner = RemoteOwner(endpoint or DEFAULT_COMMAND)
+        owner = RemoteOwner(endpoint or DEFAULT_COMMAND, origin=ORIGIN)
         try:
             hello = owner.hello()  # type: ignore[attr-defined]
         except DaemonError as exc:

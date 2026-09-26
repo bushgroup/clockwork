@@ -276,6 +276,8 @@ class LocalOwner:
         self._last_run: Run | None = None
 
         self._ids = itertools.count(1)
+        self._issued = 0
+        """The newest id issued (`OwnerStatus.issued`), under `_guard` with the id."""
         self._seqs = itertools.count(1)
         self._guard = threading.Lock()
         """Over `_history` and `_pending`, which the owner's thread, a folding worker
@@ -297,15 +299,17 @@ class LocalOwner:
 
     # -- the protocol --------------------------------------------------------
 
-    def submit(self, job: Job) -> Handle:
+    def submit(self, job: Job, *, origin: str = "") -> Handle:
         """Queue a job. Never blocks; any thread may call it.
 
         After `shutdown` the job is not queued at all: it is reported failed at once,
-        because the thread that would have run it may already be gone.
+        because the thread that would have run it may already be gone. `origin` names
+        the client for every other one (`Handle.origin`).
         """
-        handle = Handle(id=next(self._ids), kind=type(job).__name__, label=job.label,
-                        owner=self.session)
         with self._guard:
+            handle = Handle(id=next(self._ids), kind=type(job).__name__, label=job.label,
+                            owner=self.session, origin=origin)
+            self._issued = handle.id
             self._history[handle.id] = []
             if not self._closing:
                 self._pending.append(handle)
@@ -343,6 +347,7 @@ class LocalOwner:
     def status(self) -> OwnerStatus:
         with self._guard:
             queued = tuple(self._pending)
+            issued = self._issued
         held = self._lock is not None and self._lock.held
         return OwnerStatus(
             program=self.program,
@@ -357,6 +362,7 @@ class LocalOwner:
             armed=self._armed,
             holder=self._lock.holder if held else self._refused_by,
             refused=self._refused,
+            issued=issued,
         )
 
     def shutdown(self, reason: str = "the owner is shutting down") -> None:

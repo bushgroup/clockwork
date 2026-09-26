@@ -106,7 +106,11 @@ if (Test-Path $consoleDest) {
 }
 
 function Measure-Startup([string]$label) {
-    $proc = Start-Process -FilePath $exePath -PassThru
+    # --fake: a bare launch is a client of clockwork serve and starts one when none is
+    # running (lab record, task 77), which on an instrument PC would take the boxes and
+    # the console, and would outlive the Stop-Process below. The simulated window runs
+    # the same imports and builds the same window, so the time is the same question.
+    $proc = Start-Process -FilePath $exePath -ArgumentList "--fake" -PassThru
     $start = Get-Date
     $deadline = $start.AddSeconds($TimeoutSeconds)
     # Windowed (console=False, task 60), the same shape as mainspring's own build: one

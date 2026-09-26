@@ -494,36 +494,48 @@ def test_a_fake_owner_keeps_nothing_unless_given_a_root(tmp_path, monkeypatch):
 
 def test_a_window_refused_the_lock_says_who_holds_it_and_greys_the_hardware(
         qtbot, tmp_path, monkeypatch):
+    """The window is a client of `clockwork serve` (lab record, task 77), so a lock held
+    elsewhere reaches it as a daemon that would not start, whose last line names the
+    holder. Stood in here by a launch that has already exited and a log that says so: a
+    test never starts a real daemon (`conftest.no_real_daemon`)."""
     pytest.importorskip("pytestqt")
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    import socket
+
     from PySide6.QtCore import QSettings
 
     from clockwork.app.settings import Settings
     from clockwork.app.window import MainWindow
+    from clockwork.app.worker import RemoteWorker
+
+    class Exited:
+        def poll(self) -> int:
+            return 1
 
     backing = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     monkeypatch.setattr("clockwork.app.window.Settings", lambda: Settings(backing))
-    holder = InstrumentLock("clockwork serve", os.environ[LOCK_ENV])
-    holder.acquire()
-    window = MainWindow()
+    log = tmp_path / "serve.log"
+    log.write_text("2026-09-26 14:02:11 the instrument is already owned by a bench script "
+                   "(pid 4812, since 2026-09-26 14:00:00); close that one before using the "
+                   "hardware from here\n", encoding="utf-8")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    window = MainWindow(client=lambda mailbox: RemoteWorker(
+        mailbox=mailbox, endpoint=f"tcp://127.0.0.1:{port}", connect_timeout=0.3,
+        launch=Exited, log=str(log)))
     qtbot.addWidget(window)
     try:
-        # The launch's own Find boxes, job 1, is refused with the sentence before any
-        # port is opened.
-        owner = window.worker.owner
-        qtbot.waitUntil(lambda: any(isinstance(entry.event, JobFailed)
-                                    for entry in owner.events(Handle(1, "", ""))),
-                        timeout=10_000)
-        qtbot.waitUntil(lambda: window._job is None, timeout=10_000)
+        qtbot.waitUntil(lambda: "bench script" in window.worker.refused, timeout=10_000)
+        window._refresh_actions()
         assert window.lock_label.isVisibleTo(window)
-        assert "clockwork serve" in window.lock_label.text()
+        assert "bench script" in window.lock_label.text()
         assert window.find_button.isEnabled()
         for button in (window.setup_button, window.arm_button, window.acquire_button,
                        window.replicate_button):
             assert not button.isEnabled()
         assert not window.action_console.isEnabled()
-        assert window.worker.boxes == {}
+        assert window.worker.boxes == ()
     finally:
         window.worker.shutdown()
         window.worker.wait(10_000)
-        holder.release()

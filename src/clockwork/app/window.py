@@ -13,8 +13,9 @@ method together out of the panes, hand it to the worker and render what comes ba
 this module and the loop could be said to disagree, the loop is right. The one judgement
 made here is which button may be pressed, and even that is `refusals(method)`.
 
-**Nothing here touches the instrument.** Every serial write and every ZeroMQ round trip
-is on `Worker`'s thread; this thread assembles jobs and drains a mailbox on a timer. The
+**Nothing here touches the instrument.** Every serial write and every round trip to the
+console is in `clockwork serve`, whose client this window is (`RemoteWorker`), or under
+`--fake` on `Worker`'s thread; this thread assembles jobs and drains a mailbox on a timer. The
 timer is 50 ms, which is faster than a repetition and slower than a batch, so the bar
 moves smoothly and a hundred repetitions cost a hundred redraws rather than a thousand.
 
@@ -30,6 +31,7 @@ import datetime as _dt
 import os
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import replace
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
@@ -63,7 +65,7 @@ import clockwork
 from .. import instrument as instrument_module
 from .. import keep
 from .. import method as method_module
-from ..acq import ConsoleProcess, StateRead, find_console
+from ..acq import StateRead, find_console
 from ..acq.loop import WHEN_ARMED, RunBegun, cautions, refusals
 from ..instrument import UNCALIBRATED, Instrument
 from ..method import (
@@ -93,6 +95,7 @@ from .panes import BoxPane
 from .queuepanel import QueuePanel
 from .runlog import RunPanel
 from .runqueue import FAILED, STOPPED, QueueRow, RunQueue, outcome_of
+from .serving import serve_command, start_serve
 from .settings import Settings
 from .worker import (
     Acquire,
@@ -101,6 +104,7 @@ from .worker import (
     Job,
     Mailbox,
     ReadState,
+    RemoteWorker,
     RestartConsole,
     Send,
     SendResult,
@@ -153,16 +157,36 @@ class MainWindow(QMainWindow):
     kept_pruned = Signal(str)
     """A line about the start-up prune of the kept-files root, for the run log."""
 
-    def __init__(self, *, fake: bool = False) -> None:
+    def __init__(self, *, fake: bool = False,
+                 client: Callable[[Mailbox], RemoteWorker] | None = None) -> None:
+        """`client` builds the daemon's client in place of the one this window would,
+        for a test that points it at a daemon of its own."""
         super().__init__()
         self.fake = fake
         self.settings = Settings()
         self.mailbox = Mailbox()
-        # A --fake run's failures are no evidence about the instrument, so its owner
-        # keeps nothing; a report made from it still does (task 81).
-        self.worker = Worker(fake=fake, mailbox=self.mailbox,
-                             kept_root="" if fake else self.kept_root(),
-                             errors_log=errors.errors_log_path())
+        self.worker: Worker | RemoteWorker
+        if fake:
+            # A --fake run's failures are no evidence about the instrument, so its owner
+            # keeps nothing; a report made from it still does (task 81). In this
+            # process, with no daemon: nothing --fake does is worth a second process,
+            # and the window tests stay as fast as they were (task 77).
+            self.worker = Worker(fake=True, mailbox=self.mailbox, kept_root="",
+                                 errors_log=errors.errors_log_path())
+        else:
+            # The instrument belongs to `clockwork serve`; the window is one of its
+            # clients, and starts it when it is not running (task 77). What the daemon
+            # needs of this window's settings goes on its command line.
+            command = serve_command(
+                output=self.settings.output_dir, library=self.settings.library_dir,
+                console=self.settings.console_path, kept=self.kept_root(),
+                errors_log=errors.errors_log_path())
+            self.worker = client(self.mailbox) if client is not None else RemoteWorker(
+                mailbox=self.mailbox, launch=lambda: start_serve(command),
+                console_path=self.settings.console_path)
+        self._close_when_idle = False
+        """Set by a close that chose to stop this window's run: the window closes itself
+        when the job comes back, having shown the frame end in the run log."""
 
         self.method_path = self.settings.method_path
         self.instrument_path = self.settings.instrument_path
@@ -248,6 +272,8 @@ class MainWindow(QMainWindow):
 
         self._build()
         self._connect()
+        if isinstance(self.worker, RemoteWorker):
+            self.worker.start()  # after the slots, so that `connected` finds one
         self._restore()
         # After `_build`, since the line goes in the run panel. `main` installed the
         # hooks before this window existed, so anything raised on the way up here is
@@ -624,6 +650,9 @@ class MainWindow(QMainWindow):
         self.worker.run_done.connect(self._run_done)
         self.worker.state_read.connect(self._state_read)
         self.worker.said.connect(self.run_panel.say)
+        self.worker.warned.connect(self._warn)
+        self.worker.connected.connect(self._daemon_connected)
+        self.worker.status_changed.connect(self._owner_status)
 
         self.find_button.clicked.connect(lambda: self.find_boxes())
         self.setup_button.clicked.connect(lambda: self.send(setup=True))
@@ -688,12 +717,11 @@ class MainWindow(QMainWindow):
         if self.method_path and os.path.isfile(self.method_path):
             self._load_method(self.method_path)
         self._refresh_stem()
-        if not self.fake:
-            # On launch as well as on demand (lab record, task 50): a trainee arriving at
-            # the instrument should find the panes already named for the boxes that are
-            # on, not have to press a button to be told. Under `--fake` the rack comes
-            # from the method instead, so `_load_method` above has already done it.
-            self.find_boxes()
+        # On launch as well as on demand (lab record, task 50): a trainee arriving at the
+        # instrument should find the panes already named for the boxes that are on, not
+        # have to press a button to be told. Under `--fake` the rack comes from the
+        # method, so `_load_method` above has already done it; otherwise the daemon
+        # scans as it starts, and `_daemon_connected` scans one that was already up.
 
     # -- assembling the method -----------------------------------------------
 
@@ -799,8 +827,7 @@ class MainWindow(QMainWindow):
         else:
             not_armed = []
 
-        have_console = (self.worker.console is not None
-                        and self.worker.console.alive)
+        have_console = self.worker.console_alive
         # Another program owns the instrument (lab record, task 67): every hardware job
         # would be refused with the lock's sentence, so the buttons that queue one are
         # grey and the sentence stays in the status bar. Find boxes is left as the retry
@@ -816,7 +843,7 @@ class MainWindow(QMainWindow):
         blocking = (problems if method is not None else []) + no_offset + not_armed
         self.acquire_button.setEnabled(not busy and not blocking and not locked)
         self.replicate_button.setEnabled(
-            not busy and not blocking and not locked and self.worker.snapshot is not None)
+            not busy and not blocking and not locked and self.worker.has_snapshot)
         self.stop_button.setEnabled(busy and not self.worker.stopping)
         # Enabled from the moment a run's raw file exists and not from the moment the
         # run ends (task 55), which is why `_live_run` is taken off `RunBegun`. The
@@ -1036,14 +1063,16 @@ class MainWindow(QMainWindow):
         self.worker.submit(RestartConsole())
 
     def console_settings(self) -> None:
-        console = self.worker.console
-        if not isinstance(console, ConsoleProcess):
+        reader = self.worker.config_reader()
+        if reader is None:
             self._complain(
                 "There is no config.txt to edit",
                 "The simulated console reads no configuration file; --fake exercises "
-                "the status bar and the restart path and nothing below them.")
+                "the status bar and the restart path and nothing below them." if self.fake
+                else "No acquisition console is configured on this PC, so there is no "
+                     "config.txt beside one to edit.")
             return
-        dialog = ConsoleSettings(console.config, self)
+        dialog = ConsoleSettings(reader, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         values = dialog.values()
@@ -1088,7 +1117,7 @@ class MainWindow(QMainWindow):
         method = self.build_method()
         if method is None:
             return None
-        if self.worker.console is None or not self.worker.console.alive:
+        if not self.worker.console_alive:
             self.run_panel.say("starting the acquisition console first")
             self.start_console()
         self.settings.conditions = self.conditions.toPlainText()
@@ -1299,7 +1328,11 @@ class MainWindow(QMainWindow):
         stem = os.path.splitext(os.path.basename(event.raw_path))[0]
         self._live_run = (event.raw_path, event.summed_path, stem)
         self._last_run_paths = self._live_run
-        if self.open_on_acquire.isChecked() and not self._viewer_is_up():
+        # Not for another client's run: a viewer opening on the trainee's screen over
+        # a campaign Claude is running is not what the checkbox was ticked for.
+        foreign = self._job is not None and bool(self.worker.origin(self._job))
+        if (self.open_on_acquire.isChecked() and not foreign
+                and not self._viewer_is_up()):
             self._launch_viewer()
         self._refresh_actions()
 
@@ -1413,8 +1446,15 @@ class MainWindow(QMainWindow):
 
     def _job_started(self, job: Job) -> None:
         self._job = job
-        self.run_panel.begin(job.label)
-        self.statusBar().showMessage(job.label)
+        # Another client's job arrives here exactly as this window's own do, so that
+        # the person at the instrument sees what Claude did as their own actions would
+        # appear, and says whose it is (task 77).
+        origin = self.worker.origin(job)
+        label = f"{job.label} (from {origin})" if origin else job.label
+        if origin:
+            self.run_panel.say(f"{origin} started a job in clockwork serve: {job.label}")
+        self.run_panel.begin(label)
+        self.statusBar().showMessage(label)
         self._refresh_actions()
 
     def _job_finished(self, job: Job, result: object) -> None:
@@ -1439,6 +1479,7 @@ class MainWindow(QMainWindow):
         if job is self._queue_job:
             self._queue_step(job, result)
         self._refresh_actions()
+        self._close_if_asked()
 
     def _job_failed(self, job: Job, message: str) -> None:
         self._job = None
@@ -1449,6 +1490,53 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{job.label}: failed")
         if job is self._queue_job:
             self._row_finished(FAILED, message)
+        self._refresh_actions()
+        self._close_if_asked()
+
+    def _warn(self, line: str) -> None:
+        """A warning line from the daemon's client. A method rather than a lambda, so
+        that Qt drops the connection with the window rather than calling into a run
+        panel that has been deleted."""
+        self.run_panel.say(line, warn=True)
+
+    def _daemon_connected(self, hello: object, started: bool) -> None:
+        """A daemon answered: say which, and name the panes for its boxes.
+
+        One this window started scans the rack as it starts, and its scan arrives as
+        the other jobs do. One that was already running scanned long ago, so an idle one
+        is asked again -- a rescan keeps the ports it holds open (task 62), so it costs
+        seconds and resets nothing -- and a busy one is not held up by a scan: the panes
+        are named from the boxes it reports and the ports follow at the next Find boxes.
+        """
+        pid = getattr(hello, "pid", "?")
+        if started:
+            self.run_panel.say(f"started clockwork serve (pid {pid}); it owns the boxes "
+                               "and the console, and this window is its client")
+        else:
+            self.run_panel.say(f"connected to clockwork serve (pid {pid}, since "
+                               f"{getattr(hello, 'started', '?')}), which owns the boxes "
+                               "and the console")
+        if getattr(hello, "fake", False):
+            self.run_panel.say("that clockwork serve is --fake: nothing it reports is "
+                               "evidence about a MIPS box or a digitizer", warn=True)
+        status = getattr(self.worker, "status", None)
+        if started or status is None:
+            return
+        if status.running is None and not status.queued:
+            self.find_boxes()
+        else:
+            self._ensure_panes(list(status.boxes) + [name for name in self.ports
+                                                     if name not in status.boxes])
+            self._pane_changed()
+
+    def _owner_status(self, status: object) -> None:
+        """The daemon's status moved: other clients' jobs, the lock, the boxes."""
+        worker = self.worker
+        lines = []
+        if isinstance(worker, RemoteWorker):
+            lines = [f"{state}: {handle.label} (from {handle.origin or 'clockwork serve'})"
+                     for state, handle in worker.others()]
+        self.queue_panel.show_others(lines)
         self._refresh_actions()
 
     def _state_read(self, name: str, state: object) -> None:
@@ -1615,9 +1703,10 @@ class MainWindow(QMainWindow):
         if not chosen:
             return
         self.settings.kept_root = chosen
-        if not self.fake:
-            self.worker.owner.kept_root = self.kept_root()
         line = f"failed and reported runs' files are kept in {self.kept_root()}"
+        if not self.fake and not self.worker.set_kept_root(self.kept_root()):
+            line += (" from the next start of clockwork serve; the one running keeps "
+                     "failed runs where it was told to when it started")
         if os.environ.get(keep.ENV, "").strip():
             line += f" (${keep.ENV} is set, and outranks the folder just chosen)"
         self.run_panel.say(line)
@@ -1772,10 +1861,98 @@ class MainWindow(QMainWindow):
         self.settings.queue_open = self.queue_dock.isVisible()
         self.settings.open_mainspring_on_acquire = self.open_on_acquire.isChecked()
         self.settings.sync()
+        if isinstance(self.worker, RemoteWorker) and not self._close_as_client():
+            event.ignore()
+            return
         self._drain_timer.stop()
         self.worker.shutdown()
         self.worker.wait(10_000)
         super().closeEvent(event)
+
+    def _close_as_client(self) -> bool:
+        """What closing does to the daemon: True to close now, False to stay open.
+
+        Three cases (task 77, Matt's two decisions of 2026-09-26). **This window's own
+        run is in flight, or its queue has rows to come**: ask whether to stop it, leave
+        it running in the daemon, or not close; stopping keeps the window open to show
+        the frame end and closes it when the job comes back. **Another client's job is
+        in the daemon**: say so, and leave it and the daemon alone. **Nothing is
+        running**: a daemon this window started is shut down with it, one it found
+        running is left as it was found.
+        """
+        worker = self.worker
+        assert isinstance(worker, RemoteWorker)
+        if self._close_when_idle:
+            return self._job is None
+        if worker.status is None:
+            return True
+        mine = worker.busy_mine() or self.queue.running
+        others = worker.others()
+        if mine:
+            answer = self._ask_close()
+            if answer == "cancel":
+                return False
+            if answer == "stop":
+                self._close_when_idle = True
+                self.stop()
+                if self._job is None:
+                    self._shutdown_if_mine()
+                    return True
+                self.run_panel.say("closing once the run has stopped and its files are "
+                                   "closed", warn=True)
+                return False
+            # Left running: the queue is this window's and cannot outlive it.
+            if self.queue.running:
+                self.queue.cancel("the window was closed")
+            return True
+        if others:
+            state, handle = others[0]
+            self._tell(
+                "An acquisition is still running",
+                f"{handle.label} ({handle.origin or 'clockwork serve'}) is {state} in "
+                "clockwork serve, and carries on after this window closes. The daemon "
+                "and the acquisition console stay running; open clockwork again to "
+                "follow it.")
+            return True
+        self._shutdown_if_mine()
+        return True
+
+    def _shutdown_if_mine(self) -> None:
+        """Stop the daemon if this window started it and nobody's job is left in it."""
+        worker = self.worker
+        assert isinstance(worker, RemoteWorker)
+        if worker.spawned is not None and not worker.others():
+            worker.shutdown_daemon("the window that started it closed")
+
+    def _close_if_asked(self) -> None:
+        if not self._close_when_idle or self._job is not None:
+            return
+        if isinstance(self.worker, RemoteWorker):
+            self._shutdown_if_mine()
+        self.close()
+
+    def _ask_close(self) -> str:
+        """Stop, leave, or cancel: `"stop"`, `"leave"` or `"cancel"`. A method of its own
+        so that a test can answer it."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("An acquisition is running")
+        box.setText("This window's acquisition is still running in clockwork serve.")
+        box.setInformativeText(
+            "Stop it after the current repetition, fold it and close its files, then "
+            "close; or leave it running and close now. Rows of the run queue still "
+            "waiting are skipped either way.")
+        stop = box.addButton("Stop, then close", QMessageBox.ButtonRole.AcceptRole)
+        leave = box.addButton("Leave it running", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(stop)
+        box.exec()
+        clicked = box.clickedButton()
+        return "stop" if clicked is stop else "leave" if clicked is leave else "cancel"
+
+    def _tell(self, title: str, detail: str) -> None:
+        """An information box, a method of its own so that a test can take it."""
+        QMessageBox.information(self, title, detail)
 
 
 # -- layout helpers ------------------------------------------------------------------

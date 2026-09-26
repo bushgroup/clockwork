@@ -369,7 +369,8 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
     from .audit import AuditLog
     from .server import instrument_and_limits
 
-    owner = RemoteOwner(args.endpoint or DEFAULT_COMMAND)
+    owner = RemoteOwner(args.endpoint or DEFAULT_COMMAND,
+                        origin=f"{program} at the command line")
     try:
         try:
             hello = owner.hello()

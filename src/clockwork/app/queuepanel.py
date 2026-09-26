@@ -124,6 +124,13 @@ class QueuePanel(QWidget):
 
         self.caption = QLabel("")
         self.caption.setWordWrap(True)
+        self.others = QLabel("")
+        self.others.setWordWrap(True)
+        self.others.setToolTip(
+            "Jobs another client of clockwork serve has in it, such as Claude through "
+            "the MCP server: they run on the same boxes and console, one job at a time "
+            "with this window's, and are not rows of this queue.")
+        self.others.setVisible(False)
 
         self.add_button = QPushButton("Add method…")
         self.add_open_button = QPushButton("Add the open method")
@@ -181,6 +188,7 @@ class QueuePanel(QWidget):
         column.setContentsMargins(4, 4, 4, 4)
         column.addWidget(self.tree, 1)
         column.addWidget(self.caption)
+        column.addWidget(self.others)
         column.addWidget(buttons)
         self.refresh()
 
@@ -274,6 +282,13 @@ class QueuePanel(QWidget):
         self.start_button.setEnabled(
             not running and not self._busy and self.queue.waiting > 0)
         self.stop_button.setEnabled(running)
+
+    def show_others(self, lines: list[str]) -> None:
+        """Other clients' jobs in the daemon, one line each, or nothing to hide it."""
+        text = "\n".join(["In clockwork serve from other clients:", *lines]) if lines else ""
+        if text != self.others.text():
+            self.others.setText(text)
+        self.others.setVisible(bool(lines))
 
     def set_busy(self, busy: bool) -> None:
         """What the window knows and this panel does not: the worker has a job."""

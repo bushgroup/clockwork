@@ -11,10 +11,13 @@ owner the window uses, so a caller written against one runs against the other un
 ## Starting it
 
 ```
-clockwork serve [--fake] [--output DIR] [--library DIR] [--console PATH]
+clockwork serve [--fake] [--output DIR] [--library DIR] [--console PATH] [--kept DIR]
+                [--errors-log PATH]
 ```
 
-To start the daemon, run that command at a terminal on the instrument PC. In order, it
+The window starts the daemon itself when it opens and none is answering (under The window as a
+client), so on a trainee's day nobody types this. To start one by hand, run that command at a
+terminal on the instrument PC. In order, it
 
 1. takes the instrument lock (below), and exits with the lock's sentence if another owner holds it;
 2. stops an acquisition console left running by an owner that died, if one is answering on the
@@ -28,7 +31,16 @@ To start the daemon, run that command at a terminal on the instrument PC. In ord
 default. `--library` is the method library a client may list, reported by `hello` and otherwise
 unused by the daemon. `--fake` runs everything above over simulated boxes and a simulated
 console: it takes no lock, stops nothing, opens no port but its own two, and nothing it reports is
-evidence about a MIPS box or a digitizer.
+evidence about a MIPS box or a digitizer. `--kept` is the folder a failed run's files are copied
+into, the `$CLOCKWORK_REPORTS` or per-user default otherwise, and `--errors-log` is a front end's
+error log to copy with them; the window passes its own of both when it starts the daemon, since
+the daemon has no error log of its own.
+
+The acquisition console the daemon starts is tied to the daemon's life. On Windows the daemon
+places itself and everything it starts in a job object that ends its members when the daemon's
+process ends, however it ends: closed with its console window, killed from Task Manager, or
+crashed. A console can therefore not outlive the daemon and hold the digitizer against the next
+one.
 
 Starting the daemon at a terminal is the authorization for what its clients then do. There is no
 login and no token; the sockets accept connections from this machine only.
@@ -81,15 +93,22 @@ One command per call of the owner protocol, and `hello`.
 | `cmd` | `args` | `result` |
 |---|---|---|
 | `hello` | none | An object naming the daemon: `program`, `version` (clockwork's), `protocol` (1), `session`, `pid`, `started`, `fake`, `events` (the event socket's address), `output`, `library`, and `holder`, the lock holder's own description or null under `--fake` |
-| `submit` | `job` | A `Handle`. The job is queued and runs after every job before it, one at a time |
+| `submit` | `job`, `origin` (optional) | A `Handle`. The job is queued and runs after every job before it, one at a time. `origin` is a few words naming the client, such as `the clockwork window (pid 5120)` or `Claude, through the MCP server`, and is carried unexamined in the handle's own `origin` so that every other client can say whose job it is |
 | `events` | `handle`, `after` (default 0) | That job's progress numbered after `after`, oldest first, as a list of `Progress` |
 | `stop` | `reason` (optional) | null. The run in flight ends after its current repetition and its fold |
 | `snapshot` | none | The `Snapshot` the next run will be stamped with, or null before any send |
-| `status` | none | An `OwnerStatus`: console, boxes, ports held, running and queued handles, stopping, the lock holder, the lock's refusal if there is one, and `armed`, what the last send that finished left the boxes holding (the method's name, what went on the wire, and the stem the send named), or null before any send and while one is under way |
+| `status` | none | An `OwnerStatus`: console, boxes, ports held, running and queued handles, stopping, the lock holder, the lock's refusal if there is one, `armed`, what the last send that finished left the boxes holding (the method's name, what went on the wire, and the stem the send named), or null before any send and while one is under way, and `issued`, the id of the newest handle this session has issued, 0 before the first |
 | `shutdown` | `reason` (optional) | null, sent before the shutdown begins (under Shutting down) |
 
 A client checks `protocol` in the `hello` reply and refuses to go on if it is not the version it
-was written for. This document describes protocol 1.
+was written for. This document describes protocol 1. `origin` and `issued` were added to it
+without a new version: both have defaults, an empty string and 0, that a client written before
+them never reads and a daemon written before them never sends.
+
+Handle ids are counted from 1 for each session with no gaps, which with `issued` lets a client
+follow every job whatever client submitted it: every id up to `issued` is a job, and `events`
+answers for any of them by its id and the session. A job's kept history is dropped some time after
+it finishes, and `events` then answers with an empty list.
 
 ## Wire forms
 
@@ -186,6 +205,37 @@ client discards its socket and makes another, so the late reply cannot be read a
 the next request. When the daemon comes back, on the same address, the next request reaches it,
 its new `session` tells the client that the old handles are gone, and asking for the progress of
 one of them is refused.
+
+## The window as a client
+
+The clockwork window is a client of the daemon like any other, and on an instrument PC it is the
+usual way a daemon starts. When it opens it asks `hello` on the command socket. If a daemon
+answers, the window follows it. If none does, the window starts `clockwork serve` itself, the
+installed executable with the subcommand, passing its output directory, method library, console,
+kept-files folder and error log on the command line, and waits for `hello`. The daemon it starts
+has no console window, runs in a process group of its own, breaks away from any job the window is
+in, and logs to `serve.log` alone; it is stopped by `shutdown` and never by a console signal. If
+the daemon ends before it answers, which is what happens when another program holds the
+instrument lock, the window shows the last line of `serve.log`, which names the holder.
+
+The window follows every job in the daemon, whichever client submitted it. It reads `status` a few
+times a second and the progress of every handle up to `issued`, and shows another client's job in
+its run log and status bar exactly as it shows its own, with the job's `origin` beside it, and
+lists another client's running and queued jobs under its run queue. It greys out its sending and
+acquiring buttons while any job runs, since the daemon runs one job at a time, and its Stop button
+stops whichever run is in flight.
+
+Closing the window leaves the daemon to its clients:
+
+| When the window closes and | it does this |
+|---|---|
+| a send or acquisition it submitted is running or queued | asks whether to stop it after the current repetition and close once its files are closed, leave it running in the daemon and close now, or not close |
+| another client's job is running or queued | says so and closes, leaving the daemon and the job running |
+| nothing is running or queued | shuts the daemon down if this window started it, and leaves one it found running as it was |
+
+The window's run queue belongs to the window and does not outlive it: rows still waiting are
+skipped whichever way it closes. Under `--fake` the window runs its simulated instrument in its
+own process and starts no daemon.
 
 ## Logs
 
