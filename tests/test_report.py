@@ -11,7 +11,7 @@ import pytest
 import clockwork
 from clockwork import report
 from clockwork.app import main
-from clockwork.report import BUDGET, Report, outbound, transcript_beside
+from clockwork.report import BUDGET, Report, outbound, request_url, transcript_beside
 
 TABLE = "STBLDAT;0:[A:100,0:b:1:W:2:0:1:1:0:2]"
 """A table string standing in for a method's contents: nothing of it may reach a URL."""
@@ -124,6 +124,28 @@ def test_the_newest_transcript_of_a_stem_is_found_whatever_its_date(tmp_path):
 def test_the_tracker_can_be_pointed_elsewhere(monkeypatch):
     monkeypatch.setenv("CLOCKWORK_ISSUES", "https://example.net/new")
     assert report.url().startswith("https://example.net/new?template=bug.yml&")
+    assert request_url().startswith("https://example.net/new?template=feature.yml&")
+
+
+def test_a_feature_request_carries_the_version_and_pc_and_nothing_else():
+    address = request_url(version="9.9.9", commit="abc1234", pc="MASSTRO",
+                          issues="https://example.org/issues/new")
+    got = fields(address)
+    assert set(got) == {"template", "version", "pc"}
+    assert got["template"] == "feature.yml" and got["pc"] == "MASSTRO"
+    assert got["version"] == "9.9.9 (abc1234, from source)"
+
+
+def test_clockwork_request_prints_and_opens_the_feature_form(capsys, monkeypatch):
+    opened = []
+    monkeypatch.setattr("webbrowser.open", lambda address: opened.append(address) or True)
+    assert main(["request", "--print-only"]) == 0
+    printed = capsys.readouterr().out.strip()
+    assert fields(printed)["template"] == "feature.yml" and opened == []
+    assert main(["request"]) == 0
+    assert opened == [capsys.readouterr().out.strip()]
+    monkeypatch.setattr("webbrowser.open", lambda address: False)
+    assert main(["request"]) == 1
 
 
 def test_clockwork_report_prints_and_version_says_which_build(capsys, monkeypatch,

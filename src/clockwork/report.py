@@ -19,8 +19,12 @@ report` first copies the run's files to a folder of their own (`clockwork.keep`)
 the block carries that folder's report id and path, so the report still points at the
 evidence after the trainee has deleted or re-used the run (lab record, task 81).
 
-One module for both callers, and Qt-free: the window opens the URL with
-`QDesktopServices`, `clockwork report` with `webbrowser`.
+**A feature request is the same tracker's other form.** `request_url` opens
+`feature.yml` with only the version and the PC filled in: a request is about what
+clockwork should do next, not about a run, so nothing is kept and no log goes in.
+
+One module for every caller, and Qt-free: the window opens the URL with
+`QDesktopServices`, `clockwork report` and `clockwork request` with `webbrowser`.
 """
 
 from __future__ import annotations
@@ -33,13 +37,16 @@ import sys
 from collections.abc import Sequence
 from urllib.parse import urlencode
 
-__all__ = ["BUDGET", "ISSUES", "Report", "outbound", "tail", "transcript_beside", "url"]
+__all__ = ["BUDGET", "ISSUES", "Report", "outbound", "request_url", "tail",
+           "transcript_beside", "url"]
 
 ISSUES = "https://github.com/bushgroup/clockwork-lab/issues/new"
 """The lab's issue tracker. `$CLOCKWORK_ISSUES` points a report elsewhere, for a group
 running clockwork with a tracker of its own."""
 
 TEMPLATE = "bug.yml"
+
+FEATURE_TEMPLATE = "feature.yml"
 
 BUDGET = 8000
 """Characters in the whole URL. GitHub and every browser in use take this comfortably."""
@@ -156,8 +163,7 @@ class Report:
 
     def _url(self, errors: Sequence[str], chunk: Sequence[str], *, cut_errors: bool,
              cut_transcript: bool) -> str:
-        build = "installed" if getattr(sys, "frozen", False) else "from source"
-        version = f"{self.version} ({self.commit or 'unknown commit'}, {build})"
+        version = _version_line(self.version, self.commit)
         block = ["Filled in by clockwork:", "", f"- Operating system: {self.system}"]
         if self.report_id:
             block.append(f"- Report id: {self.report_id}")
@@ -195,6 +201,12 @@ class Report:
         return f"{self.issues}?{urlencode(fields)}"
 
 
+def _version_line(version: str, commit: str | None) -> str:
+    """`<version> (<commit>, installed|from source)`, as both forms' version field reads."""
+    build = "installed" if getattr(sys, "frozen", False) else "from source"
+    return f"{version} ({commit or 'unknown commit'}, {build})"
+
+
 def _shrinking(start: int, floor: int) -> list[int]:
     """`start`, then smaller counts down to `floor`, then 0: the sizes a tail is tried at."""
     sizes, size = ([start] if start else []), start
@@ -208,3 +220,20 @@ def _shrinking(start: int, floor: int) -> list[int]:
 def url(**fields: str) -> str:
     """`Report(**fields).url()`, for a caller with nothing else to do with the report."""
     return Report(**fields).url()
+
+
+def request_url(*, version: str = "", commit: str | None = "", pc: str = "",
+                issues: str = "") -> str:
+    """The feature request form's URL, with this installation's version and PC filled in.
+
+    The defaults describe this process, as `Report`'s do. Short by construction: no tail,
+    so no budget.
+    """
+    import clockwork
+
+    fields = {"template": FEATURE_TEMPLATE,
+              "version": _version_line(version or clockwork.__version__,
+                                       clockwork.built_commit() if commit == "" else commit),
+              "pc": pc or platform.node()}
+    tracker = issues or os.environ.get("CLOCKWORK_ISSUES") or ISSUES
+    return f"{tracker}?{urlencode(fields)}"

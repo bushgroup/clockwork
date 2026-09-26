@@ -2142,7 +2142,8 @@ def test_report_a_problem_sits_above_about_and_names_the_last_run(window, tmp_pa
 
     help_menu = window.action_about.associatedObjects()[-1]
     actions = [action for action in help_menu.actions() if not action.isSeparator()]
-    assert actions.index(window.action_report) == actions.index(window.action_about) - 1
+    assert actions[-3:] == [window.action_report, window.action_request,
+                            window.action_about]
 
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     window.method_path = str(tmp_path / "bradykinin.toml")
@@ -2181,6 +2182,24 @@ def test_report_a_problem_keeps_the_last_run_off_the_ui_thread(window, tmp_path,
     assert window.action_report.isEnabled()
     assert {row.kept for row in keep.read_manifest(str(root / name)).rows
             if row.status == "copied"} == {"ZZ-007.uimf", "ZZ-007-2026-09-25.transcript.log"}
+
+
+def test_request_a_feature_opens_the_feature_form_and_keeps_nothing(window, tmp_path,
+                                                                      monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+
+    from clockwork import keep
+    from clockwork.app import window as window_module
+
+    root = tmp_path / "kept"
+    monkeypatch.setenv(keep.ENV, str(root))
+    opened = []
+    monkeypatch.setattr(window_module.QDesktopServices, "openUrl",
+                        lambda address: opened.append(address.toString()) or True)
+    window.action_request.trigger()
+    [address] = opened
+    assert parse_qs(urlsplit(address).query)["template"] == ["feature.yml"]
+    assert not root.exists()
 
 
 def test_the_kept_root_is_the_setting_unless_the_environment_names_one(window, tmp_path,

@@ -607,6 +607,11 @@ class MainWindow(QMainWindow):
             "Open a new bug report in the browser with the version, this PC, the error "
             "log and the last run's transcript already filled in.")
         help_menu.addAction(self.action_report)
+        self.action_request = QAction("Request a &feature...", self)
+        self.action_request.setToolTip(
+            "Open a new feature request in the browser with the version and this PC "
+            "already filled in.")
+        help_menu.addAction(self.action_request)
         self.action_about = QAction("&About clockwork", self)
         help_menu.addAction(self.action_about)
 
@@ -645,6 +650,7 @@ class MainWindow(QMainWindow):
         self.action_read_state.triggered.connect(self.read_state)
         self.action_console.triggered.connect(self.start_console)
         self.action_report.triggered.connect(self.report_problem)
+        self.action_request.triggered.connect(self.request_feature)
         self.action_about.triggered.connect(self._about)
         self.action_forget_geometry.triggered.connect(self._forget_geometry)
         self.action_kept_root.triggered.connect(self.choose_kept_root)
@@ -1682,11 +1688,21 @@ class MainWindow(QMainWindow):
             self.run_panel.say(f"the report's files are kept in {kept}")
         if problem:
             self.run_panel.say(problem, warn=True)
+        self._open_tracker(address, "report")
+
+    def request_feature(self) -> None:
+        """Open the feature request form. Nothing is kept and no log is read, so the
+        address is made here on the UI thread."""
+        from ..report import request_url
+
+        self._open_tracker(request_url(), "request")
+
+    def _open_tracker(self, address: str, what: str) -> None:
         if not QDesktopServices.openUrl(QUrl.fromEncoded(address.encode("ascii"))):
             # Eight kilobytes of address is no message to read in a dialog.
             QApplication.clipboard().setText(address)
             self._complain("No browser could be opened",
-                           "The report's address is copied; paste it into a browser's "
+                           f"The {what}'s address is copied; paste it into a browser's "
                            "address bar to file it.")
 
     def _about(self) -> None:

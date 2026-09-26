@@ -229,6 +229,12 @@ removed from the transcript first. A transcript too long to fit is named by its 
 be dragged into the report. `clockwork report` does the same from a terminal
 ([command line](command-line.md)).
 
+To ask for something clockwork should do, or do differently, choose **Help > Request a
+feature...**. It opens a new feature request on the same tracker with the version, the build
+commit and the PC's name already filled in, and asks what you are trying to do, how you do it
+today and what would help. Nothing is copied and no log goes in. `clockwork request` does the same
+from a terminal.
+
 When a run fails, clockwork copies what the run left on disk into a folder of its own before the
 failure is reported: both UIMF files, the send log and the wire transcript, which by then ends on
 the `Stopped:` line giving the reason, together with the method file and the error log. The

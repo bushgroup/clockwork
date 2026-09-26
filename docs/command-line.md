@@ -132,9 +132,9 @@ its verdict under `verdict` and the report a person reads under `text`. A verdic
 `could not judge` is still exit status 0, since the routine answered; a routine that does not
 exist or does not load is 1.
 
-## Reporting a problem
+## Reporting a problem or requesting a feature
 
-Two commands sit beside the verbs and need no daemon. `clockwork --version` prints the version
+Three commands sit beside the verbs and need no daemon. `clockwork --version` prints the version
 and the commit the installation was built from. `clockwork report` opens a new bug report on the
 lab's issue tracker in the browser, with the version, the build commit, the PC's name, the
 operating system and the last 40 lines of the window's error log already filled in, and prints
@@ -156,6 +156,11 @@ log, with a manifest. The report carries the folder's report id and path, and th
 standard error. `--no-keep` copies nothing. `--print-only` prints the address without opening a
 browser, and still copies. A group running clockwork with a tracker of its own points reports there
 by setting `CLOCKWORK_ISSUES` to the address of that tracker's new-issue page.
+
+`clockwork request` opens a new feature request on the same tracker with the version, the build
+commit and the PC's name filled in, and prints its address. It copies nothing and carries no log.
+`--print-only` prints the address without opening a browser, and `CLOCKWORK_ISSUES` points it
+elsewhere as it does `clockwork report`.
 
 ## The verbs
 

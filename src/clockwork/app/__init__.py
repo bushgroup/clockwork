@@ -257,6 +257,21 @@ def _report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _request(args: argparse.Namespace) -> int:
+    """`clockwork request`: print the feature request form's address, and open it."""
+    import webbrowser
+
+    from clockwork.report import request_url
+
+    address = request_url()
+    print(address)
+    if not args.print_only and not webbrowser.open(address):
+        print("no browser could be opened; paste the address above into one",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Console-script entry point, and the frozen build's entry point through
     `packaging/entrypoint.py`.
@@ -340,13 +355,20 @@ def main(argv: list[str] | None = None) -> int:
                         help="print the address and open no browser")
     report.add_argument("--no-keep", action="store_true",
                         help="copy nothing to the kept-files folder")
+    request = commands.add_parser(
+        "request", help="open a feature request on the lab's issue tracker",
+        description="Open a new feature request in the browser with the version, the "
+                    "build commit and the PC already filled in.")
+    request.add_argument("--print-only", action="store_true",
+                         help="print the address and open no browser")
     # The verbs are built from the tool registry, which costs half a second of imports
     # (the toolbox, the loop, mainspring's reader): paid only when the command line
     # could name a verb or asks for help, never by the window's own launch.
     words = list(sys.argv[1:] if argv is None else argv)
     command = next((word for word in words if not word.startswith("-")), None)
     cli = None
-    if command not in (None, "serve", "mcp", "report") or {"-h", "--help"} & set(words[:1]):
+    if (command not in (None, "serve", "mcp", "report", "request")
+            or {"-h", "--help"} & set(words[:1])):
         from clockwork.mcp import cli
 
         cli.add_verbs(commands)
@@ -365,7 +387,7 @@ def main(argv: list[str] | None = None) -> int:
 
     import clockwork
 
-    if args.version or args.command == "report":
+    if args.version or args.command in ("report", "request"):
         # As `serve`: the answer belongs in the terminal it was typed at (task 60).
         if getattr(sys, "frozen", False):
             _attach_parent_console()
@@ -373,7 +395,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"clockwork {clockwork.__version__} "
                   f"({clockwork.built_commit() or 'unknown commit'})")
             return 0
-        return _report(args)
+        return _report(args) if args.command == "report" else _request(args)
 
     if args.command == "serve":
         # A windowed build has no stdout of its own; the daemon's log belongs in the
