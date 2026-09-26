@@ -283,6 +283,21 @@ class FakeConsole:
         being slow, which is not what the silence has to survive.
         """
 
+        self.short_frames: list[int] = []
+        """Faults for the frames to come, one taken off the front per frame: how many of
+        that frame's leading batches never reach the data socket. 0 is a whole frame.
+
+        The console's `index oob` fault (lab #2): the frame's first batches are written
+        to the file but never published, the frame still says `finished`, and the
+        stream ends short of the count. Each such frame also logs
+        `short_frame_errors` lines to `logged_errors`, as the console's stdout does.
+        """
+
+        self.short_frame_errors = 3
+        self.logged_errors = 0
+        """`[error]` lines this stand-in would have printed. It has no stdout, so
+        `FakeConsoleProcess.errors_logged` reads this instead."""
+
         self.frame_error: str | None = None
         """Published as `error <this>` before a frame's `finished`, if set.
 
@@ -605,8 +620,15 @@ class FakeConsole:
         write_error: str | None = None
         first_scan = 0
         upfront = max(0, len(sizes) - self.trailing_batches)
+        lost = self.short_frames.pop(0) if self.short_frames else 0
+        if lost:
+            self.logged_errors += self.short_frame_errors
         for index, scans in enumerate(sizes):
-            if index >= upfront:
+            if index < lost:
+                # Written and never published: `short_frames`.
+                if request.file_name and write_error is None:
+                    write_error = self._write_scans(request, first_scan, scans)
+            elif index >= upfront:
                 # Owed to the frame and published after its end, by the serve thread
                 # between commands. The last of them carries the whole delay, so that a
                 # test can put a gap of a chosen size in front of the batch that

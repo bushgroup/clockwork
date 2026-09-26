@@ -122,3 +122,81 @@ def test_prune_removes_only_old_unclaimed_folders(tmp_path):
     assert sorted(os.listdir(root)) == sorted(
         os.path.basename(path) for path in (young, renamed, stray))
     assert keep.prune(str(tmp_path / "absent"), now=now) == []
+
+
+# --- task 82: a row's several stems, and the two manifest gaps lab #2's folder showed ---
+
+
+def test_a_rows_report_keeps_every_stem_it_names_and_not_the_next_rows(tmp_path):
+    directory = run_dir(tmp_path)
+    for name in ("260925_ZZ_041.summed.uimf", "260925_ZZ_041-2026-09-25.transcript.log",
+                 "260925_ZZ_054.uimf"):
+        (directory / name).write_bytes(b"x" * 10)
+    folder = keep.for_report(str(tmp_path / "kept"), directory=str(directory),
+                             stems=[STEM, "260925_ZZ_041"],
+                             method_path=str(directory / "Sample ID.txt"))
+    manifest = keep.read_manifest(folder)
+    assert manifest.stems() == [STEM, "260925_ZZ_041"]
+    kept = {row.kept for row in manifest.rows if row.status == "copied"}
+    assert {f"{STEM}.uimf", "260925_ZZ_041.uimf", "260925_ZZ_041.summed.uimf",
+            "Sample ID.txt"} <= kept
+    assert not any(name.startswith("260925_ZZ_054") for name in kept)
+
+
+def test_a_rows_report_after_one_replicate_failed_adds_the_others_to_that_folder(
+        tmp_path):
+    directory = run_dir(tmp_path)
+    root = str(tmp_path / "kept")
+    failed = keep.keep(root, keep.run_files(str(directory), "260925_ZZ_041"),
+                       reason="it failed", stems=["260925_ZZ_041"])
+    folder = keep.for_report(root, directory=str(directory),
+                             stems=[STEM, "260925_ZZ_041"])
+    assert folder == failed
+    manifest = keep.read_manifest(folder)
+    assert manifest.stems() == ["260925_ZZ_041", STEM]
+    assert f"{STEM}.uimf" in {row.kept for row in manifest.rows}
+
+
+def test_a_second_report_press_adds_no_second_missing_row(tmp_path):
+    root = str(tmp_path / "kept")
+    errors_log = str(tmp_path / "errors.log")
+    folder = keep.keep(root, [errors_log], reason="failed", stems=[STEM])
+    keep.add(folder, [errors_log], note="reported")
+    keep.add(folder, [errors_log], note="reported again")
+    rows = keep.read_manifest(folder).rows
+    assert [row.status for row in rows if row.original == errors_log] == ["missing"]
+    # Once it exists it is copied, beside the row that said it was missing.
+    open(errors_log, "w", encoding="utf-8").write("a traceback\n")
+    keep.add(folder, [errors_log], note="reported a third time")
+    rows = keep.read_manifest(folder).rows
+    assert [row.status for row in rows if row.original == errors_log] == [
+        "missing", "copied"]
+
+
+def test_a_file_dropped_into_a_kept_folder_is_hashed_as_added_by_hand(tmp_path):
+    """Lab #2's folder: the trainee copied the right run's files in by hand and left a
+    note, and nothing hashed them. The next `add` records each one as it is then, and
+    leaves the rows of what `keep` copied exactly as they were."""
+    directory = run_dir(tmp_path)
+    folder = keep.keep(str(tmp_path / "kept"), keep.run_files(str(directory), STEM),
+                       reason="reported", stems=[STEM])
+    before = keep.read_manifest(folder).rows
+    assert keep.unrecorded(folder) == []
+    note = os.path.join(folder, "ReadMe-forMatt.txt")
+    open(note, "w", encoding="utf-8").write("the wrong run was kept\n")
+    # A recorded copy changed afterwards stays detectable against its kept hash.
+    with open(os.path.join(folder, f"{STEM}.sent.txt"), "ab") as stream:
+        stream.write(b"edited")
+    assert keep.unrecorded(folder) == ["ReadMe-forMatt.txt"]
+
+    keep.add(folder, [], note="reported")
+    manifest = keep.read_manifest(folder)
+    assert manifest.rows[:len(before)] == before
+    [hand] = [row for row in manifest.rows if row.status == keep.HAND_ADDED]
+    assert (hand.kept, hand.original, hand.sha256) == ("ReadMe-forMatt.txt", "-",
+                                                       sha256(note))
+    assert hand.size == str(os.path.getsize(note))
+    assert keep.unrecorded(folder) == []
+    keep.add(folder, [], note="reported again")
+    assert len([row for row in keep.read_manifest(folder).rows
+                if row.status == keep.HAND_ADDED]) == 1

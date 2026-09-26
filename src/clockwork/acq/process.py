@@ -142,6 +142,11 @@ grace period on platforms where `terminate()` means SIGTERM, and on Windows the
 time allowed for the tree kill itself to take effect.
 """
 
+ERROR_MARK = "[error]"
+"""What marks an error line in the console's spdlog output: `[aqmd3] [error] ...`.
+Counted per run (`ConsoleProcess.errors_logged`); `[critical]` ends the process and is
+not counted, since a run it happens in has already failed."""
+
 READY_POLL_S = 0.1
 TAIL_POLL_S = 0.15
 """How often the port is probed and the output files are read forward.
@@ -652,6 +657,11 @@ class ConsoleSupervisor:
     def alive(self) -> bool:
         raise NotImplementedError
 
+    @property
+    def errors_logged(self) -> int:
+        """`[error]` lines the console has logged since it started; 0 where unknown."""
+        return 0
+
     def __enter__(self) -> ConsoleSupervisor:
         return self
 
@@ -747,6 +757,7 @@ class ConsoleProcess(ConsoleSupervisor):
         self._tail: threading.Thread | None = None
         self._stop_tailing = threading.Event()
         self._lines: list[str] = []
+        self._errors = 0
         self._lines_lock = threading.Lock()
 
     # -- lifecycle ---------------------------------------------------------
@@ -926,6 +937,18 @@ class ConsoleProcess(ConsoleSupervisor):
             return list(self._lines)
 
     @property
+    def errors_logged(self) -> int:
+        """`[error]` lines this process has written so far, counted as they are read.
+
+        A caller takes the difference across a run, which is how a queue row says the
+        console complained during it (lab #2: three `index oob` lines at the start of a
+        repetition that came up short). Counted in the tail, not by re-reading the file.
+        """
+        self._drain()
+        with self._lines_lock:
+            return self._errors
+
+    @property
     def last_error(self) -> str:
         """The last critical or error line the console logged, for a message.
 
@@ -1013,6 +1036,7 @@ class ConsoleProcess(ConsoleSupervisor):
             fresh = [line for line in fresh if line]
             with self._lines_lock:
                 self._lines += fresh
+                self._errors += sum(1 for line in fresh if ERROR_MARK in line)
             for line in fresh:
                 _LOG.debug("%s %s", where, line)
 
@@ -1113,6 +1137,10 @@ class FakeConsoleProcess(ConsoleSupervisor):
     @property
     def alive(self) -> bool:
         return self._fake is not None
+
+    @property
+    def errors_logged(self) -> int:
+        return getattr(self._fake, "logged_errors", 0)
 
     def needs_restart(self) -> dict[str, tuple[str, str]]:
         return {}

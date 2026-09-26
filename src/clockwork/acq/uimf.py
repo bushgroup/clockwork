@@ -443,6 +443,11 @@ def _scan_rows(frame: SparseFrame) -> Iterator[tuple[int, np.ndarray, np.ndarray
 # --- one acquisition's files ----------------------------------------------------------
 
 
+_DELETE_BUSY_S = 5.0
+"""How long `begin_again`'s delete waits for the file's write lock. The console's writer
+commits one batch per transaction and has finished the frame by then, so any wait is a
+reader's query or the fold's, both short."""
+
 RAW_DISCARD_DEADLINE_S = 0.25
 """How long `close` keeps trying to remove a raw file the method asked to discard.
 
@@ -520,6 +525,9 @@ class Recording:
         self._summed: UimfWriter | None = None
         self._folded: set[int] = set()
         self._open_frame: tuple[int, int, int, float] | None = None
+        # The frame `end_frame` last closed, whether it was marked complete and how long
+        # it took, for `begin_again`. None once a frame is begun.
+        self._ended: tuple[int, int, int, bool, float] | None = None
         self._frames: dict[int, list[int]] = {}
         self._elapsed: dict[int, float] = {}
         self._began: dict[int, float] = {}
@@ -778,14 +786,80 @@ class Recording:
         frame = self._raw.add_frame(spec)
         self._frames.setdefault(method_frame, []).append(frame)
         self._open_frame = (frame, method_frame, repetition, now)
+        self._ended = None
+        return self._request(frame)
+
+    def begin_again(self) -> FrameRequest:
+        """Open the frame just ended a second time, with its rows gone, and return the
+        same request.
+
+        For a repetition that came up short and is acquired again in place (lab
+        record, task 82). The frame keeps its number and its parameters, which are
+        clockwork's and still true; what goes is every `Frame_Scans` row the console
+        wrote under it, deleted on a connection of this recording's own -- the table is
+        the console's, and the writer here never touches it -- so that the second
+        attempt's rows are the frame's only rows. `StartTimeMinutes` is rewritten to
+        now, and the first attempt's span comes off its method frame's summed duration,
+        so neither file counts the discarded attempt as acquisition.
+
+        Only after `end_frame(complete=False)`: a frame already marked complete is one
+        the file vouches for, and taking its rows away would make the marker a lie.
+        Call it once the console has stopped writing the frame -- the loop calls it
+        after its wait ended on the silence, which is seconds past the last batch.
+        """
+        self._require_open()
+        if self._open_frame is not None:
+            raise ValueError(
+                f"frame {self._open_frame[0]} is still open; end_frame() it first")
+        if self._ended is None:
+            raise ValueError("no frame has just ended; begin_again() follows end_frame()")
+        frame, method_frame, repetition, complete, elapsed = self._ended
+        if complete:
+            raise ValueError(
+                f"frame {frame} was marked complete; only a provisional frame is "
+                "acquired again")
+        self._ended = None
+        conn = sqlite3.connect(self._raw.path, timeout=_DELETE_BUSY_S,
+                               isolation_level=None)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM Frame_Scans WHERE FrameNum = ?", (int(frame),))
+            conn.execute("COMMIT")
+        finally:
+            conn.close()
+        self._elapsed[method_frame] = max(
+            0.0, self._elapsed.get(method_frame, 0.0) - elapsed)
+        now = self._clock()
+        if self._frames.get(method_frame, [None])[0] == frame:
+            # The method frame's first repetition is the one being redone, so the
+            # summed frame begins when this attempt does.
+            self._began[method_frame] = now
+        self._raw.finalise_frame(
+            frame, complete=False,
+            extra={"StartTimeMinutes": (now - self._started) / 60.0})
+        self._open_frame = (frame, method_frame, repetition, now)
+        return self._request(frame)
+
+    def _request(self, frame: int) -> FrameRequest:
         return FrameRequest(
-            frame_length=acquisition.frame_length,
+            frame_length=self.acquisition.frame_length,
             file_name=self._raw.path,
             frame_number=frame,
             nbr_accumulations=1,
             offset_bins=self.geometry.offset_bins,
             nbr_samples=self.geometry.bins,
         )
+
+    def set_aside(self, frame: int) -> None:
+        """Leave a raw frame out of its method frame's fold, and keep it in the file.
+
+        For a repetition that came up short twice: its rows stay where the console
+        put them, provisional, and the summed frame is the sum of the repetitions that
+        were whole (lab record, task 82).
+        """
+        for numbers in self._frames.values():
+            if frame in numbers:
+                numbers.remove(frame)
 
     def end_frame(self, *, duration_s: float | None = None, complete: bool = True) -> int:
         """Phase two: write the completion marker. Returns the frame.
@@ -805,7 +879,7 @@ class Recording:
         self._require_open()
         if self._open_frame is None:
             raise ValueError("no frame is open; begin_frame() first")
-        frame, method_frame, _repetition, started = self._open_frame
+        frame, method_frame, repetition, started = self._open_frame
         self._open_frame = None
         elapsed = self._clock() - started
         span = self._elapsed.get(method_frame, 0.0)
@@ -815,6 +889,7 @@ class Recording:
             duration_s=None if duration_s is None else float(duration_s),
             complete=complete,
         )
+        self._ended = (frame, method_frame, repetition, complete, elapsed)
         return frame
 
     @contextlib.contextmanager

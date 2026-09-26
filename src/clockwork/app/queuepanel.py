@@ -21,13 +21,14 @@ watches it move.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMenu,
     QPushButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -65,8 +66,8 @@ the morning; the two flags are check boxes; the rest is what the queue reports."
 
 STRETCH_COLUMN = OUTCOME_COLUMN
 """The column that absorbs the width left over. The outcome is the longest thing in
-the table -- two stems, a stop reason and a silence count -- and the one whose tail a
-trainee can afford to read in the tooltip."""
+the table -- two stems, a stop reason, a retry count and the console's errors -- and the
+one whose tail a trainee can afford to read in the tooltip."""
 
 
 class QueuePanel(QWidget):
@@ -82,6 +83,9 @@ class QueuePanel(QWidget):
     changed = Signal()
     """A row was edited, added, removed or reordered. The window re-reads what may be
     pressed: a queue with nothing waiting in it cannot be started."""
+    report_requested = Signal(int)
+    """"Report this run" on a finished row, by row number: the window keeps that row's
+    files and method and opens the report on them, not on whatever ran last (lab #2)."""
 
     def __init__(self, queue: RunQueue, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -114,6 +118,8 @@ class QueuePanel(QWidget):
                 QHeaderView.ResizeMode.Stretch if column == STRETCH_COLUMN
                 else QHeaderView.ResizeMode.ResizeToContents)
         self.tree.itemChanged.connect(self._item_changed)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._context_menu)
         self.tree.itemSelectionChanged.connect(lambda: self._refresh_buttons())
 
         self.caption = QLabel("")
@@ -312,6 +318,26 @@ class QueuePanel(QWidget):
         finally:
             self._rebuilding = False
         self.changed.emit()
+
+    def menu_for(self, index: int) -> QMenu:
+        """The context menu for one row. "Report this run" is there for every row and
+        enabled for a finished one with files (`QueueRow.reportable`)."""
+        menu = QMenu(self.tree)
+        action = menu.addAction("Report this run…")
+        row = self.queue.rows[index] if 0 <= index < len(self.queue.rows) else None
+        action.setEnabled(row is not None and row.reportable)
+        action.setToolTip("Keep this row's files, its method and the error log, and "
+                          "open a problem report about this row rather than the last "
+                          "run.")
+        action.triggered.connect(lambda: self.report_requested.emit(index))
+        return menu
+
+    def _context_menu(self, position: QPoint) -> None:
+        item = self.tree.itemAt(position)
+        if item is None:
+            return
+        menu = self.menu_for(self.tree.indexOfTopLevelItem(item))
+        menu.exec(self.tree.viewport().mapToGlobal(position))
 
     def _remove(self) -> None:
         for index in reversed(self.selection()):

@@ -24,6 +24,7 @@ import datetime as dt
 import os
 import sys
 import threading
+from dataclasses import replace
 
 import pytest
 
@@ -1783,7 +1784,8 @@ def test_a_box_the_method_names_that_nothing_answered_for_is_still_editable(
 # --- the run queue's rules, with no window in sight -----------------------------------
 
 
-def a_run(stem: str, *, stopped: str = "", silence: int = 0, complete: bool = True):
+def a_run(stem: str, *, stopped: str = "", retried: int = 0, complete: bool = True,
+          console_errors: int = 0):
     """A `Run` in the shape the queue reads: a stem, an ending and its frames.
 
     Built rather than acquired, because what is under test here is the sentence a row
@@ -1794,25 +1796,37 @@ def a_run(stem: str, *, stopped: str = "", silence: int = 0, complete: bool = Tr
     frames = tuple(
         FrameRecord(method_frame=1, repetition=index + 1, frame_number=index + 1,
                     outcome="acquired" if complete or index else "timed out",
-                    ended_by="silence" if index < silence else "counted")
+                    ended_by="counted", retry=index < retried)
         for index in range(ACCUMULATIONS))
+    discarded = tuple(
+        replace(frame, ended_by="silence", retry=False) for frame in frames[:retried])
     folds = () if not complete else (
         FoldRecord(method_frame=1, frames_folded=(1,), rows=SCANS, seconds=0.1),)
     return Run(method=method, raw_path=f"/data/{stem}.uimf",
                summed_path=f"/data/{stem}.summed.uimf", frames=frames, folds=folds,
-               warnings=(), seconds=1.0, stopped_early=stopped or None)
+               warnings=(), seconds=1.0, stopped_early=stopped or None,
+               retried=discarded, console_errors=console_errors)
 
 
-def test_a_row_reports_its_stems_its_stop_and_the_repetitions_that_went_quiet():
+def test_a_row_reports_its_stems_its_stop_its_retries_and_the_console_errors():
     row = runqueue.QueueRow(method_path="/methods/clock.toml")
     assert row.name == "clock"
+    assert not row.reportable
     state = runqueue.outcome_of(
-        row, [a_run("260918_ZZ_001"), a_run("260918_ZZ_002", silence=1)])
+        row, [a_run("260918_ZZ_001"),
+              a_run("260918_ZZ_002", retried=1, console_errors=3)])
     assert state == runqueue.DONE
     assert row.stems == ("260918_ZZ_001", "260918_ZZ_002")
-    assert row.silent_frames == 1
+    assert row.directory == os.path.dirname("/data/260918_ZZ_001.uimf")
+    assert row.retried_frames == 1
+    assert row.console_errors == 3
     assert "260918_ZZ_001, 260918_ZZ_002" in row.outcome
-    assert "1 repetition(s) ended on the silence" in row.outcome
+    assert "1 repetition(s) acquired again" in row.outcome
+    assert "console reported 3 errors" in row.outcome
+    row.state = state
+    assert row.reportable
+    row.reset()
+    assert (row.retried_frames, row.console_errors, row.directory) == (0, 0, "")
 
 
 def test_a_stopped_run_is_neither_done_nor_failed_because_its_files_are_good():
@@ -2182,6 +2196,49 @@ def test_report_a_problem_keeps_the_last_run_off_the_ui_thread(window, tmp_path,
     assert window.action_report.isEnabled()
     assert {row.kept for row in keep.read_manifest(str(root / name)).rows
             if row.status == "copied"} == {"ZZ-007.uimf", "ZZ-007-2026-09-25.transcript.log"}
+
+
+def test_report_this_run_on_a_queue_row_keeps_that_rows_files_not_the_last_runs(
+        window, tmp_path, qtbot, monkeypatch):
+    """Lab #2: the toolbar's Report kept the run after the one the trainee meant. The
+    row's own "Report this run" keeps the row's stems, its method and its transcript."""
+    from urllib.parse import parse_qs, urlsplit
+
+    from clockwork import keep
+    from clockwork.app import window as window_module
+
+    root = tmp_path / "kept"
+    monkeypatch.setenv(keep.ENV, str(root))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    opened = []
+    monkeypatch.setattr(window_module.QDesktopServices, "openUrl",
+                        lambda address: opened.append(address.toString()) or True)
+    methods = {}
+    for stem, name in (("ZZ-039", "2+BK-CLOCK-40V-2ms"), ("ZZ-054", "2+BK-CLOCK-45V")):
+        (tmp_path / f"{stem}.uimf").write_bytes(b"uimf")
+        (tmp_path / f"{stem}-2026-09-25.transcript.log").write_text(
+            f"10:00:00.001 acq.loop         Retried: {stem}\n", encoding="utf-8")
+        methods[stem] = tmp_path / f"{name}.toml"
+        methods[stem].write_text("# method\n", encoding="utf-8")
+        row = runqueue.QueueRow(method_path=str(methods[stem]), state=runqueue.DONE,
+                                stems=(stem,), directory=str(tmp_path))
+        window.queue.add(row)
+    window.queue.add(runqueue.QueueRow(method_path=str(methods["ZZ-039"])))
+    window._last_run_paths = (str(tmp_path / "ZZ-054.uimf"), "", "ZZ-054")
+    window.queue_panel.refresh()
+
+    assert not window.queue_panel.menu_for(2).actions()[0].isEnabled()
+    [action] = window.queue_panel.menu_for(0).actions()
+    assert action.isEnabled() and action.text().startswith("Report this run")
+    action.trigger()
+    qtbot.waitUntil(lambda: bool(opened), timeout=5000)
+    [name] = os.listdir(root)
+    manifest = keep.read_manifest(str(root / name))
+    assert manifest.stems() == ["ZZ-039"]
+    assert {row.kept for row in manifest.rows if row.status == "copied"} == {
+        "ZZ-039.uimf", "ZZ-039-2026-09-25.transcript.log", "2+BK-CLOCK-40V-2ms.toml"}
+    text = parse_qs(urlsplit(opened[0]).query)["attachments"][0]
+    assert "Retried: ZZ-039" in text and "2+BK-CLOCK-40V-2ms.toml" in text
 
 
 def test_request_a_feature_opens_the_feature_form_and_keeps_nothing(window, tmp_path,

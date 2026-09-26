@@ -847,10 +847,14 @@ class LocalOwner:
         # again after the header, which forgets a box it finds unplugged.
         self._require_boxes(method)
         boxes = {entry.name: self.boxes[entry.name] for entry in method.boxes}
+        # Counted across the run off the console's own stdout, which the loop never
+        # sees: a row's outcome says how many errors the console logged (lab #2).
+        errors_before = self._console_errors()
         try:
-            return self._logged_run(method, job, console, stream, width, directory, stem,
-                                    header, boxes, append=append, replicate=replicate,
-                                    prologue=prologue, provenance=provenance)
+            run = self._logged_run(method, job, console, stream, width, directory, stem,
+                                   header, boxes, append=append, replicate=replicate,
+                                   prologue=prologue, provenance=provenance)
+            return replace(run, console_errors=self._console_errors() - errors_before)
         except Exception as exc:
             # After `_logs` has closed the transcript, so the copy ends on `Stopped:`,
             # and after `run_acquisition` has folded and closed the files.
@@ -908,6 +912,10 @@ class LocalOwner:
                               self.kept_root, problem)
             self._say(f"the failed run's files could not be kept in {self.kept_root}: "
                       f"{problem}")
+
+    def _console_errors(self) -> int:
+        """`[error]` lines the console process has logged so far; 0 without one."""
+        return self.console.errors_logged if self.console is not None else 0
 
     def _stop_check(self) -> str | None:
         """What `run_acquisition` asks between repetitions. Must not block."""

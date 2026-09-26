@@ -665,6 +665,7 @@ class MainWindow(QMainWindow):
         self.queue_panel.add_requested.connect(self.queue_add_methods)
         self.queue_panel.add_open_requested.connect(self.queue_add_open_method)
         self.queue_panel.changed.connect(self._refresh_actions)
+        self.queue_panel.report_requested.connect(self.report_row)
 
         self.initials.editingFinished.connect(self._initials_changed)
         self.output_dir.editingFinished.connect(self._refresh_stem)
@@ -1656,11 +1657,34 @@ class MainWindow(QMainWindow):
     def report_problem(self) -> threading.Thread:
         """Keep the run's files off the UI thread, then open the report
         (`_report_ready`): copying a UIMF can take a while."""
-        from ..report import Report
-
         # Read here, on the UI thread: the thread below touches no widget.
         directory, stem, transcript = self._report_inputs()
-        method, errors_log = self.method_path or "", errors.errors_log_path()
+        return self._report(directory, (stem,), transcript, self.method_path or "")
+
+    def report_row(self, index: int) -> threading.Thread | None:
+        """"Report this run" on a queue row: that row's stems, method and transcript.
+
+        The toolbar's Report takes the run in flight or the last one, which in a queue
+        is the wrong run as soon as a later row has started; lab #2 kept the next row's
+        files for exactly that reason. The transcript is the row's last replicate's,
+        which is where a stopped or failed row ended.
+        """
+        from ..report import transcript_beside
+
+        if not 0 <= index < len(self.queue.rows):
+            return None
+        row = self.queue.rows[index]
+        if not row.reportable:
+            return None
+        directory = row.directory or self._directory()
+        transcript = transcript_beside(directory, row.stems[-1])
+        return self._report(directory, row.stems, transcript, row.method_path)
+
+    def _report(self, directory: str, stems: tuple[str, ...], transcript: str,
+                method: str) -> threading.Thread:
+        from ..report import Report
+
+        errors_log = errors.errors_log_path()
         root = self.kept_root()
         self.action_report.setEnabled(False)
         self.statusBar().showMessage("keeping the run's files for the report…")
@@ -1668,7 +1692,7 @@ class MainWindow(QMainWindow):
         def work() -> None:
             kept = problem = ""
             try:
-                kept = keep.for_report(root, directory=directory, stem=stem,
+                kept = keep.for_report(root, directory=directory, stems=stems,
                                        method_path=method, errors_log=errors_log)
             except Exception as exc:  # noqa: BLE001 -- the report goes out regardless
                 problem = f"the files could not be kept in {root}: {exc}"

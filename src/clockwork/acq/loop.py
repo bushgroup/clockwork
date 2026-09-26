@@ -171,6 +171,7 @@ __all__ = [
     "PhaseSent",
     "Run",
     "RunBegun",
+    "Retried",
     "Snapshot",
     "StateRead",
     "WHEN_AFTER",
@@ -755,6 +756,25 @@ class FrameEnded(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class Retried(Event):
+    """A repetition came up short and is being acquired again, in place.
+
+    `record` is the attempt that is thrown away: its rows are deleted and the same frame
+    number is asked for again, so this line in the transcript is the only record of it
+    (lab record, task 82). Reported after its own `FrameEnded`.
+    """
+
+    record: FrameRecord
+    frame_length: int
+
+    @property
+    def text(self) -> str:
+        record = self.record
+        return (f"frame {record.method_frame}.{record.repetition}: "
+                f"{record.scans_published} of {self.frame_length} scans, acquired again")
+
+
+@dataclass(frozen=True, slots=True)
 class Folding(Event):
     """A method frame's fold has started, on the folding thread. `Folded` ends it.
 
@@ -860,6 +880,13 @@ class FrameRecord:
     frame ends, so it is a little under `seconds` on a frame that has it.
     """
 
+    retry: bool = False
+    """Whether this is a repetition's second attempt, the first having come up `short`.
+
+    The first attempt is not in `Run.frames`, whose records are one per repetition; it
+    is in `Run.retried`, and its rows are gone from the file (lab record, task 82).
+    """
+
     settle_seconds: float | None = None
     """How long after the last scan arrived the file's row count last moved.
 
@@ -871,6 +898,16 @@ class FrameRecord:
     @property
     def acquired(self) -> bool:
         return self.outcome == "acquired"
+
+    @property
+    def short(self) -> bool:
+        """Acquired, but ended on the silence: fewer scans than the frame asked for.
+
+        What the console does when it loses a frame's first batches -- `finished` on
+        time, the count short, the raw frame holding rows it should not (lab #2). A
+        frame that failed outright is a failure, not a short frame.
+        """
+        return self.acquired and self.ended_by == "silence"
 
     @property
     def writer_lag_rows(self) -> int | None:
@@ -891,6 +928,8 @@ class FrameRecord:
         lag = self.writer_lag_rows
         rows = f", {lag} rows written after it" if lag else ""
         fell_back = ", ended on the silence" if self.ended_by == "silence" else ""
+        if self.retry:
+            fell_back += ", its second attempt"
         if not self.acquired:
             return (f"frame {self.method_frame}.{self.repetition}: {self.outcome}: "
                     f"{self.detail}")
@@ -939,6 +978,14 @@ class Run:
     stopped_early: str | None = None
     raw_kept: bool = True
     """Whether the per-repetition file survived the close, which `keep_raw` decides."""
+    retried: tuple[FrameRecord, ...] = ()
+    """The attempts that came up short and were acquired again, one per retried
+    repetition. Their rows are not in the file; `frames` has the attempt that counts."""
+    console_errors: int = 0
+    """`[error]` lines the console logged while this run was in hand.
+
+    Filled by whoever holds the console process -- the loop talks to the console's
+    sockets and never sees its stdout -- and zero where nobody does (lab #2)."""
 
     @property
     def failures(self) -> tuple[FrameRecord, ...]:
@@ -965,6 +1012,8 @@ class Run:
             return f"{name}: stopped after {len(self.frames)} frames: {self.stopped_early}"
         failed = len(self.failures)
         tail = f", {failed} failed" if failed else ""
+        if self.retried:
+            tail += f", {len(self.retried)} acquired again"
         return (f"{name}: {len(self.frames)} frames, {self.scans_published} scans, "
                 f"{len(self.folds)} folded in {self.seconds:.1f} s{tail}")
 
@@ -2341,6 +2390,7 @@ class _Loop:
     frame_poll: float = FRAME_POLL_S
 
     frames: list[FrameRecord] = field(default_factory=list)
+    retried: list[FrameRecord] = field(default_factory=list)
     folds: list[FoldRecord] = field(default_factory=list)
     stopped_early: str | None = None
     _consecutive_failures: int = 0
@@ -2379,7 +2429,7 @@ class _Loop:
                     if self.stopped_early is not None:
                         break
                 if any(record.method_frame == method_frame and record.acquired
-                       for record in self.frames):
+                       and not record.short for record in self.frames):
                     # A method frame none of whose repetitions acquired is not folded.
                     # The fold would succeed, write an empty frame to the companion, and
                     # so let `keep_raw = false` delete the raw file on the strength of a
@@ -2416,6 +2466,7 @@ class _Loop:
             raw_path=self.recording.raw_path,
             summed_path=self.recording.summed_path,
             frames=tuple(self.frames),
+            retried=tuple(self.retried),
             folds=tuple(self.folds),
             warnings=self.method.warnings,
             seconds=self.clock() - self.started,
@@ -2476,9 +2527,53 @@ class _Loop:
     # -- one console frame --------------------------------------------------------------
 
     def _one_frame(self, method_frame: int, repetition: int) -> None:
+        """One repetition, acquired again once if it comes up short.
+
+        **A short repetition is acquired again, in place, once** (Matt, 2026-09-26; lab
+        record, task 82). Short is `FrameRecord.short`: the console said `finished` and
+        the stream ended on the silence below the frame's count, which is what a
+        console that loses a frame's first batches does, and a raw frame like that holds
+        rows it should not. The attempt is ended provisional, its rows are deleted and
+        the same frame number is asked for again, start list and all
+        (`Recording.begin_again`), so the raw file holds one frame per repetition and
+        `Retried` in the transcript is the only trace of the first. **A second short end
+        stops the run**: that frame stays in the raw file, provisional, and is set aside
+        from the fold, which sums only whole repetitions.
+        """
+        record = self._attempt(method_frame, repetition, retry=False)
+        if record.short:
+            self.retried.append(record)
+            self.report(Retried(record, self.method.acquisition.frame_length))
+            record = self._attempt(method_frame, repetition, retry=True)
+            if record.short:
+                self.recording.set_aside(record.frame_number)
+                if self.stopped_early is None:
+                    self.stopped_early = (
+                        f"frame {method_frame}.{repetition} came up short twice "
+                        f"({record.scans_published} of "
+                        f"{self.method.acquisition.frame_length} scans the second "
+                        "time), so the console is losing data; the repetitions before "
+                        "it are folded and that one is left out"
+                    )
+                    self.report(Warned(f"stopping: {self.stopped_early}"))
+                return
+        if record.acquired:
+            self._consecutive_failures = 0
+            return
+        self._consecutive_failures += 1
+        if self.abort_after is not None and self._consecutive_failures >= self.abort_after:
+            self.stopped_early = (
+                f"{self._consecutive_failures} frames in a row failed, the last with "
+                f"{record.outcome}: {record.detail}"
+            )
+
+    def _attempt(self, method_frame: int, repetition: int, *, retry: bool) -> FrameRecord:
+        """One console frame, from readying the rack to its record. `retry` asks for
+        the frame just ended again rather than a new one."""
         acquisition = self.method.acquisition
         self._ready_the_rack(method_frame, repetition)
-        request = self.recording.begin_frame(method_frame, repetition)
+        request = (self.recording.begin_again() if retry
+                   else self.recording.begin_frame(method_frame, repetition))
         self.report(FrameBegun(method_frame, repetition, request.frame_number,
                                acquisition.console_frames))
         seen: list[Batch] = []
@@ -2488,7 +2583,7 @@ class _Loop:
         # line the previous repetition's table sent late belongs to the previous
         # repetition and would otherwise be counted twice.
         self._witnessed_at = None
-        outcome, detail = "", ""
+        outcome, detail, ended_by = "", "", ""
         timings: dict[str, float] = {}
         """What `release` measured, which only it can: it runs inside `run_frame`."""
 
@@ -2547,8 +2642,10 @@ class _Loop:
         finally:
             # The completion marker last, after the console has stopped writing to this
             # frame: it is the only thing in the file that tells a frame that finished
-            # from one that was cut off, and a frame that failed must not carry it.
-            self.recording.end_frame(complete=outcome == "acquired")
+            # from one that was cut off, and a frame that failed must not carry it. Nor
+            # does a short one, which is acquired again or set aside.
+            self.recording.end_frame(
+                complete=outcome == "acquired" and ended_by != "silence")
 
         # Last look at the boxes before the record is sealed: the wait drains on
         # `frame_poll` and ends on the poll after its last one, so a completion line that
@@ -2574,21 +2671,16 @@ class _Loop:
             start_list_seconds=timings.get("start_list", 0.0),
             table_completed_s=(None if self._witnessed_at is None
                                else self._witnessed_at - began),
+            retry=retry,
         )
-        self.frames.append(record)
+        if not (record.short and not retry):
+            # A first attempt that came up short is about to be acquired again, and
+            # goes in `retried` instead: `frames` is one record per repetition.
+            self.frames.append(record)
         self.report(FrameEnded(record))
         self._check_witness(record)
         self._note_box_events()
-
-        if record.acquired:
-            self._consecutive_failures = 0
-            return
-        self._consecutive_failures += 1
-        if self.abort_after is not None and self._consecutive_failures >= self.abort_after:
-            self.stopped_early = (
-                f"{self._consecutive_failures} frames in a row failed, the last with "
-                f"{record.outcome}: {record.detail}"
-            )
+        return record
 
     def _check_witness(self, record: FrameRecord) -> None:
         """Say so when a repetition has no evidence its gate ever came down.

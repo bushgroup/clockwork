@@ -431,6 +431,56 @@ def test_a_failed_run_is_kept_with_its_method_and_error_log_and_a_finished_one_i
         assert owner.join(30)
 
 
+def test_a_run_carries_the_console_errors_logged_during_it_and_its_retry(tmp_path):
+    """Lab #2's row, on the stand-in: a repetition that loses its first batches is
+    acquired again, the transcript says so, and the run counts the `[error]` lines the
+    console logged while it was in hand -- three, as `index oob` was on the instrument."""
+    from test_daemon import make_instrument, make_method
+
+    owner = _acquiring_owner(tmp_path)
+    try:
+        fake = owner.console.fake
+        fake.notify_on_scans_count = 8
+        before = owner.console.errors_logged
+        method = make_method(accumulations=2)
+        assert isinstance(ended(owner, owner.submit(
+            Send(method=method, directory=str(tmp_path), stem="260925_ZZ_039"))),
+            JobFinished)
+        fake.short_frames = [0, 2]
+        finished = ended(owner, owner.submit(Acquire(
+            method=method, instrument=make_instrument(), directory=str(tmp_path),
+            stem="260925_ZZ_039")), timeout=120)
+        assert isinstance(finished, JobFinished), finished
+        [run] = finished.result
+        assert run.complete and len(run.retried) == 1
+        assert run.console_errors == 3
+        assert owner.console.errors_logged - before == 3
+        assert any("Retried: frame 1.2: 16 of 32 scans, acquired again" in line
+                   for line in _transcript_events(tmp_path))
+    finally:
+        owner.shutdown()
+        assert owner.join(30)
+
+
+def test_a_console_process_counts_its_error_lines_as_it_tails_them(tmp_path):
+    """Counted where stdout is read, not by re-reading the file afterwards."""
+    from clockwork.acq.process import ConsoleProcess
+
+    process = ConsoleProcess(str(tmp_path / "AqMD3_console.exe"), output_dir=str(tmp_path))
+    marks = {process.stdout_path: 0, process.stderr_path: 0}
+    with open(process.stdout_path, "w", encoding="utf-8") as stream:
+        stream.write("[aqmd3] [info] Scans acquired: 10000\n"
+                     "[aqmd3] [error] Error occured when processing ZMQ data: index oob\n"
+                     "[aqmd3] [error] Error occured when processing ZMQ data: index oob\n"
+                     "[aqmd3] [error] partial")
+    process._read_forward(marks)
+    assert process.errors_logged == 2
+    with open(process.stdout_path, "a", encoding="utf-8") as stream:
+        stream.write(" line, finished now\n")
+    process._read_forward(marks)
+    assert process.errors_logged == 3
+
+
 def test_a_fake_owner_keeps_nothing_unless_given_a_root(tmp_path, monkeypatch):
     from clockwork import keep
 

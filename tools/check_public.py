@@ -23,6 +23,7 @@ Run:  uv run tools/check_public.py
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import os
 import re
@@ -2236,6 +2237,46 @@ def main() -> int:
                                ("enable", "SMOD,TBL")],
                 )
 
+                # A repetition whose first batches reach the file and never the stream,
+                # which is the console's `index oob` fault (lab #2): it says `finished`,
+                # ends on the silence short of its count, and is acquired again into
+                # the same frame number with its rows deleted first (lab record,
+                # task 82). The raw file holds one frame per repetition.
+                fake.short_frames = [0, 2]
+                again = acq.run_acquisition(
+                    recipe, boxes=boxes, console=console, stream=stream,
+                    directory=directory,
+                    post_trigger_samples=fake.post_trigger_samples,
+                    stem="selfcheck-loop-retry", silence=0.3, gate_dwell=dwell,
+                )
+                retried_file = UimfFile(again.raw_path)
+                check_true(
+                    "a repetition that came up short is acquired again in place, once, "
+                    "and the raw file holds each repetition once and whole",
+                    again.complete and len(again.retried) == 1
+                    and again.retried[0].ended_by == "silence"
+                    and [record.retry for record in again.frames][:2] == [False, True]
+                    and retried_file.frame_numbers()
+                    == list(range(1, accumulations + 1))
+                    and len({retried_file.scan_summary(n)[0].size
+                             for n in range(1, accumulations + 1)}) == 1,
+                )
+                fake.short_frames = [0, 2, 2]
+                twice = acq.run_acquisition(
+                    recipe, boxes=boxes, console=console, stream=stream,
+                    directory=directory,
+                    post_trigger_samples=fake.post_trigger_samples,
+                    stem="selfcheck-loop-retry-2", silence=0.3, gate_dwell=dwell,
+                )
+                check_true(
+                    "and one that comes up short twice stops the run, folded without it",
+                    not twice.complete
+                    and "came up short twice" in (twice.stopped_early or "")
+                    and len(twice.folds) == 1 and twice.folds[0].frames_folded == (1,)
+                    and UimfFile(twice.raw_path).is_provisional(2),
+                )
+                fake.short_frames = []
+
                 # The one failure that produces a full frame of plausible data at the
                 # wrong offset, from a table that left the enable high or an enable
                 # lead off a pulled-up input (lab record, task 05). The start list is
@@ -3012,28 +3053,35 @@ def main() -> int:
         "start": [["box1", "TBLSTRT"]],
     })
 
-    def queued_run(stem: str, *, silence: int = 0, stopped: str | None = None):
+    def queued_run(stem: str, *, retried: int = 0, stopped: str | None = None,
+                   errors: int = 0):
+        frames = tuple(
+            acq.FrameRecord(method_frame=1, repetition=index + 1,
+                            frame_number=index + 1, outcome="acquired",
+                            ended_by="counted", retry=index < retried)
+            for index in range(2))
         return acq.Run(
             method=queued_method, raw_path=f"{stem}.uimf",
-            summed_path=f"{stem}.summed.uimf",
-            frames=tuple(
-                acq.FrameRecord(method_frame=1, repetition=index + 1,
-                                frame_number=index + 1, outcome="acquired",
-                                ended_by="silence" if index < silence else "counted")
-                for index in range(2)),
+            summed_path=f"{stem}.summed.uimf", frames=frames,
             folds=(acq.FoldRecord(method_frame=1, frames_folded=(1, 2), rows=8),),
-            warnings=(), seconds=1.0, stopped_early=stopped)
+            warnings=(), seconds=1.0, stopped_early=stopped,
+            retried=tuple(dataclasses.replace(frame, ended_by="silence", retry=False)
+                          for frame in frames[:retried]),
+            console_errors=errors)
 
     reported = runqueue.QueueRow(method_path="sample.toml")
     state = runqueue.outcome_of(
-        reported, [queued_run("260918_QQ_001"), queued_run("260918_QQ_002", silence=1)])
+        reported, [queued_run("260918_QQ_001"),
+                   queued_run("260918_QQ_002", retried=1, errors=3)])
     check_true(
-        "a finished row carries the stems its replicates were written under and the "
-        "repetitions that ended on the silence rather than on their own count",
+        "a finished row carries the stems its replicates were written under, the "
+        "repetitions that came up short and were acquired again, and the errors the "
+        "console logged during it",
         state == runqueue.DONE
         and reported.stems == ("260918_QQ_001", "260918_QQ_002")
         and "260918_QQ_001, 260918_QQ_002" in reported.outcome
-        and "1 repetition(s) ended on the silence" in reported.outcome,
+        and "1 repetition(s) acquired again" in reported.outcome
+        and "console reported 3 errors" in reported.outcome,
     )
     halted = runqueue.QueueRow(method_path="sample.toml")
     check_true(

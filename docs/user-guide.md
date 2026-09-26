@@ -147,6 +147,27 @@ to fold, and a larger file takes proportionally longer. Do not close the window 
 process during it. The per-repetition raw file is
 complete on disk by then, and the companion is what a force-quit would lose.
 
+## A repetition that comes up short
+
+A repetition is short when the console says it has finished but fewer scans reach clockwork
+than the method asked for, and the stream then stays quiet for three seconds. The console does
+this when it loses the first batches of a frame, and the raw frame it leaves behind holds rows
+that belong to no real scan, some with a base-peak m/z far outside any mass range. Rather than keep that frame, clockwork acquires the repetition again, once, into the
+same frame of the raw file, after deleting every row the short attempt left there. The run log
+shows the short frame and then a line such as `frame 1.97: 8500 of 10000 scans, acquired again`,
+and the raw file ends the run with exactly one frame per repetition. The wire transcript is the
+only record of the attempt that was discarded.
+
+A repetition that comes up short a second time stops the run, as **Stop** does. The repetitions
+before it are summed into the companion and that one is left out of the sum; it stays in the raw
+file, marked unfinished, and a queue moves on to its next row.
+
+A row of the run queue counts both events in its outcome: `2 repetition(s) acquired again` for
+the repetitions that came up short, and `console reported 3 errors` for the `[error]` lines the
+acquisition console logged while the row's runs were acquiring. Neither makes the row's files
+unusable. A retried repetition is whole, and a run stopped by a second short end is a short
+experiment rather than a broken one.
+
 ## Replicates and naming
 
 The **Name** field is filled automatically: one past the highest number these initials already
@@ -229,6 +250,11 @@ removed from the transcript first. A transcript too long to fit is named by its 
 be dragged into the report. `clockwork report` does the same from a terminal
 ([command line](command-line.md)).
 
+To report a row of the run queue, right-click the row and choose **Report this run...**. The
+report and its kept folder then carry that row's files, every replicate of it, together with the
+row's method and its last replicate's transcript, whereas **Help > Report a problem...** takes
+the run in progress or else the last one, which in a queue is usually a later row.
+
 To ask for something clockwork should do, or do differently, choose **Help > Request a
 feature...**. It opens a new feature request on the same tracker with the version, the build
 commit and the PC's name already filled in, and asks what you are trying to do, how you do it
@@ -245,7 +271,10 @@ both end by naming the folder. **Help > Report a problem...** makes the same cop
 failed run's folder when there is one, and the report carries the folder's report id and path, so
 the files it names need not be attached. Each folder holds a `manifest.txt` giving why it was
 kept, the version, the PC, the time, and the original path, size and SHA-256 hash of every file
-copied. A run ended with **Stop** is not a failure and is not copied. Folders still named by their
+copied. A file copied into the folder by hand is recorded the next time the folder is reported,
+as `added by hand` with its own size and hash, and the rows already written are never changed,
+so a kept copy that was edited afterwards still disagrees with its hash. A run ended with
+**Stop** is not a failure and is not copied. Folders still named by their
 bare report id are removed 90 days after they were made, when the window next starts; a folder
 renamed after the report it belongs to is left alone. A failed run can therefore be deleted from
 the output directory, or its stem used again, without losing anything a report points to.

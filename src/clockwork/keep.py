@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 
 __all__ = [
     "ENV",
+    "HAND_ADDED",
     "MANIFEST",
     "RETENTION_DAYS",
     "Manifest",
@@ -52,9 +53,11 @@ __all__ = [
     "new_id",
     "prune",
     "read_manifest",
+    "record_unrecorded",
     "root",
     "run_files",
     "stem_of",
+    "unrecorded",
     "write_manifest",
 ]
 
@@ -65,6 +68,12 @@ MANIFEST = "manifest.txt"
 
 RETENTION_DAYS = 90
 """How long a folder no report has claimed is kept."""
+
+HAND_ADDED = "added by hand"
+"""The status of a row for a file found in a folder that no row named: put there by
+something other than `keep` or `add`, and hashed when it was found rather than when it
+was copied (lab record, task 82). Its original path is `-`, since nothing says where it
+came from."""
 
 _ID = re.compile(r"R-\d{8}-\d{6}-[A-Za-z0-9-]+\Z")
 
@@ -138,7 +147,7 @@ class Row:
     """One file in a manifest."""
 
     status: str
-    """`copied`, `missing`, or `failed: <why>`."""
+    """`copied`, `missing`, `failed: <why>`, or `HAND_ADDED`."""
     size: str
     sha256: str
     kept: str
@@ -231,21 +240,69 @@ def keep(root_dir: str, paths: Iterable[str], *, reason: str, stems: Iterable[st
     return folder
 
 
-def add(folder: str, paths: Iterable[str], *, note: str,
+def add(folder: str, paths: Iterable[str], *, note: str, stems: Iterable[str] = (),
         when: _dt.datetime | None = None) -> str:
     """Copy more files into an existing folder and add them to its manifest.
 
     For a report made after a failure already kept the run: the folder and id are
     reused, and a file already in it is kept under a new name beside the old copy
     rather than over it -- a fresh copy of the error log is not the one the failure saw.
+
+    **A path the manifest already lists as missing, and still missing, gets no second
+    row**; one that has since appeared is copied with a row of its own. And a file in
+    the folder that no row names is recorded first, as `HAND_ADDED` with its size and
+    hash (`unrecorded`), so that what was put there between two presses of Report is in
+    the manifest too. Rows already written are never rewritten: a copy changed after it
+    was kept stays detectable against the hash taken then (lab record, task 82).
     """
     manifest = read_manifest(folder) or Manifest(fields={"report id": os.path.basename(folder)})
     moment = when or _dt.datetime.now()
     manifest.fields[note] = moment.isoformat(timespec="seconds")
+    new_stems = [stem for stem in stems if stem and stem not in manifest.stems()]
+    if new_stems:
+        manifest.fields["stems"] = ", ".join([*manifest.stems(), *new_stems])
+    manifest.rows += record_unrecorded(folder, manifest)
+    missing = {row.original for row in manifest.rows if row.status == "missing"}
+    wanted = [path for path in paths if path and not (
+        os.path.abspath(path) in missing and not os.path.isfile(path))]
     taken = set(os.listdir(folder))
-    manifest.rows += _copy_all(folder, paths, taken=taken)
+    manifest.rows += _copy_all(folder, wanted, taken=taken)
     write_manifest(folder, manifest)
     return folder
+
+
+def unrecorded(folder: str, manifest: Manifest | None = None) -> list[str]:
+    """Files in a kept folder that no manifest row names, bar `manifest.txt`; sorted.
+
+    What a trainee or a reader copied in by hand. Nothing hashes such a file unless it
+    is recorded, which `record_unrecorded` does and `add` and the lab's claim both call.
+    """
+    manifest = manifest if manifest is not None else read_manifest(folder)
+    named = {row.kept for row in manifest.rows} if manifest is not None else set()
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    return sorted(name for name in names
+                  if name != MANIFEST and name not in named
+                  and os.path.isfile(os.path.join(folder, name)))
+
+
+def record_unrecorded(folder: str, manifest: Manifest) -> list[Row]:
+    """`HAND_ADDED` rows for `unrecorded(folder)`, each hashed as it is now.
+
+    Returns the rows for the caller to append and write; a file that cannot be read is a
+    row saying so rather than an exception, as in `keep`.
+    """
+    rows: list[Row] = []
+    for name in unrecorded(folder, manifest):
+        path = os.path.join(folder, name)
+        try:
+            rows.append(Row(HAND_ADDED, str(os.path.getsize(path)), _sha256(path),
+                            name, "-"))
+        except OSError as exc:
+            rows.append(Row(f"failed: {exc.strerror or exc}", "-", "-", name, "-"))
+    return rows
 
 
 def _copy_all(folder: str, paths: Iterable[str], *, taken: set[str]) -> list[Row]:
@@ -289,19 +346,31 @@ def _sha256(path: str) -> str:
 
 
 def for_report(root_dir: str, *, directory: str = "", stem: str = "",
-               method_path: str = "", errors_log: str = "") -> str:
+               stems: Iterable[str] = (), method_path: str = "",
+               errors_log: str = "") -> str:
     """The folder a report names: the run's failure folder, else a new one.
 
-    A report made after a failure already kept the run reuses that folder and its id,
-    adding a fresh copy of the error log (which now holds whatever the report is
-    about); otherwise the run's files, the method and the error log are kept afresh
-    with the reason `reported`. With no stem, only the error log and the method.
+    `stem` is one run; `stems` is several, which is a queue row's replicates reported
+    together ("Report this run", lab #2), and the two are merged. A report made after a
+    failure already kept one of them reuses that folder and its id, adding the other
+    stems' files and a fresh copy of the error log (which now holds whatever the report
+    is about); otherwise every stem's files, the method and the error log are kept
+    afresh with the reason `reported`. With no stem, only the error log and the method.
     """
-    folder = kept_for(root_dir, stem)
-    if folder is not None:
-        return add(folder, [errors_log], note="reported")
-    paths = [*run_files(directory, stem), method_path, errors_log]
-    return keep(root_dir, paths, reason="reported", stems=[stem])
+    every = list(dict.fromkeys(name for name in (stem, *stems) if name))
+    found = [(folder, name) for name in every
+             if (folder := kept_for(root_dir, name)) is not None]
+    if found:
+        folder = found[-1][0]
+        listed = read_manifest(folder)
+        already = listed.stems() if listed is not None else []
+        others = [name for name in every if name not in already]
+        # The method is in the folder already: the failure that made it kept it.
+        paths = [path for name in others for path in run_files(directory, name)]
+        return add(folder, [*paths, errors_log], note="reported", stems=others)
+    paths = [path for name in every for path in run_files(directory, name)]
+    return keep(root_dir, [*paths, method_path, errors_log], reason="reported",
+                stems=every)
 
 
 def kept_for(root_dir: str, stem: str) -> str | None:

@@ -56,6 +56,7 @@ from clockwork.acq import (
     FrameBegun,
     FrameEnded,
     PhaseSent,
+    Retried,
     RunBegun,
     Warned,
     cautions,
@@ -776,6 +777,67 @@ def test_a_last_batch_later_than_a_batch_is_waited_for_and_still_counts_out(batc
     assert record.wait_seconds >= 0.2
 
 
+def test_a_short_repetition_is_acquired_again_in_place_and_the_file_holds_it_once(batched):
+    """Lab #2, as the stand-in can show it: a frame whose first batches are written and
+    never published says `finished`, ends on the silence below its count, and is
+    acquired again into the same frame number with its rows deleted first. The raw file
+    holds one frame per repetition, the retried one whole and complete, and the fold
+    sums exactly what the raw file holds (lab record, task 82)."""
+    batched.fake.short_frames = [0, 2]
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    events = []
+    run = batched.acquire(method, boxes, progress=events.append)
+
+    assert run.complete, run.text
+    assert [record.repetition for record in run.frames] == [1, 2, 3]
+    assert [record.retry for record in run.frames] == [False, True, False]
+    assert [record.ended_by for record in run.frames] == ["counted"] * 3
+    (short,) = run.retried
+    assert (short.repetition, short.frame_number, short.ended_by) == (2, 2, "silence")
+    assert short.scans_published == SCANS - 2 * BATCH_SCANS
+    assert "1 acquired again" in run.text
+
+    retried = [event for event in events if isinstance(event, Retried)]
+    assert [event.text for event in retried] == [
+        f"frame 1.2: {SCANS - 2 * BATCH_SCANS} of {SCANS} scans, acquired again"]
+
+    raw = UimfFile(run.raw_path)
+    assert raw.frame_numbers() == [1, 2, 3]
+    assert not any(raw.is_provisional(number) for number in (1, 2, 3))
+    # Every repetition is the same stand-in frame, so the retried one holds exactly the
+    # rows its neighbours do: the short attempt's rows are gone, not added to.
+    rows = [raw.scan_summary(number)[0].size for number in (1, 2, 3)]
+    assert rows[0] == rows[1] == rows[2]
+    assert_companion_sums_the_raw_file(run)
+
+
+def test_a_repetition_short_twice_stops_the_run_and_is_left_out_of_the_fold(batched):
+    """One retry, not a loop: the second short end of the same repetition stops the run
+    the way a Stop does, the repetitions before it folded, the short one kept in the raw
+    file provisional and not summed (Matt, 2026-09-26)."""
+    batched.fake.short_frames = [0, 2, 2]
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = batched.acquire(method, boxes)
+
+    assert not run.complete
+    assert "frame 1.2 came up short twice" in run.stopped_early
+    assert [(record.repetition, record.retry, record.short) for record in run.frames] \
+        == [(1, False, False), (2, True, True)]
+    assert len(run.retried) == 1
+    (fold,) = run.folds
+    assert fold.error is None
+    assert fold.frames_folded == (1,)
+
+    raw = UimfFile(run.raw_path)
+    assert raw.frame_numbers() == [1, 2]
+    assert raw.is_provisional(2) and not raw.is_provisional(1)
+    assert_companion_sums_the_raw_file(run)
+
+
 def test_a_last_batch_later_than_the_silence_is_the_gap_the_fallback_is_set_against(
     batched,
 ):
@@ -789,7 +851,10 @@ def test_a_last_batch_later_than_the_silence_is_the_gap_the_fallback_is_set_agai
     boxes = make_boxes(BOX)
     send_phases(method, boxes)
     run = batched.acquire(method, boxes)
-    record = run.frames[0]
+    # The short attempt is acquired again (task 82), so it is the retried record. Its
+    # late batch then lands in the retry, which the stream cannot tell apart: a batch
+    # carries no frame number, which is the other half of what the fallback costs.
+    record = run.retried[0]
     assert record.ended_by == "silence"
     assert record.scans_published < SCANS
 
@@ -804,7 +869,8 @@ def assert_companion_sums_the_raw_file(run, method_frame=1):
     """
     raw, summed = UimfFile(run.raw_path), UimfFile(run.summed_path)
     numbers = [record.frame_number for record in run.frames
-               if record.method_frame == method_frame and record.acquired]
+               if record.method_frame == method_frame and record.acquired
+               and not record.short]
     folded = [raw.read_frame(number) for number in numbers]
     total = summed.read_frame(method_frame)
     assert len(total) > 0
@@ -836,7 +902,10 @@ def test_the_fold_is_exact_however_the_frames_ended(batched):
     # is the console's own behaviour and what the next frame's gate guard exists for.
     batched.fake.final_batch_delay_s = SILENCE * 2
     fell_back = batched.acquire(method, boxes, stem="260911_TEST_SILENCE")
-    assert "silence" in {record.ended_by for record in fell_back.frames}
+    # Since task 82 a frame cut short is acquired again, so the short ones are the
+    # retried records and the raw file holds only the attempts that count.
+    assert "silence" in {record.ended_by
+                         for record in fell_back.retried + fell_back.frames}
     assert_companion_sums_the_raw_file(fell_back)
 
 

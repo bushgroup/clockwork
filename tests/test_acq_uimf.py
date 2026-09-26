@@ -257,6 +257,44 @@ def test_an_acquisition_that_throws_leaves_its_frame_provisional(tmp_path):
     assert opened.is_provisional(2)
 
 
+def test_a_short_frame_begun_again_keeps_its_number_and_loses_its_rows(tmp_path):
+    """`begin_again` is the in-place retry of a short repetition (lab record, task 82):
+    the console's rows under the frame go, the frame's number and parameters stay, its
+    start time is the second attempt's, and a frame already marked complete is refused."""
+    with FakeConsole() as fake:
+        geometry = make_geometry(fake)
+    method = make_method(accumulations=2)
+    now = [100.0]
+    with Recording.create(tmp_path, method, geometry, clock=lambda: now[0],
+                          started=100.0) as recording:
+        path = recording.raw_path
+        first = recording.begin_frame(1, 1)
+        conn = sqlite3.connect(path, isolation_level=None)
+        conn.executemany(
+            "INSERT INTO Frame_Scans (FrameNum, ScanNum, NonZeroCount, BPI, BPI_MZ, TIC,"
+            " Intensities) VALUES (?, ?, 1, 1, 1.0, 1, ?)",
+            [(1, scan, b"\x00") for scan in range(5)])
+        conn.close()
+        assert recording.rows_in(1) == 5
+        now[0] = 160.0
+        recording.end_frame(complete=False)
+        again = recording.begin_again()
+        assert again == first
+        assert not recording.rows_in(1)
+        with pytest.raises(ValueError, match="still open"):
+            recording.begin_again()
+        now[0] = 170.0
+        recording.end_frame()
+        with pytest.raises(ValueError, match="marked complete"):
+            recording.begin_again()
+        assert recording.frames_of(1) == [1]
+
+    opened = UimfFile(path)
+    assert opened.frame_numbers() == [1]
+    assert opened.frame_params(1).marked_complete
+    assert opened.frame_start_times()[1] == pytest.approx(1.0)
+
+
 # --- the fold ------------------------------------------------------------------------
 
 

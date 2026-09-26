@@ -104,12 +104,22 @@ class QueueRow:
     stems: tuple[str, ...] = field(default_factory=tuple)
     """What each replicate's files were called. The row's whole record of where its
     data went: the stem names the UIMF pair, the transcript and the send log."""
+    directory: str = ""
+    """Where those files are: the folder the row's runs wrote to, for a report of this
+    row made after later rows have run (lab #2)."""
     stopped_early: str = ""
-    silent_frames: int = 0
-    """Repetitions that ended because the stream went quiet rather than because they
-    counted out. Worth a trainee's eye per `runlog`, and worth keeping per row so a
-    morning's reading of an overnight queue finds the one that was not clean."""
+    retried_frames: int = 0
+    """Repetitions that came up short and were acquired again (`Run.retried`). The
+    files are whole either way, but a morning's reading of an overnight queue should
+    find the row where the console lost data (lab record, task 82)."""
+    console_errors: int = 0
+    """`[error]` lines the console logged during the row's runs (`Run.console_errors`)."""
     problem: str = ""
+
+    @property
+    def reportable(self) -> bool:
+        """Whether "Report this run" has anything to keep: a finished row with files."""
+        return self.state in (DONE, FAILED, STOPPED) and bool(self.stems)
 
     @property
     def name(self) -> str:
@@ -127,8 +137,11 @@ class QueueRow:
             parts.append(", ".join(self.stems))
         if self.stopped_early:
             parts.append(f"stopped: {self.stopped_early}")
-        if self.silent_frames:
-            parts.append(f"{self.silent_frames} repetition(s) ended on the silence")
+        if self.retried_frames:
+            parts.append(f"{self.retried_frames} repetition(s) acquired again")
+        if self.console_errors:
+            plural = "s" if self.console_errors != 1 else ""
+            parts.append(f"console reported {self.console_errors} error{plural}")
         if self.problem:
             parts.append(self.problem)
         return "; ".join(parts)
@@ -138,8 +151,10 @@ class QueueRow:
         self.state = WAITING
         self.step = ""
         self.stems = ()
+        self.directory = ""
         self.stopped_early = ""
-        self.silent_frames = 0
+        self.retried_frames = 0
+        self.console_errors = 0
         self.problem = ""
 
 
@@ -152,8 +167,10 @@ def outcome_of(row: QueueRow, runs: Sequence[Run]) -> str:
     """
     row.stems = tuple(
         os.path.splitext(os.path.basename(run.raw_path))[0] for run in runs)
-    row.silent_frames = sum(
-        1 for run in runs for record in run.frames if record.ended_by == "silence")
+    row.directory = next(
+        (os.path.dirname(run.raw_path) for run in runs if run.raw_path), "")
+    row.retried_frames = sum(len(run.retried) for run in runs)
+    row.console_errors = sum(run.console_errors for run in runs)
     row.stopped_early = next(
         (run.stopped_early for run in runs if run.stopped_early), "") or ""
     if not runs:

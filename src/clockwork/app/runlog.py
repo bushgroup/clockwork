@@ -43,7 +43,8 @@ open, and the rest collapse as before (Matt, 2026-09-18; lab record, task 56).
 **A frame that ended on silence is surfaced.** `ended_by == "silence"` means the frame
 stopped because nothing had arrived for three seconds rather than because it counted
 out, which is the one per-repetition outcome worth interrupting a trainee for. A frame
-that counted out is not logged at all; the bar already said so.
+that counted out is not logged at all; the bar already said so. One that was acquired
+again because of it (`Retried`, lab record, task 82) says so on the next line.
 """
 
 from __future__ import annotations
@@ -79,6 +80,7 @@ from ..acq import (
     GateChecked,
     PhaseSent,
     ReadingBack,
+    Retried,
     RunBegun,
     StateRead,
     Warned,
@@ -337,6 +339,10 @@ class RunPanel(QWidget):
                 self.say(f"{record.text}  (ended on silence, not on a count)", warn=True)
             elif not record.acquired:
                 self.say(record.text, warn=True)
+            return
+        if isinstance(event, Retried):
+            self.say(f"{event.text}: the console lost data and the repetition is "
+                     "being acquired again", warn=True)
             return
         if isinstance(event, Warned):
             self._warned(event.message)
