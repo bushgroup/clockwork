@@ -100,6 +100,7 @@ relative to the output directory, unless it is absolute.
 | | `windowed_intensities` | `path`, `windows`, `reference`, `scans`, `frames` | Summed intensity in named m/z windows and each window's ratio to a reference |
 | | `arrival_time_distribution` | `path`, `mz`, `preset`, `frames`, `points` | Intensity against scan in one m/z window, with the peak in scans and in ms |
 | | `ion_events` | `path`, `frames` | Ion arrivals push by push in a file of single pushes: events per push, the fraction of pushes holding any, event heights in stored units and millivolts, widths, and how many reached the card's top code |
+| | `manifest` | `paths` (optional), `out` | One row per run under the paths, or the output directory: its file, stem, day, sample, knobs and marks, series place, outcome, pusher period against the declared one, verdict and note count. Written as CSV to `out`, or answered as `columns` and `rows` |
 | Routine | `list_routines` | none | Every routine: what it asks, whether it may run unattended, what it acquires or reads, its criteria in words, and whether the standing limits allow its template |
 | | `run_routine` | `name`, `initials`, `conditions` | The routine run through `arm` and `acquire` and judged: `pass`, `fail` or `could not judge` with the reason, each criterion's numbers, the report as text, and the run record it was added to |
 
@@ -190,6 +191,33 @@ template's hash and knob values, each acquisition, each file with a summary of i
 the notes added with `note`. The server writes it and nothing edits it by hand;
 [the standing limits](instrument-limits.md#the-run-record) describe it in full. `list_files` names
 each run's record.
+
+## The manifest
+
+`manifest` reads every run under the directories it is given and answers one row for each. Nothing
+is written for it at acquisition time. Every value comes from the file itself or from the run
+record beside it, so a manifest of last month's directories is as complete as one of today's. A
+run's row is read from its summed file where one exists and from its raw file otherwise, and only
+the parameters and the first frame's pusher period are read, never the data. The fixed columns
+come first, in this order:
+
+| Column | What it holds |
+|---|---|
+| `file`, `kind` | The file read, and whether it is `raw`, `summed` or `foreign` (a UIMF file clockwork did not write) |
+| `day`, `stem`, `initials` | From the file name, `YYMMDD_<initials>_<number>`; otherwise the day comes from `DateStarted` |
+| `template_hash`, `method_hash`, `method` | The template a run was rendered from and the method acquired, as SHA-256, and the method's name |
+| `sample`, `conditions` | A rendered run's `sample` label, and the operator's conditions note with its lines joined by `; ` |
+| `outcome`, `reason`, `repetitions_planned`, `repetitions_acquired` | How the run ended, as mainspring records it; `unknown` for a file written before that record existed |
+| `series_id`, `series_index`, `series_position`, `series_seed` | The run's place in its series or request |
+| `declared_us`, `declared_by`, `measured_us`, `ratio` | The pusher period the method assumed (`template`, the template's tick, or `instrument`, the instrument document's), the one the digitizer measured, and measured over declared |
+| `verdict`, `notes`, `record` | The newest verdict on the run, the number of notes in its request's record, and that record's file name |
+| `problem` | Why the row is short: a file that would not open, or a path that is not there |
+
+Then there is one column per knob, per mark and per label found across the whole set, in the order
+they are first met. A knob keeps its template's name (`duration_ms`), a mark becomes `<mark>_ms`
+and `<mark>_scan`, and a label other than `sample` becomes `label_<name>`. A file without one of
+these columns has an empty cell there, so a method written by hand has empty knob columns rather
+than zeros, and a run with no record has no note count rather than a count of zero.
 
 ## The audit log
 

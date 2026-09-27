@@ -9,7 +9,9 @@ the boxes hold is the daemon's to remember, not a verb's (lab record, task 73).
 from __future__ import annotations
 
 import argparse
+import csv
 import inspect
+import io
 import json
 import os
 import socket
@@ -183,6 +185,10 @@ def test_flags_parse_as_the_tool_wants_them(capsys):
         "path": "f", "windows": {"p": [530, 532]}, "scans": [10, 20]}
     assert parsed("arrival-time-distribution", "--path", "f", "--mz", "[500, 510]") == {
         "path": "f", "mz": [500, 510]}
+    assert parsed("manifest", "260926", "260927") == {"paths": ["260926", "260927"]}
+    assert parsed("manifest", "--out", "m.csv") == {"out": "m.csv"}
+    assert parsed("run-routine", "beam-check", "--initials", "zz") == {
+        "name": "beam-check", "initials": "zz"}
     assert parsed("arm", "--request", "r", "--initials", "zz", "--no-setup",
                   "--template", "t") == {"request": "r", "initials": "zz", "setup": False,
                                          "template": "t"}
@@ -263,6 +269,14 @@ def test_a_request_from_the_shell_one_verb_per_process(shell, library, tmp_path)
     assert set(windowed["windows"]) >= {"low", "high"}
     assert "peak" in shell.json("arrival-time-distribution", "--path", summed,
                                 "--mz", "[100,1500]")
+    code, out, err = shell("manifest")
+    assert code == 0 and "1 runs, 0 with a problem" in err
+    [row] = list(csv.DictReader(io.StringIO(out)))
+    assert (row["stem"], row["kind"], row["b_ticks"], row["notes"]) == (
+        armed["stem"], "summed", "400", "1")
+    assert row["series_id"] == armed["request_id"] and row["sample"] == LABELS["sample"]
+    written = shell.json("manifest", "--out", "manifest.csv")
+    assert written["files"] == 1 and os.path.isfile(written["out"])
     events = shell.json("ion-events", "--path", run["raw"]["name"])
     assert events["file"] == "raw" and events["events_per_push"] == 3 * 15 / 16
     assert shell.json("stop")["stopping"] is False

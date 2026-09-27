@@ -56,6 +56,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .. import envelope, summary
+from .. import manifest as manifest_module
 from .. import method as method_module
 from .. import routine as routine_module
 from ..acq import BatchSeen, Event, Run, Snapshot, cautions, refusals
@@ -866,6 +867,34 @@ class Toolbox:
         total counts per push. A summed file of several pushes a row is refused.
         """
         return summary.ion_events(self._in_output(path), frames=frames)
+
+    @tool("data", read_only=False)
+    def manifest(self, paths: list[str] | None = None, out: str = "") -> dict:
+        """One row per run under some directories: what each file says it was, as a table.
+
+        `paths` are directories, walked recursively, or UIMF files, in the output
+        directory or absolute; the output directory itself if none. Each run is one row,
+        its summed file where one exists and its raw file otherwise: file, kind, day,
+        stem, initials, template and method hash, method name, sample, conditions, outcome with
+        planned and acquired repetitions, series id, index, position and seed, the
+        pusher period declared and measured and their ratio, the verdict and note count
+        off the run record, the record's name, and `problem` for a file that would not
+        open, which is a row and never dropped. Then one column per knob, mark
+        (`<mark>_ms`, `<mark>_scan`) and label found across the set, empty where a
+        file lacks it: a hand-written run has empty knob columns, not zeros. With `out`,
+        a `.csv` path, the table is written there and the answer is its path and
+        counts; without it the answer carries `columns` and `rows`.
+        """
+        where = [self._in_output(path) for path in paths] if paths else [self.output]
+        if out and not out.lower().endswith(".csv"):
+            raise ToolFailure(f"{out!r} is not a .csv path; the manifest is written as CSV")
+        found = manifest_module.manifest(where)
+        if not out:
+            return {"paths": where, **found}
+        written = manifest_module.write_csv(self._in_output(out), found["columns"],
+                                            found["rows"])
+        return {"paths": where, "out": written, "columns": found["columns"],
+                "files": found["files"], "problems": found["problems"]}
 
     # -- routines ----------------------------------------------------------------
 

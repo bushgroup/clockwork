@@ -435,6 +435,7 @@ arm = ["SMOD,TBL"]
                     break
             seen["done"] = answer
             seen["files"] = await call("list_files")
+            seen["manifest"] = await call("manifest")
             return seen
 
     with tempfile.TemporaryDirectory() as scratch:
@@ -475,6 +476,17 @@ arm = ["SMOD,TBL"]
                        .get("ClockworkSeriesId") if runs else None)
             check_true("the file stamps the request's id as its series",
                        stamped == seen["started"]["request_id"])
+            # Task 89: the manifest's row is the summed file's, its knob a column of its
+            # own, its series the request, and its record found by that id.
+            rows = seen["manifest"]["rows"]
+            row = rows[0] if len(rows) == 1 else {}
+            check_true(
+                "manifest answers one row for the run, off its summed file, with the knob "
+                f"as a column and the request as its series ({len(rows)} rows)",
+                row.get("kind") == "summed" and row.get("b_ticks") == 400.0
+                and row.get("series_id") == seen["started"]["request_id"]
+                and row.get("record") is not None and row.get("problem") is None
+                and seen["manifest"]["columns"][:4] == ["file", "kind", "day", "stem"])
             with open(os.path.join(output, "mcp-calls.log"), encoding="utf-8") as handle:
                 lines = [json.loads(line) for line in handle]
             check_true(

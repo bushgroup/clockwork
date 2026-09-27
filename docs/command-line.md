@@ -118,6 +118,21 @@ holding exactly the method they render. The same words in `--request` continue t
 within one daemon session, so both commands above serve one request and its files share one
 series; `--request-id` continues a request from an earlier session.
 
+## A table of every run
+
+```
+clockwork manifest D:\data\260926 D:\data\260927 > runs.csv
+clockwork manifest --out runs.csv
+```
+
+`manifest` takes any number of directories or UIMF files, bare after the verb or as `--paths`,
+and walks each directory for `.uimf` files. A run is one row, read from its summed file when there
+is one and from its raw file otherwise. With no paths it reads the output directory. It is the one
+verb whose standard output is not JSON: without `--out` it prints the table as CSV, and a count of
+runs and problems goes to standard error. With `--out`, a `.csv` path, it writes the table there and
+answers its path as JSON. A file that will not open is still a row, with the reason in its
+`problem` column. The columns are listed in [the MCP server's document](mcp-server.md#the-manifest).
+
 ## Running a routine
 
 ```
@@ -197,6 +212,7 @@ Each verb is its tool, described in full by `clockwork <verb> --help` and in the
 - `windowed-intensities`: summed intensity in named m/z windows, and ratios to a reference.
 - `arrival-time-distribution`: intensity against scan in one m/z window, with its peak.
 - `ion-events`: ion arrivals push by push in a file of single pushes: how many, how tall, how wide.
+- `manifest`: one row per run under some directories, as CSV: day, stem, sample, knobs and marks, series place, outcome, pusher period, verdict and notes.
 
 **Routines**
 

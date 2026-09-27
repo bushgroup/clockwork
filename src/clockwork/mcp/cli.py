@@ -16,7 +16,9 @@ invocations would meet two different simulated racks. A rehearsal is `clockwork 
 tested.
 
 **Standard output is JSON and nothing else**: the tool's answer, indented, or under
-`progress --follow` one compact line per event and a last line with the answer. What a
+`progress --follow` one compact line per event and a last line with the answer. The one
+exception is `manifest` without `--out`, whose answer is a table and which prints it as
+CSV, so that `clockwork manifest D:\data > runs.csv` is the whole of making one. What a
 person watching needs -- the events of an `acquire` that waits for its run -- goes to
 standard error, as does the one sentence of a refusal. Exit status 0 is an answer, 1 a
 refusal or a job that failed, 2 a usage error (argparse's own), and 130 a follow cut
@@ -66,8 +68,9 @@ ALIASES = {"run-routine": ("routine",)}
 """Shorter names a verb also answers to: `clockwork routine beam-check` for
 `clockwork run-routine --name beam-check`, the one verb a trainee types by hand."""
 
-POSITIONAL = {"run-routine": "name"}
-"""A verb's argument that may also be given bare, after the verb."""
+POSITIONAL = {"run-routine": "name", "manifest": "paths"}
+"""A verb's argument that may also be given bare, after the verb: any number of them
+where the argument is a list (`clockwork manifest 260926 260927`)."""
 
 RECORD_WAIT_S = 60.0
 """How long a finished `acquire` waits for its run record's last file entry: the
@@ -155,7 +158,12 @@ def add_verbs(commands: argparse._SubParsersAction) -> None:
         for flag in verb.flags:
             _add(parser, flag, positional=POSITIONAL.get(verb.name) == flag.parameter)
         if verb.name in POSITIONAL:
-            parser.add_argument("bare", nargs="?", metavar=POSITIONAL[verb.name].upper(),
+            chosen = next(flag for flag in verb.flags
+                          if flag.parameter == POSITIONAL[verb.name])
+            listed = chosen.kind in ("texts", "integers")
+            parser.add_argument("bare", nargs="*" if listed else "?",
+                                type=int if chosen.kind == "integers" else str,
+                                metavar=POSITIONAL[verb.name].upper(),
                                 help=f"the {POSITIONAL[verb.name]}, as --"
                                      f"{verb_name(POSITIONAL[verb.name])} gives it")
         if verb.tool.name == "progress":
@@ -324,6 +332,8 @@ def _arguments(verb: Verb, args: argparse.Namespace,
     tool's own defaults, and repeated `KEY=VALUE`s become one mapping."""
     found: dict[str, object] = {}
     bare = getattr(args, "bare", None)
+    if bare == []:
+        bare = None  # a list positional given nothing: the flag, or the tool's default
     if bare is not None:
         chosen = next(flag for flag in verb.flags if flag.parameter == POSITIONAL[verb.name])
         if hasattr(args, chosen.dest) and getattr(args, chosen.dest) != bare:
@@ -398,6 +408,13 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
         except ToolFailure as exc:
             _say(err, f"{program}: {exc}")
             return 1
+        if verb.tool.name == "manifest" and "rows" in answer:
+            from ..manifest import to_csv
+
+            _write(out, to_csv(answer["columns"], answer["rows"]))
+            _say(err, f"{program}: {answer['files']} runs, {answer['problems']} with a "
+                      "problem")
+            return 0
         _print(out, answer, indent=2)
         if verb.tool.name == "acquire" and not args.no_wait:
             return _wait(toolbox, int(answer["job"]), err, program)
@@ -462,6 +479,18 @@ def _print(stream: TextIO, value: object, indent: int | None = None) -> None:
     text = json.dumps(value, indent=indent, default=str,
                       separators=None if indent else (",", ":"))
     stream.write(text + "\n")
+    stream.flush()
+
+
+def _write(stream: TextIO, text: str) -> None:
+    """Text as it stands where the stream can encode it, escaped where it cannot, as
+    `_say` guards a line: a CSV redirected on Windows goes out in the ANSI code page."""
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    try:
+        text.encode(encoding)
+    except (LookupError, UnicodeEncodeError):
+        text = text.encode("ascii", "backslashreplace").decode("ascii")
+    stream.write(text)
     stream.flush()
 
 
