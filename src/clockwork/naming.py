@@ -42,9 +42,12 @@ import os
 import re
 from collections.abc import Iterable
 
+from .record import RECORD_SUFFIX
+
 __all__ = [
     "COUNTER_DIGITS",
     "clean_initials",
+    "files_of",
     "next_number",
     "next_stem",
     "parse_stem",
@@ -60,6 +63,9 @@ sorts oddly, and `Recording.create` refuses a collision rather than overwriting.
 """
 
 _STEM = re.compile(r"(?P<date>\d{6})_(?P<initials>[^_]+)_(?P<number>\d+)\Z")
+
+_DATED = re.compile(r"-\d{4}-\d{2}-\d{2}\Z")
+"""The `-YYYY-MM-DD` a transcript's name carries after its stem (`transcript.default_name`)."""
 
 _INITIALS_OK = re.compile(r"[^A-Za-z0-9]+")
 
@@ -80,20 +86,51 @@ def parse_stem(name: str) -> tuple[str, str, int] | None:
     """`(date, initials, number)` for a name in this shape, or None.
 
     The name may carry any extension or any of the suffixes a run leaves beside its
-    file -- `.uimf`, `.summed.uimf`, `.sent.txt` -- and all of them are stripped, so
-    that a directory holding one acquisition's four files reports one number and not
-    four.
+    file -- `.uimf`, `.summed.uimf`, `.sent.txt`, and the transcript's
+    `-<date>.transcript.log` -- and all of them are stripped, so that a directory
+    holding one acquisition's four files reports one number and not four.
+
+    The transcript's date is stripped too, because a run that fails before its file
+    exists leaves only the transcript, and a number counted only through `.uimf` was
+    offered again after such a run (lab #3).
     """
+    found = _STEM.match(_base(name))
+    if found is None:
+        return None
+    return found["date"], found["initials"], int(found["number"])
+
+
+def _base(name: str) -> str:
+    """The stem a file name belongs to: every extension off, then a transcript's date."""
     base = os.path.basename(name)
     while True:
         root, extension = os.path.splitext(base)
         if not extension or root == base:
             break
         base = root
-    found = _STEM.match(base)
-    if found is None:
-        return None
-    return found["date"], found["initials"], int(found["number"])
+    return _DATED.sub("", base)
+
+
+def files_of(directory: str | os.PathLike[str], stem: str) -> list[str]:
+    """The names in `directory` that belong to `stem`, sorted; empty if none do.
+
+    Any file at all under a stem uses its number up -- the transcript and the send log
+    as much as the UIMF file -- because two attempts that share a stem in any file
+    cannot be told apart afterwards (lab #3). Matched on the whole stem, so
+    `260926_MB_0140.uimf` does not take `260926_MB_014`. A directory that cannot be
+    listed holds nothing, as `next_number` reads it.
+
+    The one file left out is a request's record (`<stem>.request.json`,
+    `clockwork.record`). It is named for the file a request expects to make first and
+    is written before that request's send, so it is not an attempt of its own: counting
+    it would refuse every arming the MCP tools make.
+    """
+    try:
+        names = os.listdir(os.fspath(directory))
+    except OSError:
+        return []
+    return sorted(name for name in names
+                  if _base(name) == stem and not name.endswith(RECORD_SUFFIX))
 
 
 def next_number(

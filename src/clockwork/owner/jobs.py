@@ -232,6 +232,9 @@ class Armed:
     stem: str = ""
     """Where the send's log went, which is the stem the send meant the next file for."""
     setup: bool = True
+    used: bool = False
+    """Set once a run has begun under `stem`: the arming still holds, but the name it was
+    made under belongs to that run, and nothing else may be written under it (lab #3)."""
 
 
 def wire_fingerprint(method: Method, *, setup: bool = True) -> tuple:

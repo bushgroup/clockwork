@@ -175,6 +175,15 @@ use in the output directory, so two people acquiring into the same folder never 
 editable before Acquire starts, and the **Next** button beside it re-reads the directory on
 demand, which matters if a file landed there from somewhere else since the window opened.
 
+A number is used up by any file written under it, the send log and the transcript as much as
+the UIMF file, so a run that failed before its UIMF file existed still moves the counter on.
+The field moves to the next free name whenever a send or an acquisition fails. A name that
+is already taken is refused before any string goes to a box, and the refusal names the next
+free one: typing a name by hand and leaving a stale one in the field get the same answer,
+with no file overwritten and nothing sent. The name Send setup has just prepared is the one
+exception, since the acquisition that follows it continues that send's log under the same
+name.
+
 **Replicates** is a count of technical replicates, run unattended after the first acquisition,
 each the same acquisition again into a file of its own. A
 **Conditions** note, typed once, is stamped into every file a run writes and into its send log's
@@ -227,6 +236,19 @@ alongside two more files a run always writes when the output directory is set:
 - **`<stem>-<date>.transcript.log`**, the wire transcript: every byte to and from every box and the
   acquisition console, the chunk structure a table was sent in, every ZeroMQ frame. Nothing is
   redacted or dropped from it, because nothing on either wire is secret.
+
+Both UIMF files say how their run ended, in the global parameter `MainspringRunOutcome`:
+`completed` when every repetition the method planned was acquired, `stopped` when you
+pressed Stop, and `failed` when the run ended on an error or reached its end with
+repetitions it did not acquire. A failed file carries the error in `MainspringRunReason`,
+and every file carries `MainspringRepetitionsPlanned` and `MainspringRepetitionsAcquired`
+beside the outcome, so a stopped run's twelve of fifty repetitions are stated rather than
+inferred. A file reads `incomplete` from the moment it is created until its run closes it,
+so a file left by a crash or a power cut says exactly that. The summed file carries the same
+four values as the raw one, which is what keeps them readable where `keep_raw = false` has
+removed the raw file. mainspring shows the outcome in its Info panel, and
+`uimf-info <folder> --list --outcome completed,stopped` lists only the files whose runs
+ended one of those ways; a file written before clockwork recorded outcomes reads `unknown`.
 
 **Open the log**, beside the acquire buttons, opens both at once. When something goes wrong, the
 send log is where to start: it is what a trainee reads, and it already carries the boxes' own

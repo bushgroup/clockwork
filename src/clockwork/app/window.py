@@ -1488,6 +1488,11 @@ class MainWindow(QMainWindow):
         self.run_panel.say(f"{job.label} failed: {message}", warn=True)
         self.run_panel.idle(f"{job.label}: failed")
         self.statusBar().showMessage(f"{job.label}: failed")
+        # A failed Send or Acquire has used its number up, whatever it managed to write,
+        # and the next one must not offer it again (lab #3). Before the queue moves on,
+        # so its next row sends under the new name.
+        if isinstance(job, (Send, Acquire)):
+            self._refresh_stem()
         if job is self._queue_job:
             self._row_finished(FAILED, message)
         self._refresh_actions()

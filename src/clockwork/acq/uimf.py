@@ -43,6 +43,13 @@ plausible one:
                 recording.end_frame()
             recording.fold(method_frame)
 
+**Each file says how its run ended.** Both files are created with mainspring's run
+outcome at `incomplete` and the repetitions the method plans beside it, and
+`Recording.set_outcome` replaces it with `completed`, `stopped` or `failed` before either
+file closes; the companion carries the same outcome and counts as the raw file, so a
+filter still works where `keep_raw = false` has removed the raw one. A crash or a power
+cut leaves `incomplete`, which is what nothing having said means (lab #3).
+
 Nothing here talks to a box or to the console. Which strings go to which box and in what
 order is `clockwork.method` and the caller's; this module is handed a method and produces
 the files that method implies.
@@ -64,6 +71,7 @@ from mainspring.interface import (
     write_live_pointer,
 )
 from mainspring.uimf import (
+    OUTCOME_FAILED,
     SUMMED_SUFFIX,
     FrameSpec,
     GlobalSpec,
@@ -96,6 +104,7 @@ __all__ = [
     "Geometry",
     "Recording",
     "Series",
+    "failure_reason",
     "fold_scans",
     "provenance_globals",
     "raw_path",
@@ -529,6 +538,12 @@ class Recording:
         # it took, for `begin_again`. None once a frame is begun.
         self._ended: tuple[int, int, int, bool, float] | None = None
         self._frames: dict[int, list[int]] = {}
+        # Every `(method_frame, repetition)` whose frame ended complete, once however
+        # many times it was acquired (lab record, task 82): the run's acquired count.
+        self._complete: set[tuple[int, int]] = set()
+        self._outcome: tuple[str, str] | None = None
+        self._companion_finished = False
+        """Set once the companion has its outcome, or has closed without one."""
         self._elapsed: dict[int, float] = {}
         self._began: dict[int, float] = {}
         self._closed = False
@@ -618,6 +633,10 @@ class Recording:
         The summed companion is not created here. It is created by the first `fold`, so
         that a run which never gets that far does not leave an empty second file.
 
+        The file is created saying its run is `incomplete`, with the repetitions the
+        method plans (`repetitions_planned`), and says so until `set_outcome` replaces
+        it: a recording closed without one never said how its run ended.
+
         **`publish` says this is a run and not merely a file.** It writes the raw file's
         path into mainspring's run pointer, which a viewer already open with `Live`
         ticked reads every couple of seconds, so that watching an acquisition costs
@@ -644,6 +663,8 @@ class Recording:
             prescan_tof_pulses=method.acquisition.scans,
             prescan_accumulations=method.acquisition.accumulations,
             detector_bits=detector_bits,
+            records_outcome=True,
+            repetitions_planned=_planned(method),
             extra=stamp_globals(method, instrument=instrument, adc_name=adc_name,
                                 console_version=console_version,
                                 box_state=box_state, conditions=conditions,
@@ -889,6 +910,8 @@ class Recording:
             duration_s=None if duration_s is None else float(duration_s),
             complete=complete,
         )
+        if complete:
+            self._complete.add((method_frame, repetition))
         self._ended = (frame, method_frame, repetition, complete, elapsed)
         return frame
 
@@ -1002,11 +1025,51 @@ class Recording:
                 prescan_tof_pulses=self.acquisition.scans,
                 prescan_accumulations=self.acquisition.accumulations,
                 detector_bits=self._raw_globals.detector_bits,
+                records_outcome=True,
+                repetitions_planned=self._raw_globals.repetitions_planned,
                 extra=dict(self._raw_globals.extra),
             )
             self._summed = UimfWriter(self.summed_path, globals_,
                                       overwrite=self._overwrite)
         return self._summed
+
+    # --- how the run ended ----------------------------------------------------------------
+
+    @property
+    def repetitions_planned(self) -> int:
+        """Every repetition the method asks for, over all its method frames."""
+        return _planned(self.method)
+
+    @property
+    def repetitions_acquired(self) -> int:
+        """The repetitions whose frame ended complete, each counted once.
+
+        A repetition acquired again in place (`begin_again`) is still one repetition,
+        and one left short and set aside is none. In `single_frame` mode one complete
+        console frame is every repetition of its method frame.
+        """
+        if self.acquisition.repetition_mode == "single_frame":
+            return len({frame for frame, _ in self._complete}) * self.acquisition.accumulations
+        return len(self._complete)
+
+    @property
+    def outcome(self) -> tuple[str, str] | None:
+        """`(outcome, reason)` as `set_outcome` last recorded it, or None."""
+        return self._outcome
+
+    def set_outcome(self, outcome: str, reason: str = "") -> None:
+        """Say how the run ended, in the raw file now and in the companion at its close.
+
+        One of mainspring's `RUN_OUTCOMES`; `reason` for a `failed` run only. The raw
+        file's writer is on this thread and is written at once; the companion's may
+        belong to the folding thread (`close_companion`), so it is written there, which
+        is why a caller that folds off-thread says how the run ended before it closes
+        the companion. The acquired count goes with it, from `repetitions_acquired`.
+        """
+        self._require_open()
+        self._outcome = (outcome, reason)
+        self._raw.set_outcome(outcome, reason=reason,
+                              repetitions_acquired=self.repetitions_acquired)
 
     # --- closing -------------------------------------------------------------------------
 
@@ -1019,9 +1082,22 @@ class Recording:
         thread touch it -- including to close it. So a caller that folds off-thread
         calls this on the thread that did the folding, and then closes the recording
         from wherever it likes (lab record, task 23).
+
+        The outcome `set_outcome` recorded goes into the companion here, just before it
+        closes, with the same count as the raw file's.
         """
         if self._summed is not None:
+            self._finish_companion()
             self._summed.close()
+            self._companion_finished = True
+
+    def _finish_companion(self) -> None:
+        if self._outcome is None or self._summed is None or self._companion_finished:
+            return
+        outcome, reason = self._outcome
+        self._summed.set_outcome(outcome, reason=reason,
+                                 repetitions_acquired=self.repetitions_acquired)
+        self._companion_finished = True
 
     def close(self) -> None:
         """Close both files, and honour `keep_raw`. Idempotent.
@@ -1049,6 +1125,10 @@ class Recording:
         self._closed = True
         self._raw.close()
         if self._summed is not None:
+            with contextlib.suppress(sqlite3.ProgrammingError):
+                # Written by `close_companion` when a fold ran off-thread, where this
+                # thread may not touch the connection; here otherwise.
+                self._finish_companion()
             self._summed.close()
         self._withdraw_pointer()
         if not self.keep_raw and self._folded:
@@ -1100,7 +1180,13 @@ class Recording:
     def __enter__(self) -> Recording:
         return self
 
-    def __exit__(self, *exc: object) -> None:
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        # A recording left by an exception with nothing said about its run failed, and
+        # says why; one left cleanly with nothing said stays `incomplete`, since only
+        # its caller knows whether that was all of it.
+        if exc is not None and self._outcome is None and not self._closed:
+            with contextlib.suppress(Exception):
+                self.set_outcome(OUTCOME_FAILED, failure_reason(exc))
         self.close()
 
     def __repr__(self) -> str:
@@ -1110,6 +1196,22 @@ class Recording:
     def _require_open(self) -> None:
         if self._closed:
             raise ValueError(f"{self._raw.path}: recording is closed")
+
+
+def _planned(method: Method) -> int:
+    """The repetitions a method asks for: `accumulations` of each of its `frames`."""
+    return method.acquisition.frames * method.acquisition.accumulations
+
+
+def failure_reason(exc: object) -> str:
+    """A failed run's `MainspringRunReason`: the exception's type and its message.
+
+    The type is kept even where the run panel leaves it off, because a reader filtering
+    a folder of files has no panel beside it and `BoxLost` says more than its sentence.
+    """
+    text = str(exc).strip()
+    name = type(exc).__name__
+    return f"{name}: {text}" if text else name
 
 
 def stamp_globals(

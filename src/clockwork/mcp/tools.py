@@ -577,7 +577,10 @@ class Toolbox:
                 "method or template and knob values")
         states = snapshot.after or snapshot.before
         conditions = snapshot.conditions
-        armed_stem = armed.stem if _same_directory(armed.directory, self.output) else ""
+        # Not a stem a run has already begun under, even one that failed before its file
+        # existed: the owner would refuse it (lab #3).
+        armed_stem = (armed.stem if _same_directory(armed.directory, self.output)
+                      and not armed.used else "")
         refused, cautioned = envelope.judge(
             envelope.cold_start(loaded, states, declared=True),
             self._cold_start_mode(rendered))

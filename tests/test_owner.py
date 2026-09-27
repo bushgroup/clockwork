@@ -431,6 +431,76 @@ def test_a_failed_run_is_kept_with_its_method_and_error_log_and_a_finished_one_i
         assert owner.join(30)
 
 
+# --- a stem already taken (lab #3) ------------------------------------------------
+
+
+def _sends(owner: LocalOwner, handle: Handle) -> int:
+    return sum(type(entry.event).__name__ == "PhaseSent" for entry in owner.events(handle))
+
+
+def test_a_stem_a_failed_run_used_is_refused_before_anything_is_sent(
+        tmp_path, monkeypatch):
+    """Lab #3, with the collision moved to the front: a run that failed after its
+    transcript was open and before its file existed used its number up, and the next
+    Acquire under that stem is refused before any string goes to a box, offering the
+    next free one. The one that follows, under the offered stem, goes ahead."""
+    from clockwork.owner import local
+    from test_daemon import make_instrument, make_method
+
+    owner = _acquiring_owner(tmp_path)
+    try:
+        method = make_method()
+        job = {"method": method, "instrument": make_instrument(),
+               "directory": str(tmp_path)}
+        real = local.run_acquisition
+
+        def fails(*args, **kwargs):
+            raise RuntimeError("the console went away")
+
+        monkeypatch.setattr(local, "run_acquisition", fails)
+        failed = ended(owner, owner.submit(Acquire(stem="260926_MB_014", **job)))
+        assert isinstance(failed, JobFailed), failed
+        assert not (tmp_path / "260926_MB_014.uimf").exists()
+        monkeypatch.setattr(local, "run_acquisition", real)
+
+        handle = owner.submit(Acquire(stem="260926_MB_014", initials="MB", **job))
+        refused = ended(owner, handle)
+        assert isinstance(refused, JobFailed), refused
+        assert "260926_MB_014 is already taken" in refused.message
+        assert "_MB_015" in refused.message
+        assert _sends(owner, handle) == 0
+    finally:
+        owner.shutdown()
+        assert owner.join(30)
+
+
+def test_a_send_under_a_finished_runs_stem_is_refused_and_its_log_is_untouched(tmp_path):
+    from test_daemon import make_instrument, make_method
+
+    owner = _acquiring_owner(tmp_path)
+    try:
+        method = make_method()
+        stem = "260926_MB_014"
+        assert isinstance(ended(owner, owner.submit(
+            Send(method=method, directory=str(tmp_path), stem=stem))), JobFinished)
+        assert owner.status().armed.stem == stem
+        finished = ended(owner, owner.submit(Acquire(
+            method=method, instrument=make_instrument(), directory=str(tmp_path),
+            stem=stem)), timeout=120)
+        assert isinstance(finished, JobFinished), finished
+        # The arming still holds; the name it was made under has been used.
+        assert owner.status().armed.stem == stem and owner.status().armed.used
+        log = tmp_path / f"{stem}.sent.txt"
+        before = log.read_bytes()
+        handle = owner.submit(Send(method=method, directory=str(tmp_path), stem=stem))
+        refused = ended(owner, handle)
+        assert isinstance(refused, JobFailed) and "already taken" in refused.message
+        assert _sends(owner, handle) == 0 and log.read_bytes() == before
+    finally:
+        owner.shutdown()
+        assert owner.join(30)
+
+
 def test_a_run_carries_the_console_errors_logged_during_it_and_its_retry(tmp_path):
     """Lab #2's row, on the stand-in: a repetition that loses its first batches is
     acquired again, the transcript says so, and the run counts the `[error]` lines the

@@ -10,6 +10,7 @@ from __future__ import annotations
 from ..naming import (
     COUNTER_DIGITS,
     clean_initials,
+    files_of,
     next_number,
     next_stem,
     parse_stem,
@@ -19,6 +20,7 @@ from ..naming import (
 __all__ = [
     "COUNTER_DIGITS",
     "clean_initials",
+    "files_of",
     "next_number",
     "next_stem",
     "parse_stem",

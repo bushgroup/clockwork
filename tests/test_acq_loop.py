@@ -2210,3 +2210,141 @@ def test_a_recording_handed_in_is_not_published_by_the_run(rig, tmp_path):
     assert run.complete
     assert during and all(seen is None for seen in during)
     assert recording.live_pointer is None
+
+
+# --- how the run ended, in both files (lab #3) ---------------------------------------
+
+
+def ended(path: str) -> tuple[str, str, int | None, int | None]:
+    found = UimfFile(path).global_params()
+    return (found.run_outcome, found.run_reason, found.repetitions_acquired,
+            found.repetitions_planned)
+
+
+def test_a_run_that_acquires_everything_says_completed_in_both_files(rig):
+    method = make_method(frames=2)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = rig.acquire(method, boxes)
+    assert run.complete
+    planned = 2 * ACCUMULATIONS
+    assert ended(run.raw_path) == ("completed", "", planned, planned)
+    assert ended(run.summed_path) == ("completed", "", planned, planned)
+
+
+def test_a_repetition_acquired_again_is_counted_once(batched):
+    batched.fake.short_frames = [0, 2]
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = batched.acquire(method, boxes)
+    assert run.complete and len(run.retried) == 1
+    assert ended(run.raw_path)[:3] == ("completed", "", ACCUMULATIONS)
+
+
+def test_a_run_the_operator_stopped_says_stopped_with_what_it_had(rig):
+    method = make_method(accumulations=3)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes, progress=None)
+    run = rig.acquire(method, boxes, stop=lambda: "the operator pressed Stop")
+    assert run.stopped_early
+    acquired = len(run.frames)
+    assert acquired < 3
+    assert ended(run.raw_path) == ("stopped", "", acquired, 3)
+    assert ended(run.summed_path) == ("stopped", "", acquired, 3)
+
+
+def test_a_lost_box_fails_the_file_with_its_type_and_sentence(rig):
+    """The end of `_014` on lab #3: the frames acquired are folded and the file is kept,
+    and both files now say the run failed and why."""
+    method = make_method()
+    pulled = UnpluggedBox()
+    boxes = {BOX: Box(transport=pulled, name=BOX)}
+    send_phases(method, boxes)
+    begun: list[RunBegun] = []
+
+    def pull_after_the_first(event: acq.Event) -> None:
+        if isinstance(event, RunBegun):
+            begun.append(event)
+        if isinstance(event, FrameEnded) and event.record.repetition == 1:
+            pulled.pulled = True
+
+    with pytest.raises(BoxLost):
+        rig.acquire(method, boxes, progress=pull_after_the_first)
+    # Lost part way through its only method frame, so there was nothing to fold and
+    # the raw file is the whole record; a companion, where there is one, says the same.
+    paths = [path for path in (begun[0].raw_path, begun[0].summed_path)
+             if os.path.exists(path)]
+    assert paths[0] == begun[0].raw_path
+    for path in paths:
+        outcome, reason, acquired, planned = ended(path)
+        assert (outcome, acquired, planned) == ("failed", 1, ACCUMULATIONS)
+        assert reason.startswith(f"BoxLost: {BOX} stopped answering on its port")
+
+
+def test_a_repetition_short_twice_fails_the_run_with_the_loops_own_sentence(batched):
+    batched.fake.short_frames = [0, 2, 2]
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = batched.acquire(method, boxes)
+    for path in (run.raw_path, run.summed_path):
+        outcome, reason, acquired, planned = ended(path)
+        assert (outcome, acquired, planned) == ("failed", 1, ACCUMULATIONS)
+        assert reason == run.stopped_early
+
+
+def test_a_run_that_reaches_its_end_short_of_repetitions_has_failed(rig):
+    """Every frame's own console error is that frame's outcome and the run carries on;
+    a file that ends with none of them acquired did not complete."""
+    method = make_method(accumulations=2)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    rig.fake.frame_error = "Invalid value (1000) for parameter nbrElementsToFetch"
+    run = rig.acquire(method, boxes)
+    outcome, reason, acquired, planned = ended(run.raw_path)
+    assert (outcome, acquired, planned) == ("failed", 0, 2)
+    assert reason.startswith("2 of 2 repetitions were not acquired; the last: "
+                             "ConsoleAcquisitionError:")
+
+
+def test_the_companion_says_how_the_run_ended_where_the_raw_file_is_gone(rig):
+    method = make_method(keep_raw=False)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = rig.acquire(method, boxes, stop=lambda: "enough")
+    assert not os.path.exists(run.raw_path)
+    assert ended(run.summed_path)[0] == "stopped"
+
+
+def test_a_failure_before_the_first_frame_still_fails_the_file(rig, monkeypatch):
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("the loop could not be built")
+
+    monkeypatch.setattr(loop_module, "_Loop", broken)
+    with pytest.raises(RuntimeError):
+        rig.acquire(method, boxes)
+    raw = os.path.join(rig.directory, method.acquisition.file_stem + ".uimf")
+    assert ended(raw)[:2] == ("failed", "RuntimeError: the loop could not be built")
+
+
+def test_a_recording_never_closed_reads_incomplete(rig, tmp_path):
+    """A crash or a power cut: nothing said how the run ended, and the file says so."""
+    method = make_method()
+    geometry = acq.Geometry.from_tof_width(
+        rig.fake.tof_width(), sample_rate_hz=rig.console.sample_rate_hz,
+        post_trigger_samples=rig.fake.post_trigger_samples,
+    )
+    recording = acq.Recording.create(tmp_path, method, geometry)
+    try:
+        recording.begin_frame(1, 1)
+        recording.end_frame()
+        assert ended(recording.raw_path) == ("incomplete", "", 0, ACCUMULATIONS)
+    finally:
+        recording.close()
+    assert ended(recording.raw_path)[0] == "incomplete"
+

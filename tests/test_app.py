@@ -41,6 +41,7 @@ from PySide6.QtWidgets import QDialog  # noqa: E402
 
 from clockwork import instrument as instrument_module  # noqa: E402
 from clockwork import method as method_module  # noqa: E402
+from clockwork import transcript  # noqa: E402
 from clockwork.acq import (  # noqa: E402
     BatchSeen,
     Folding,
@@ -267,6 +268,28 @@ def test_initials_are_cleaned_so_a_stem_can_always_be_parsed_back():
     assert naming.clean_initials("m_b 2!") == "MB2"
     assert naming.parse_stem(naming.stem("m_b 2!", 7, dt.date(2026, 9, 17))) == (
         "260917", "MB2", 7)
+
+
+def test_a_stem_with_only_a_transcript_is_counted(tmp_path):
+    """Lab #3: a run that fails before its file exists leaves only its transcript, and
+    the number it used must not be offered again."""
+    (tmp_path / "260926_MB_014-2026-09-26.transcript.log").write_text("", encoding="utf-8")
+    assert naming.parse_stem("260926_MB_014-2026-09-26.transcript.log") == (
+        "260926", "MB", 14)
+    assert naming.next_stem(tmp_path, "MB", dt.date(2026, 9, 26)) == "260926_MB_015"
+
+
+def test_a_stem_is_taken_by_any_file_it_names_and_not_by_its_neighbours(tmp_path):
+    (tmp_path / "260926_MB_0140.uimf").write_text("", encoding="utf-8")
+    (tmp_path / "260926_MB_01.sent.txt").write_text("", encoding="utf-8")
+    # A request's record names the file it expects, before any attempt is made.
+    (tmp_path / "260926_MB_014.request.json").write_text("{}", encoding="utf-8")
+    assert naming.files_of(tmp_path, "260926_MB_014") == []
+    for name in ("260926_MB_014.sent.txt", "260926_MB_014-2026-09-26.transcript.log"):
+        (tmp_path / name).write_text("", encoding="utf-8")
+    assert naming.files_of(tmp_path, "260926_MB_014") == [
+        "260926_MB_014-2026-09-26.transcript.log", "260926_MB_014.sent.txt"]
+    assert naming.files_of(tmp_path / "nope", "260926_MB_014") == []
 
 
 def test_a_name_in_another_shape_is_not_a_stem():
@@ -1449,6 +1472,19 @@ def test_the_setup_send_and_the_acquisition_share_one_send_log(window, tmp_path,
     whole = log.read_text(encoding="utf-8")
     assert whole.startswith(after_setup[:200])
     assert "TBLSTRT" in whole
+
+
+def test_a_failed_job_moves_the_name_on_past_the_files_it_left(window, tmp_path):
+    """Lab #3: a run that failed kept the stem it failed under in the name field, and
+    the next Acquire collided with it. Every Send and Acquire that ends, however it
+    ends, reads the next name off the directory again."""
+    from clockwork.owner import Acquire
+
+    stem = window.stem.text()
+    (tmp_path / transcript.default_name(stem)).write_text("", encoding="utf-8")
+    window._job_failed(Acquire(label="acquiring"), "CORMORANT stopped answering")
+    assert window.stem.text() != stem
+    assert naming.parse_stem(window.stem.text())[2] == naming.parse_stem(stem)[2] + 1
 
 
 def test_a_second_send_continues_the_send_log_instead_of_emptying_it(

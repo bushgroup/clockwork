@@ -87,7 +87,7 @@ from ..mips import (
     discover,
     read_state,
 )
-from ..naming import next_stem
+from ..naming import files_of, next_stem, parse_stem
 from .interface import (
     BoxStateRead,
     ConsoleChanged,
@@ -671,6 +671,7 @@ class LocalOwner:
                               job.instrument_path, job.conditions)
         started = time.perf_counter()
         directory, stem = job.directory or os.getcwd(), job.stem
+        self._refuse_taken(directory, stem)
         append = self._send_log == (directory, stem)
         # Before the work and not after it, so a send that raises part way through does
         # not leave the next one free to overwrite what it managed to write.
@@ -729,6 +730,8 @@ class LocalOwner:
         rendered = _rendered(job)
         command_endpoint, data_endpoint = self._endpoints()
         directory = job.directory or os.getcwd()
+        if job.stem:
+            self._refuse_taken(directory, job.stem, initials=job.initials)
         os.makedirs(directory, exist_ok=True)
         self._stop.clear()
 
@@ -853,6 +856,11 @@ class LocalOwner:
         # again after the header, which forgets a box it finds unplugged.
         self._require_boxes(method)
         boxes = {entry.name: self.boxes[entry.name] for entry in method.boxes}
+        self._refuse_taken(directory, stem, initials=job.initials)
+        # The arming still holds, and the name it was made under is this run's now:
+        # nothing else may be written under it (lab #3).
+        if self._armed is not None and self._armed.stem == stem:
+            self._armed = replace(self._armed, used=True)
         # Counted across the run off the console's own stdout, which the loop never
         # sees: a row's outcome says how many errors the console logged (lab #2).
         errors_before = self._console_errors()
@@ -918,6 +926,37 @@ class LocalOwner:
                               self.kept_root, problem)
             self._say(f"the failed run's files could not be kept in {self.kept_root}: "
                       f"{problem}")
+
+    def _refuse_taken(self, directory: str, stem: str, *, initials: str = "") -> None:
+        """Refuse a stem any file already uses, before a string goes to a box.
+
+        Lab #3: the window kept a failed run's stem, and the next Acquire loaded the
+        rack, armed the gate and acquired a frame before `Recording.create` found the
+        file and refused it, which cost the sample. `Recording.create`'s refusal stays
+        as the last guard; this is the first, here in the owner rather than the window
+        so that the queue and the MCP tools meet it too.
+
+        The one stem that may be written under twice is the one the last finished send
+        armed and no run has used yet (`Armed.stem`, `Armed.used`): Send setup writes the transcript
+        and the send log that the acquisition under the same stem continues. A stem
+        typed by hand is judged the same way as a stale one, and never bumped silently.
+        """
+        if not stem:
+            return
+        armed = self._armed
+        if (armed is not None and armed.stem == stem and not armed.used
+                and os.path.normcase(os.path.abspath(armed.directory or os.getcwd()))
+                == os.path.normcase(os.path.abspath(directory))):
+            return
+        found = files_of(directory, stem)
+        if not found:
+            return
+        parsed = parse_stem(stem)
+        who = initials or (parsed[1] if parsed is not None else "")
+        offer = (f"; the next free name is {next_stem(directory, who)}" if who
+                 else "; choose another name")
+        raise AcqError(f"{stem} is already taken in {directory} ({found[0]}), so nothing "
+                       f"was sent{offer}")
 
     def _console_errors(self) -> int:
         """`[error]` lines the console process has logged so far; 0 without one."""

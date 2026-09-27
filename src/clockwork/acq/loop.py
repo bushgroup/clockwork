@@ -81,6 +81,7 @@ rather than stopping anything.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import logging
 import math
@@ -89,6 +90,8 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
+
+from mainspring.uimf import OUTCOME_COMPLETED, OUTCOME_FAILED, OUTCOME_STOPPED
 
 from ..instrument import UNCALIBRATED, Instrument
 from ..method import (
@@ -131,7 +134,7 @@ from ..transcript import sent as _sent
 from .console import Console
 from .session import EMPTY_SETTLE_S, run_frame, start_chain
 from .stream import DataStream, StreamTimeout
-from .uimf import Geometry, Provenance, Recording
+from .uimf import Geometry, Provenance, Recording, failure_reason
 from .wire import (
     SECONDS_PER_SAMPLE_2GSPS,
     AcqError,
@@ -2156,6 +2159,13 @@ def run_acquisition(
                            else _frame_timeout(method, recording.geometry)),
         )
         run = loop.run(replicate=replicate)
+    except BaseException as exc:
+        # A run that failed before its loop could say so -- or whose loop raised before
+        # it got there -- still says so in its file, rather than reading `incomplete`.
+        if recording is not None and recording.outcome is None:
+            with contextlib.suppress(Exception):
+                recording.set_outcome(OUTCOME_FAILED, failure_reason(exc))
+        raise
     finally:
         # A recording is finished when the run that fills it is, whoever made it, and
         # closing it is what honours `keep_raw` and withdraws the run pointer. The
@@ -2393,6 +2403,8 @@ class _Loop:
     retried: list[FrameRecord] = field(default_factory=list)
     folds: list[FoldRecord] = field(default_factory=list)
     stopped_early: str | None = None
+    _asked: bool = False
+    """Whether `stopped_early` is the caller's `stop` rather than the loop's own."""
     _consecutive_failures: int = 0
     _consecutive_unwitnessed: int = 0
     _witnessed_at: float | None = None
@@ -2421,6 +2433,7 @@ class _Loop:
         folder = ThreadPoolExecutor(max_workers=1, thread_name_prefix="clockwork-fold")
         self._folder = folder
         self._pending = []
+        failure: BaseException | None = None
         try:
             for method_frame in range(1, acquisition.frames + 1):
                 for repetition in range(1, acquisition.console_frames + 1):
@@ -2448,18 +2461,28 @@ class _Loop:
                 self._pending = self._collect(self._pending, wait=False)
                 if self.stopped_early is not None:
                     break
+        except BaseException as exc:
+            failure = exc
+            raise
         finally:
-            # A run that ended with a fold still held -- the last method frame's, or a
-            # run that stopped early -- submits it here, where there is no start list
-            # left to disturb.
-            self._submit_deferred_fold()
-            self._collect(self._pending, wait=True)
-            # The companion's SQLite connection belongs to the thread that made it,
-            # which is this worker, so it is closed from here and not by whoever closes
-            # the recording afterwards.
-            folder.submit(self.recording.close_companion).result()
-            folder.shutdown(wait=True)
-            self._folder = None
+            try:
+                # A run that ended with a fold still held -- the last method frame's,
+                # or a run that stopped early -- submits it here, where there is no
+                # start list left to disturb.
+                self._submit_deferred_fold()
+                self._collect(self._pending, wait=True)
+            except BaseException as exc:
+                failure = failure or exc
+                raise
+            finally:
+                # Before the companion closes, since its outcome is written as it does.
+                self._say_how_it_ended(failure)
+                # The companion's SQLite connection belongs to the thread that made it,
+                # which is this worker, so it is closed from here and not by whoever
+                # closes the recording afterwards.
+                folder.submit(self.recording.close_companion).result()
+                folder.shutdown(wait=True)
+                self._folder = None
 
         return Run(
             method=self.method,
@@ -2473,6 +2496,49 @@ class _Loop:
             replicate=replicate,
             stopped_early=self.stopped_early,
         )
+
+    def outcome(self, failure: BaseException | None) -> tuple[str, str]:
+        """How this run ended, as mainspring's `RUN_OUTCOME` and its reason.
+
+        Every way a run ends is one of three (lab #3):
+
+        - **failed**, with the exception's type and message, for anything raised out of
+          the run: a box lost (`BoxLost`), a console that refused a command, a fold that
+          failed. Also for the loop's own reasons to end a run early -- a repetition
+          short twice (lab record, task 82), frames failing `abort_after` times in a
+          row, a gate never seen to come down -- whose sentence is the reason; and for
+          a run that went through to its end with a repetition it did not acquire,
+          which leaves a file with less in it than its method asked for.
+        - **stopped**, with no reason, where the caller's `stop` asked for it.
+        - **completed** otherwise: every repetition planned was acquired.
+
+        `incomplete` is never chosen here. It is what a file says when this was never
+        reached.
+        """
+        if failure is not None:
+            return OUTCOME_FAILED, failure_reason(failure)
+        if self.stopped_early is not None:
+            if self._asked:
+                return OUTCOME_STOPPED, ""
+            return OUTCOME_FAILED, self.stopped_early
+        planned = self.recording.repetitions_planned
+        acquired = self.recording.repetitions_acquired
+        if acquired < planned:
+            failed = [record for record in self.frames if not record.acquired]
+            last = (f"; the last: {failed[-1].outcome}: {failed[-1].detail}"
+                    if failed else "")
+            return OUTCOME_FAILED, (f"{planned - acquired} of {planned} repetitions were "
+                                    f"not acquired{last}")
+        return OUTCOME_COMPLETED, ""
+
+    def _say_how_it_ended(self, failure: BaseException | None) -> None:
+        """Write the outcome into the files, warning rather than raising if it will not go:
+        the files were written correctly, and a lost outcome reads `incomplete`."""
+        outcome, reason = self.outcome(failure)
+        try:
+            self.recording.set_outcome(outcome, reason)
+        except Exception as exc:  # noqa: BLE001 -- the run's own end comes first
+            self.report(Warned(f"the file could not be told the run {outcome}: {exc}"))
 
     def _asked_to_stop(self) -> None:
         """Ask the caller's `stop` whether this repetition was the last one.
@@ -2492,6 +2558,7 @@ class _Loop:
             return
         if reason:
             self.stopped_early = reason
+            self._asked = True
             self.report(Warned(f"stopping after this repetition: {reason}"))
 
     def _submit_deferred_fold(self) -> None:
