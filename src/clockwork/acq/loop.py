@@ -410,7 +410,7 @@ produces a hundred in a row, none of which is distinguishable from a good frame 
 file it writes. So the first miss is a `Warned` and the second ends the run.
 """
 
-FOLD_MB_PER_S = 22.0
+FOLD_MB_PER_S = 35.0
 """Roughly how fast a fold reads the raw file, for the estimate `Folding` carries.
 
 Measured on the file that matters: 2026-09-17's beam-on detection-response run, 1,310.5
@@ -419,8 +419,11 @@ task 56), nearly all of it mainspring's pure-Python encoder inside `write_scans`
 mainspring 1.7.0 that encoder is compiled, and `Recording.fold` on a copy of the same
 file, on MASSTRO with the numba cache `tools/warm_numba_cache.py` seeds, took 58.7 s and
 53.8 s (22.3 and 24.4 MB/s) and wrote a companion identical in every row to the one of
-2026-09-17 (2026-09-23). The slower of the two is the constant, because an estimate that
-runs short is the worse error for someone deciding whether to wait. The mechanical
+2026-09-17 (2026-09-23). mainspring 1.9.0 compiles `sum_frames` and the companion takes
+an 8 KiB page, and the same measurement, fold and checkpoint, took 37.3 s and 33.1 s
+(35.1 and 39.6 MB/s), again identical in every row (2026-09-26). The slower of the two
+is the constant, because an estimate that runs short is the worse error for someone
+deciding whether to wait. The mechanical
 control of the same shape -- the same hundred repetitions of the same twenty thousand
 scans, with no ion beam -- folded 1.1 MB in 3.4 s, so a rate read off *it* would be
 0.3 MB/s and a rate read off the frame count would be neither. What a fold costs is the
