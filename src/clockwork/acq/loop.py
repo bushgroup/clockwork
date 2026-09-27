@@ -763,7 +763,7 @@ class FrameEnded(Event):
 
 @dataclass(frozen=True, slots=True)
 class Retried(Event):
-    """A repetition came up short and is being acquired again, in place.
+    """A repetition came up short or replayed, and is being acquired again, in place.
 
     `record` is the attempt that is thrown away: its rows are deleted and the same frame
     number is asked for again, so this line in the transcript is the only record of it
@@ -776,8 +776,10 @@ class Retried(Event):
     @property
     def text(self) -> str:
         record = self.record
+        replayed = ", the previous frame's triggers read again" if record.replayed else ""
         return (f"frame {record.method_frame}.{record.repetition}: "
-                f"{record.scans_published} of {self.frame_length} scans, acquired again")
+                f"{record.scans_published} of {self.frame_length} scans{replayed}, "
+                "acquired again")
 
 
 @dataclass(frozen=True, slots=True)
@@ -886,8 +888,19 @@ class FrameRecord:
     frame ends, so it is a little under `seconds` on a frame that has it.
     """
 
+    replayed: bool = False
+    """Whether this frame's trigger timestamps start at or behind the previous frame's end.
+
+    The card's clock runs on within a chain, across frames and runs alike, so a frame
+    whose first published timestamp is not past the latest the chain's stream has carried
+    (`DataStream.last_stamp`) is the previous frame's markers stream read a second time, its scans filled with samples that belong to neither frame
+    (`docs/console-protocol.md`, "Trigger timestamps run on across frames"; lab record,
+    task 83). Such a frame is lost whatever it counts, so it is `damaged` even when every
+    scan arrived.
+    """
+
     retry: bool = False
-    """Whether this is a repetition's second attempt, the first having come up `short`.
+    """Whether this is a repetition's second attempt, the first having been `damaged`.
 
     The first attempt is not in `Run.frames`, whose records are one per repetition; it
     is in `Run.retried`, and its rows are gone from the file (lab record, task 82).
@@ -916,6 +929,17 @@ class FrameRecord:
         return self.acquired and self.ended_by == "silence"
 
     @property
+    def damaged(self) -> bool:
+        """Acquired, but not a repetition to keep: `short`, or `replayed`.
+
+        What the retry, the completion marker and the fold key on (lab record, tasks 82
+        and 83). Every replayed frame seen so far also came up short, but a replay that
+        corrupted no trigger would count out, and would otherwise be folded as a second
+        copy of the repetition before it.
+        """
+        return self.short or (self.acquired and self.replayed)
+
+    @property
     def writer_lag_rows(self) -> int | None:
         """Rows the console's writer had not yet inserted when it said `finished`.
 
@@ -934,6 +958,8 @@ class FrameRecord:
         lag = self.writer_lag_rows
         rows = f", {lag} rows written after it" if lag else ""
         fell_back = ", ended on the silence" if self.ended_by == "silence" else ""
+        if self.replayed:
+            fell_back += ", the previous frame's triggers read again"
         if self.retry:
             fell_back += ", its second attempt"
         if not self.acquired:
@@ -2374,6 +2400,23 @@ def _reporter(progress: Callable[[Event], None] | None) -> Callable[[Event], Non
     return reported
 
 
+def _replayed(seen: Sequence[Batch], mark: int | None) -> bool:
+    """Whether a frame's triggers are an earlier frame's, read again.
+
+    `mark` is `DataStream.last_stamp` from before the frame's first batch. The card's
+    clock runs on within a chain, across frames and runs alike, so a frame whose first
+    published timestamp is not past it is the previous frame's markers stream read a
+    second time (`docs/console-protocol.md`, "Trigger timestamps run on across frames").
+    The first published batch is enough: a replayed frame's triggers start inside the
+    previous frame's, whichever of its batches the console managed to publish (lab
+    record, task 83). The stream's mark only ever moves forward, so the frame after a
+    replay is compared with the real end of the card's clock rather than the replayed
+    copy of it. No mark, at the start of a chain with no opening batch, is no verdict.
+    """
+    stamps = next((batch.time_stamps for batch in seen if batch.time_stamps.size), None)
+    return mark is not None and stamps is not None and int(stamps[0]) <= mark
+
+
 @dataclass
 class _Loop:
     """The state one run carries. Not public: `run_acquisition` is the surface."""
@@ -2445,7 +2488,7 @@ class _Loop:
                     if self.stopped_early is not None:
                         break
                 if any(record.method_frame == method_frame and record.acquired
-                       and not record.short for record in self.frames):
+                       and not record.damaged for record in self.frames):
                     # A method frame none of whose repetitions acquired is not folded.
                     # The fold would succeed, write an empty frame to the companion, and
                     # so let `keep_raw = false` delete the raw file on the strength of a
@@ -2597,33 +2640,39 @@ class _Loop:
     # -- one console frame --------------------------------------------------------------
 
     def _one_frame(self, method_frame: int, repetition: int) -> None:
-        """One repetition, acquired again once if it comes up short.
+        """One repetition, acquired again once if it comes up damaged.
 
-        **A short repetition is acquired again, in place, once** (Matt, 2026-09-26; lab
-        record, task 82). Short is `FrameRecord.short`: the console said `finished` and
-        the stream ended on the silence below the frame's count, which is what a
-        console that loses a frame's first batches does, and a raw frame like that holds
-        rows it should not. The attempt is ended provisional, its rows are deleted and
-        the same frame number is asked for again, start list and all
-        (`Recording.begin_again`), so the raw file holds one frame per repetition and
-        `Retried` in the transcript is the only trace of the first. **A second short end
-        stops the run**: that frame stays in the raw file, provisional, and is set aside
-        from the fold, which sums only whole repetitions.
+        **A damaged repetition is acquired again, in place, once** (Matt, 2026-09-26; lab
+        record, tasks 82 and 83). Damaged is `FrameRecord.damaged`: `short`, the console
+        having said `finished` with the stream ending on the silence below the frame's
+        count, which is what a console that loses a frame's first batches does; or
+        `replayed`, the frame's triggers being the previous frame's read again, which is
+        why it loses them. A raw frame like that holds rows it should not. The attempt is
+        ended provisional, its rows are deleted and the same frame number is asked for
+        again, start list and all (`Recording.begin_again`), so the raw file holds one
+        frame per repetition and `Retried` in the transcript is the only trace of the
+        first. **A second damaged end stops the run**: that frame stays in the raw file,
+        provisional, and is set aside from the fold, which sums only whole repetitions.
         """
         record = self._attempt(method_frame, repetition, retry=False)
-        if record.short:
+        if record.damaged:
             self.retried.append(record)
             self.report(Retried(record, self.method.acquisition.frame_length))
             record = self._attempt(method_frame, repetition, retry=True)
-            if record.short:
+            if record.damaged:
                 self.recording.set_aside(record.frame_number)
                 if self.stopped_early is None:
+                    if record.replayed:
+                        how = ("was damaged twice (the previous frame's triggers read "
+                               "again the second time)")
+                    else:
+                        how = (f"came up short twice ({record.scans_published} of "
+                               f"{self.method.acquisition.frame_length} scans the second "
+                               "time)")
                     self.stopped_early = (
-                        f"frame {method_frame}.{repetition} came up short twice "
-                        f"({record.scans_published} of "
-                        f"{self.method.acquisition.frame_length} scans the second "
-                        "time), so the console is losing data; the repetitions before "
-                        "it are folded and that one is left out"
+                        f"frame {method_frame}.{repetition} {how}, so the console is "
+                        "losing data; the repetitions before it are folded and that one "
+                        "is left out"
                     )
                     self.report(Warned(f"stopping: {self.stopped_early}"))
                 return
@@ -2647,6 +2696,10 @@ class _Loop:
         self.report(FrameBegun(method_frame, repetition, request.frame_number,
                                acquisition.console_frames))
         seen: list[Batch] = []
+        # What this frame's first trigger has to lie past: the stream's mark before any of
+        # its batches, which covers the chain's own opening batches and every earlier
+        # frame and run on the chain, thrown-away attempts included.
+        mark = self.stream.last_stamp
         began = self.clock()
         # Cleared here and not when the record is built, so that the window a witness is
         # accepted in runs from this frame's `acquire frame` to its end. A completion
@@ -2654,6 +2707,7 @@ class _Loop:
         # repetition and would otherwise be counted twice.
         self._witnessed_at = None
         outcome, detail, ended_by = "", "", ""
+        replayed = False
         timings: dict[str, float] = {}
         """What `release` measured, which only it can: it runs inside `run_frame`."""
 
@@ -2709,13 +2763,14 @@ class _Loop:
             )
             wait_seconds = self.clock() - wait_began
             rows_after = self.recording.rows_in(request.frame_number)
+            replayed = _replayed(seen, mark)
         finally:
             # The completion marker last, after the console has stopped writing to this
             # frame: it is the only thing in the file that tells a frame that finished
             # from one that was cut off, and a frame that failed must not carry it. Nor
-            # does a short one, which is acquired again or set aside.
+            # does a damaged one, which is acquired again or set aside.
             self.recording.end_frame(
-                complete=outcome == "acquired" and ended_by != "silence")
+                complete=outcome == "acquired" and ended_by != "silence" and not replayed)
 
         # Last look at the boxes before the record is sealed: the wait drains on
         # `frame_poll` and ends on the poll after its last one, so a completion line that
@@ -2737,14 +2792,15 @@ class _Loop:
             seconds=self.clock() - began,
             wait_seconds=wait_seconds,
             ended_by=ended_by,
+            replayed=replayed,
             settle_seconds=settle_seconds,
             start_list_seconds=timings.get("start_list", 0.0),
             table_completed_s=(None if self._witnessed_at is None
                                else self._witnessed_at - began),
             retry=retry,
         )
-        if not (record.short and not retry):
-            # A first attempt that came up short is about to be acquired again, and
+        if not (record.damaged and not retry):
+            # A first attempt that came up damaged is about to be acquired again, and
             # goes in `retried` instead: `frames` is one record per repetition.
             self.frames.append(record)
         self.report(FrameEnded(record))

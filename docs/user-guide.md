@@ -158,6 +158,13 @@ shows the short frame and then a line such as `frame 1.97: 8500 of 10000 scans, 
 and the raw file ends the run with exactly one frame per repetition. The wire transcript is the
 only record of the attempt that was discarded.
 
+The same treatment applies to a repetition whose trigger timestamps start inside the previous
+repetition's. The digitizer's clock runs on from one frame to the next, so a frame that starts
+behind it is the previous frame's triggers read a second time, and its spectra are not this
+repetition's. Every such frame seen so far also came up short, but one that counted out would
+otherwise have been summed as a second copy of the repetition before it. Its line in the run log
+ends `the previous frame's triggers read again`.
+
 A repetition that comes up short a second time stops the run, as **Stop** does. The repetitions
 before it are summed into the companion and that one is left out of the sum; it stays in the raw
 file, marked unfinished, and a queue moves on to its next row.

@@ -20,8 +20,9 @@ can observe about ordering is right and nothing about timing is. The two
 numbers task 03 exists to measure, the gap between one frame's end and the next
 frame's first record and whether trigger timestamps continue across a frame
 boundary, are therefore the two things this cannot tell anyone. It continues
-its timestamp counter across frames because it has to do something, not
-because a real card does.
+its timestamp counter across frames, which a real card turned out to do as well
+(`docs/console-protocol.md`, "Trigger timestamps run on across frames"), and
+`replayed_frames` is the one way it breaks that.
 
 It also binds its data socket at startup, where the console binds at its first
 `acquire` and unbinds at `stop acquire`. A client that subscribes early works
@@ -293,6 +294,14 @@ class FakeConsole:
         `short_frame_errors` lines to `logged_errors`, as the console's stdout does.
         """
 
+        self.replayed_frames: list[bool] = []
+        """Faults for the frames to come, one taken off the front per frame: whether that
+        frame's trigger timestamps start again from the previous frame's first, as a
+        console reading the previous acquisition's markers stream a second time does
+        (lab record, task 83). The frame after one carries on from the real end of the
+        counter. Combine with `short_frames` for the shape the instrument has shown; on
+        its own it is the replay that counts out."""
+
         self.short_frame_errors = 3
         self.logged_errors = 0
         """`[error]` lines this stand-in would have printed. It has no stdout, so
@@ -317,8 +326,9 @@ class FakeConsole:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._gave_up: set[str] = set()
-        self._deferred: list[tuple[float, FrameRequest, int, int]] = []
-        """Batches owed to a frame that has already ended: when, whose, from where, how many.
+        self._deferred: list[tuple[float, FrameRequest, int, Batch]] = []
+        """Batches owed to a frame that has already ended: when, whose, from where, and the
+        batch itself, built when it was owed so that its timestamps are its own frame's.
 
         Published by the serve thread between commands rather than from a thread of
         their own, because one ZeroMQ socket belongs to one thread. That is also how the
@@ -327,6 +337,9 @@ class FakeConsole:
         """
 
         self._timestamp = 0
+        self._frame_began_at = 0
+        """Where the last frame's published timestamps started from, for `replayed_frames`:
+        a replay repeats what the frame before it published, replayed or not."""
         self.command_endpoint = ""
         self.data_endpoint = ""
 
@@ -395,10 +408,10 @@ class FakeConsole:
     def _flush_deferred(self) -> None:
         """Publish whatever a frame that has already ended still owes and is due."""
         while self._deferred and self._deferred[0][0] <= time.monotonic():
-            _, request, first_scan, scans = self._deferred.pop(0)
+            _, request, first_scan, batch = self._deferred.pop(0)
             if request.file_name:
-                self._write_scans(request, first_scan, scans)
-            self._publish(TOPIC_DATA, encode_batch(self._batch(scans)))
+                self._write_scans(request, first_scan, batch.scans)
+            self._publish(TOPIC_DATA, encode_batch(batch))
 
     def _note_subscription(self, message: bytes) -> None:
         if not message:
@@ -623,6 +636,11 @@ class FakeConsole:
         lost = self.short_frames.pop(0) if self.short_frames else 0
         if lost:
             self.logged_errors += self.short_frame_errors
+        replay = self.replayed_frames.pop(0) if self.replayed_frames else False
+        clock_ran_to = self._timestamp
+        if replay:
+            self._timestamp = self._frame_began_at
+        self._frame_began_at = self._timestamp
         for index, scans in enumerate(sizes):
             if index < lost:
                 # Written and never published: `short_frames`.
@@ -635,7 +653,7 @@ class FakeConsole:
                 # completes the frame's count.
                 due = time.monotonic() + (self.final_batch_delay_s
                                           if index == len(sizes) - 1 else 0.0)
-                self._deferred.append((due, request, first_scan, scans))
+                self._deferred.append((due, request, first_scan, self._batch(scans)))
             else:
                 if self.final_batch_delay_s > 0 and index == len(sizes) - 1:
                     time.sleep(self.final_batch_delay_s)
@@ -648,6 +666,9 @@ class FakeConsole:
                     write_error = self._write_scans(request, first_scan, scans)
                 self._publish(TOPIC_DATA, encode_batch(self._batch(scans)))
             first_scan += scans
+        if replay:
+            # The card's clock ran on under the replay; only the markers read were old.
+            self._timestamp = clock_ran_to + (self._timestamp - self._frame_began_at)
         # The frame's scans are all in, so its thread ends and says so; the
         # handle stays unjoined until a `stop` arrives. An acquisition that
         # failed says the same thing, after saying what went wrong, which is

@@ -838,6 +838,119 @@ def test_a_repetition_short_twice_stops_the_run_and_is_left_out_of_the_fold(batc
     assert_companion_sums_the_raw_file(run)
 
 
+def test_a_replayed_repetition_that_counts_out_is_acquired_again(batched):
+    """The replay with nothing else wrong: every scan arrives, the frame counts out, and
+    its triggers are the previous frame's read again. Without the timestamp check it
+    would be folded as a second copy of repetition 1; with it, it is acquired again like
+    a short one, and the repetition after it is compared with the card's real clock
+    rather than the replayed copy, so it is not flagged too (lab record, task 83)."""
+    batched.fake.replayed_frames = [False, True]
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    events = []
+    run = batched.acquire(method, boxes, progress=events.append)
+
+    assert run.complete, run.text
+    assert [(record.repetition, record.retry, record.replayed) for record in run.frames] \
+        == [(1, False, False), (2, True, False), (3, False, False)]
+    (replayed,) = run.retried
+    assert (replayed.repetition, replayed.ended_by, replayed.replayed) == (2, "counted", True)
+    assert replayed.scans_published == SCANS
+    assert replayed.damaged and not replayed.short
+    assert "the previous frame's triggers read again" in replayed.text
+
+    retried = [event for event in events if isinstance(event, Retried)]
+    assert [event.text for event in retried] == [
+        f"frame 1.2: {SCANS} of {SCANS} scans, the previous frame's triggers read "
+        "again, acquired again"]
+
+    raw = UimfFile(run.raw_path)
+    assert raw.frame_numbers() == [1, 2, 3]
+    assert not any(raw.is_provisional(number) for number in (1, 2, 3))
+    assert_companion_sums_the_raw_file(run)
+
+
+def test_a_replayed_short_repetition_is_one_retry_not_two(batched):
+    """The shape the instrument has shown, a replay that also lost its first batches, is
+    one damaged frame and one retry (lab record, task 83)."""
+    batched.fake.replayed_frames = [False, True]
+    batched.fake.short_frames = [0, 2]
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = batched.acquire(method, boxes)
+
+    assert run.complete, run.text
+    (first,) = run.retried
+    assert first.short and first.replayed
+    assert [record.retry for record in run.frames] == [False, True, False]
+    assert not any(record.replayed for record in run.frames)
+    assert_companion_sums_the_raw_file(run)
+
+
+def test_a_repetition_replayed_twice_stops_the_run_and_is_left_out_of_the_fold(batched):
+    batched.fake.replayed_frames = [False, True, True]
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = batched.acquire(method, boxes)
+
+    assert not run.complete
+    assert "frame 1.2 was damaged twice" in run.stopped_early
+    assert [(record.repetition, record.retry, record.replayed) for record in run.frames] \
+        == [(1, False, False), (2, True, True)]
+    (fold,) = run.folds
+    assert fold.frames_folded == (1,)
+    raw = UimfFile(run.raw_path)
+    assert raw.is_provisional(2) and not raw.is_provisional(1)
+    assert_companion_sums_the_raw_file(run)
+
+
+def test_a_replay_in_a_runs_first_frame_is_caught_against_the_run_before_on_its_chain(
+    batched,
+):
+    """The mark lives with the chain, not the run: runs that share one carry it, so a
+    replicate whose very first repetition re-reads the previous run's last frame is
+    caught (lab record, task 83)."""
+    width = acq.start_chain(batched.console, batched.stream, timeout=5.0, settle=2.0,
+                            quiet=0.1)
+    try:
+        method = make_method()
+        boxes = make_boxes(BOX)
+        send_phases(method, boxes)
+        first = batched.acquire(method, boxes, width=width)
+        assert first.complete and not first.retried
+        batched.fake.replayed_frames = [True]
+        second = batched.acquire(method, boxes, width=width, replicate=True,
+                                 stem="replicate")
+    finally:
+        batched.console.stop_acquire()
+
+    assert second.complete, second.text
+    (replayed,) = second.retried
+    assert (replayed.repetition, replayed.replayed) == (1, True)
+    assert not any(record.replayed for record in second.frames)
+
+
+def test_a_new_chain_clears_the_mark_so_a_clock_that_starts_again_is_not_a_replay(
+    batched,
+):
+    """The card's clock has been seen to start again at a new chain and nowhere else,
+    so a mark left by an earlier chain must not judge this one's frames. A mark far past
+    anything the stand-in will stamp stands in for the earlier chain's clock."""
+    batched.stream.last_stamp = 2**62
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = batched.acquire(method, boxes)
+
+    assert run.complete, run.text
+    assert not run.retried
+    assert not any(record.replayed for record in run.frames)
+    assert batched.stream.last_stamp is not None and batched.stream.last_stamp < 2**62
+
+
 def test_a_last_batch_later_than_the_silence_is_the_gap_the_fallback_is_set_against(
     batched,
 ):
@@ -870,7 +983,7 @@ def assert_companion_sums_the_raw_file(run, method_frame=1):
     raw, summed = UimfFile(run.raw_path), UimfFile(run.summed_path)
     numbers = [record.frame_number for record in run.frames
                if record.method_frame == method_frame and record.acquired
-               and not record.short]
+               and not record.damaged]
     folded = [raw.read_frame(number) for number in numbers]
     total = summed.read_frame(method_frame)
     assert len(total) > 0

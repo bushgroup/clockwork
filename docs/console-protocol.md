@@ -195,6 +195,24 @@ most of its batches in time. Two consequences: a client drawing a live trace is 
 a frame that has already ended, and a client deciding that a frame produced nothing has to keep
 listening for several seconds before it may say so.
 
+**Trigger timestamps run on across frames, and a frame whose first one does not is the previous
+frame read a second time.** Neither `stop frame` nor `acquire frame` resets the card's clock, so
+within one chain each frame's first timestamp lies past the previous frame's last. On the
+instrument, consecutive repetitions start 15 000 to 16 000 pushes apart. The same holds across
+runs that share a chain (107 of 107) and from the batches of a chain's own open-ended
+acquisition into its first frame (578 of 578). A new chain is the one place the clock has been
+seen to start again, at 19 of 582 chain starts, back to a few seconds' worth of samples. Rarely (4 frames in
+54 440 on the instrument, from 1.0.0 onwards) a frame's triggers carry the previous frame's
+timestamps instead: the markers stream of the acquisition before is read again from its start,
+while the samples stream is new. Every scan of such a frame has the gate structure of a scan of
+the previous frame, a few scan numbers later, filled with samples that belong to neither. Each
+one seen so far also corrupted one trigger at each of the frame's first few markers fetches, whose
+gates carry run lengths hundreds of millions of bins long. The data subscriber refuses those
+batches (`index oob error` in the console's log, the batch never published) and the file writer
+stores them as rows at impossible m/z. Nothing is published on `status`. The cause lies below the
+console and is not yet known. A client can recognise such a frame from its first published batch
+alone, and should treat it as lost however many scans it counts (lab record, task 83).
+
 **`finished` says a frame ended and not that it succeeded.** The acquisition loop catches an
 error, logs it, stops, and publishes the same `finished` it would have published on success, so
 a frame that failed on its first fetch is indistinguishable on the wire from a frame that

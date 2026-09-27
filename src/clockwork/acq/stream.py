@@ -126,6 +126,14 @@ class DataStream:
         """Just the ones that reported a failure, for a caller that wants the
         session's history rather than the frame that raised."""
 
+        self.last_stamp: int | None = None
+        """The latest trigger timestamp any batch on this stream has carried since the
+        chain was opened, or None before the first. `start_chain` clears it, because a
+        new chain is the one place the card's clock has been seen to start again; within
+        a chain it only ever runs on, across frames and across runs, so a frame whose
+        first timestamp is not past it is the previous frame read again
+        (`docs/console-protocol.md`, "Trigger timestamps run on across frames")."""
+
         self._pushed_back: deque[Batch | Status] = deque()
         self._context = context if context is not None else zmq.Context.instance()
         socket = self._context.socket(zmq.SUB)
@@ -185,6 +193,10 @@ class DataStream:
             batch = decode_batch(frames[1], received_at=received_at)
             self.batches += 1
             self.scans += batch.scans
+            if batch.time_stamps.size:
+                latest = int(batch.time_stamps.max())
+                if self.last_stamp is None or latest > self.last_stamp:
+                    self.last_stamp = latest
             if _LOG.isEnabledFor(logging.DEBUG):
                 stamps = batch.time_stamps
                 span = (f"{int(stamps[0])}-{int(stamps[-1])}" if stamps.size else "none")

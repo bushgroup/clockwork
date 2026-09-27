@@ -2277,6 +2277,27 @@ def main() -> int:
                 )
                 fake.short_frames = []
 
+                # The same fault seen from its cause: a repetition whose triggers are
+                # the previous one's read again, which counts out and would otherwise be
+                # folded as a second copy of it (docs/console-protocol.md, "Trigger
+                # timestamps run on across frames"; lab record, task 83).
+                fake.replayed_frames = [False, True]
+                replay = acq.run_acquisition(
+                    recipe, boxes=boxes, console=console, stream=stream,
+                    directory=directory,
+                    post_trigger_samples=fake.post_trigger_samples,
+                    stem="selfcheck-loop-replay", silence=0.3, gate_dwell=dwell,
+                )
+                check_true(
+                    "a repetition whose trigger timestamps repeat the previous one's is "
+                    "acquired again, though it counted out, and the next is not flagged",
+                    replay.complete and len(replay.retried) == 1
+                    and replay.retried[0].replayed
+                    and replay.retried[0].ended_by == "counted"
+                    and not any(record.replayed for record in replay.frames),
+                )
+                fake.replayed_frames = []
+
                 # The one failure that produces a full frame of plausible data at the
                 # wrong offset, from a table that left the enable high or an enable
                 # lead off a pulled-up input (lab record, task 05). The start list is

@@ -112,6 +112,9 @@ def start_chain(
     so a generous value costs a second and a mean one costs accuracy (lab
     record, task 20).
     """
+    # The card's clock may start again under a new chain, and has only ever been seen to
+    # there, so what the stream saw before this point is no reference for what follows.
+    stream.last_stamp = None
     if ungate:
         console.disable_io_port(io_port)
     try:
