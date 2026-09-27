@@ -1,13 +1,13 @@
 """Rasterise `packaging/icon/clockwork.svg` into the multi-resolution
 `src/clockwork/app/resources/clockwork.ico` that the `.exe`, the installer and the
-placeholder window all use.
+application window all use.
 
 Run:  uv run tools/make_icon.py            # rewrite the .ico
       uv run tools/make_icon.py --check    # exit nonzero if the .ico is out of date
 
 One source drawing, unlike mainspring's two-tier scheme (`../mainspring/tools/make_icon.py`):
-this is placeholder art -- a plain clock face, task 08's successors' to replace -- with no
-fine detail that a wider gap at small sizes would protect.
+two meshing gears, 11 teeth and 7, solid-filled with teeth coarse enough to stay distinct at
+16 px, so there is no fine detail that a separate small-size drawing would protect.
 
 Qt does the rendering (QSvgRenderer, already a dependency through PySide6) and this module
 writes the ICO container itself, because Qt's ICO writer emits one frame per file and an

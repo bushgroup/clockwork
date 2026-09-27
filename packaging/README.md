@@ -126,9 +126,14 @@ wording -- carries no promise.
   report to a file the caller chooses, attached or not, and replaces the per-user log.
 - **`pyserial`'s non-Windows `list_ports` backends are excluded** (`list_ports_linux`,
   `list_ports_osx`) -- dead code on the only OS this ships for.
-- **The icon is placeholder art** (`packaging/icon/clockwork.svg`, one plain clock face, one
-  source drawing unlike mainspring's two-tier scheme): nothing borrowed from mainspring's spiral,
-  free for task 08's successors to replace outright.
+- **The icon is two meshing gears** (`packaging/icon/clockwork.svg`, one source drawing unlike
+  mainspring's two-tier scheme): an 11-tooth driver and a 7-tooth follower filled with mainspring's
+  eight-stop viridis ramp, run diagonally rather than radially so the two icons read as one family.
+  It replaced the placeholder clock face on 2026-09-18 and holds up at 16 px. Two larger drawings
+  derive from it, each written by its own tool and neither part of the build:
+  `social-preview.png` (1280x640, `tools/make_social_preview.py`), the card GitHub shows for a
+  link to the repository, uploaded by hand; and `wallpaper.svg` with `wallpaper.png` (3840x2160,
+  `tools/make_wallpaper.py`), a desktop background for the instrument PCs.
 
 ## The four new dependencies, and what building for them took
 
