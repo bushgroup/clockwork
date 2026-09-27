@@ -183,7 +183,8 @@ class Budget:
     """What one daemon session may do unattended."""
 
     max_runs: int
-    """Acquisitions accepted, each one `acquire` call however many files it makes."""
+    """Acquisitions accepted, each one `acquire` call however many files it makes, or one
+    point of a `series`."""
     max_replicates_per_run: int
     max_hours: float
     """Hours from the daemon's start after which nothing more is sent."""

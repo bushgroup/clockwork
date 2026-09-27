@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from ..acq import Snapshot
+from ..acq import Run, Snapshot
 from ..instrument import UNCALIBRATED, Instrument
 from ..method import Method
 
@@ -22,10 +22,13 @@ __all__ = [
     "ConsoleStatus",
     "Discover",
     "Job",
+    "PlannedPoint",
     "ReadState",
     "RestartConsole",
     "Send",
     "SendResult",
+    "SeriesJob",
+    "SeriesResult",
     "StartConsole",
     "matches_wire",
     "wire_fingerprint",
@@ -143,6 +146,14 @@ class Acquire(Job):
     series_index: int = 1
     """The first run's place in its series, counted from 1; each replicate is one more.
     A request acquired over several jobs passes where the last one left off."""
+    series_position: int = 0
+    """The first run's place in the order acquired, where that is not its place in the
+    plan: a point of a `SeriesJob`, whose replicates all stamp the point's
+    `series_index` and take positions from this one on. 0 for everything else, whose
+    index and position are one number."""
+    series_seed: int | None = None
+    """The seed the series was shuffled under, stamped into every run; None for an
+    order nobody shuffled."""
     template: str = ""
     """The template text `method` was rendered from, or empty for a hand-written
     method. A `Rendered` holds a `Template` and cannot cross a process boundary, so
@@ -151,6 +162,63 @@ class Acquire(Job):
     is refused before a file exists (`clockwork.acq.uimf.stamp_globals`)."""
     knobs: Mapping[str, float] = field(default_factory=dict)
     labels: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class PlannedPoint:
+    """One point of a `SeriesJob`: the method its knobs render to, and its place."""
+
+    index: int
+    """Its planned index, stamped as `ClockworkSeriesIndex` by every file it makes."""
+    method: Method | None = None
+    knobs: Mapping[str, float] = field(default_factory=dict)
+    """Every knob, as the render stamped: the owner renders the series' template again
+    at these values, as it does for an `Acquire`."""
+    replicates: int = 1
+    reference: str = ""
+    """`start` or `end` for a reference at the template's defaults, else empty."""
+
+
+@dataclass(frozen=True, slots=True)
+class SeriesJob(Job):
+    """A planned series, acquired as one job: each point armed and acquired in turn.
+
+    `points` are in the order they are to be acquired, already shuffled; the job does
+    not reorder them. A point is sent to the boxes before it is acquired unless the
+    boxes already hold it from the point before, and is sent with its `setup` phase
+    only where that phase differs from the one last sent (the first point's follows
+    `setup`). Its replicates follow one another as an `Acquire`'s do.
+
+    One job and not a client's loop of `Send` and `Acquire`, because the client may be
+    a session's MCP server, which dies with the session, and a series must not; a stop
+    ends it after the current repetition, and the points not begun are not acquired
+    (lab record, task 91).
+
+    `cold_start` is the standing limits' rule for the series' template, which judges
+    what each send read back against what its point declares, as `acquire` judges what
+    an `arm` read back; empty judges nothing, which is every job the window submits.
+    """
+
+    label: str = "acquiring a series"
+    points: tuple[PlannedPoint, ...] = ()
+    series: str = ""
+    """The id every file stamps as `ClockworkSeriesId`: the request's."""
+    seed: int | None = None
+    first_position: int = 1
+    """The first file's place in the order acquired; later than 1 for a series that
+    continues a request which already has files."""
+    setup: bool = True
+    conditions: str = ""
+    directory: str = ""
+    initials: str = ""
+    request: str = ""
+    instrument: Instrument = UNCALIBRATED
+    instrument_path: str = ""
+    method_path: str = ""
+    template: str = ""
+    """The template text every point was rendered from."""
+    labels: Mapping[str, str] = field(default_factory=dict)
+    cold_start: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +278,22 @@ class SendResult:
     cold boxes is three refused `TBLSTRT`s and a run that stopped after three frames,
     which is a true report of a mistake nobody was warned about.
     """
+
+
+@dataclass(frozen=True, slots=True)
+class SeriesResult:
+    """What a `SeriesJob` left behind: every file, and how far through the plan it got."""
+
+    runs: tuple[Run, ...] = ()
+    points: int = 0
+    """How many points the series planned."""
+    points_done: int = 0
+    """How many were acquired to their last replicate."""
+    stopped: str = ""
+    """Why a stop ended the series early, or empty for one that ran to its end."""
+    armed: tuple = ()
+    """What the series' last send put on the wire, as `SendResult.armed`, so that a
+    window reads the boxes as holding that and not whatever it last sent itself."""
 
 
 @dataclass(frozen=True, slots=True)

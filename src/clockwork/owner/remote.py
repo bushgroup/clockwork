@@ -41,7 +41,7 @@ import zmq
 from .. import __version__
 from ..acq import BatchSeen, Snapshot
 from .interface import Handle, JobFinished, OwnerStatus, Progress, Said, StaleHandle
-from .jobs import Acquire, Job, Send
+from .jobs import Acquire, Job, Send, SeriesJob
 from .local import sentence
 from .wire import from_wire, to_wire
 
@@ -124,7 +124,8 @@ class DaemonServer:
 
     `owner` is a `LocalOwner`, or anything with the protocol's six calls plus `listen`,
     `join` and `closing`. `info` is added to what `hello` answers (`output`, `library`).
-    `defaults` fills the `directory` of a `Send` or an `Acquire` that names none.
+    `defaults` fills the `directory` of a `Send`, an `Acquire` or a `SeriesJob` that names
+    none.
     `on_request` is told, in one line, every request that changes something.
     """
 
@@ -316,7 +317,7 @@ class DaemonServer:
         if self.shutting_down or self.owner.closing:  # type: ignore[attr-defined]
             raise _Refusal("refused", "clockwork serve is shutting down and takes no "
                                       "more jobs")
-        if isinstance(job, (Send, Acquire)) and not job.directory and self._directory:
+        if isinstance(job, (Send, Acquire, SeriesJob)) and not job.directory and self._directory:
             job = replace(job, directory=self._directory)
         origin = str(origin or "")
         handle = self.owner.submit(job, origin=origin)  # type: ignore[attr-defined]

@@ -22,6 +22,7 @@ an old line go, both of which it does for the reason the window's mailbox does.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -40,6 +41,7 @@ __all__ = [
     "JobStarted",
     "Owner",
     "OwnerStatus",
+    "PointStarted",
     "Progress",
     "RunDone",
     "Said",
@@ -223,6 +225,34 @@ class RunDone(Event):
     @property
     def text(self) -> str:
         return self.run.text
+
+
+@dataclass(frozen=True, slots=True)
+class PointStarted(Event):
+    """A `SeriesJob` beginning one of its points, before it sends or acquires anything."""
+
+    index: int
+    """The point's planned index."""
+    position: int
+    """The place in the order acquired its first file will take."""
+    number: int
+    """Its place among the series' points as acquired, from 1."""
+    points: int
+    """How many points the series has."""
+    knobs: Mapping[str, float]
+    replicates: int = 1
+    reference: str = ""
+    sends: bool = True
+    """False for a point the boxes already hold from the point before."""
+
+    @property
+    def text(self) -> str:
+        what = (f"the {self.reference} reference" if self.reference
+                else ", ".join(f"{name} {value:g}" for name, value in self.knobs.items()))
+        files = f"{self.replicates} file{'s' if self.replicates != 1 else ''}"
+        return (f"point {self.number} of {self.points} (planned {self.index}): "
+                f"{what or 'the defaults'}, {files} from position {self.position}"
+                + ("" if self.sends else ", the boxes already holding it"))
 
 
 @dataclass(frozen=True, slots=True)

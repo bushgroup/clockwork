@@ -33,6 +33,10 @@
   knobs that fill them: the range each knob may take, the arithmetic that carries one knob across
   boxes and clock domains, and the rendering that produces an ordinary method before anything is
   sent.
+- [**Series plan**](series-file-format.md). A grid over a template's knobs, or a list of points
+  whose knobs move together, acquired as one job in shuffled order with the defaults as
+  references: the plan's keys, how it is expanded and shuffled, and what each file records of
+  where it sat.
 - [**Instrument file**](instrument-file-format.md). The flat TOML document beside the method that
   records what a file states about the machine rather than the experiment: the m/z calibration and
   its two forms, and the full scale and channel offset the digitizer acquired through.

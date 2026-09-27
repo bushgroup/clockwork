@@ -68,9 +68,13 @@ ALIASES = {"run-routine": ("routine",)}
 """Shorter names a verb also answers to: `clockwork routine beam-check` for
 `clockwork run-routine --name beam-check`, the one verb a trainee types by hand."""
 
-POSITIONAL = {"run-routine": "name", "manifest": "paths"}
+POSITIONAL = {"run-routine": "name", "manifest": "paths", "series": "plan"}
 """A verb's argument that may also be given bare, after the verb: any number of them
 where the argument is a list (`clockwork manifest 260926 260927`)."""
+
+WAITS = ("acquire", "series")
+"""The tools that start a run and answer at once, whose verbs wait for it to end unless
+given `--no-wait`: the run record's thread dies with the verb's process."""
 
 RECORD_WAIT_S = 60.0
 """How long a finished `acquire` waits for its run record's last file entry: the
@@ -171,7 +175,7 @@ def add_verbs(commands: argparse._SubParsersAction) -> None:
                 "--follow", action="store_true",
                 help="keep asking until the job ends, printing one JSON line per event "
                      "and a last line with the answer")
-        if verb.tool.name == "acquire":
+        if verb.tool.name in WAITS:
             parser.add_argument(
                 "--no-wait", action="store_true",
                 help="answer at once rather than when the run ends. The run record then "
@@ -416,7 +420,7 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
                       "problem")
             return 0
         _print(out, answer, indent=2)
-        if verb.tool.name == "acquire" and not args.no_wait:
+        if verb.tool.name in WAITS and not args.no_wait:
             return _wait(toolbox, int(answer["job"]), err, program)
         return 0
     except KeyboardInterrupt:
@@ -450,8 +454,9 @@ def _follow(toolbox: Toolbox, arguments: Mapping[str, object], out: TextIO, err:
 
 
 def _wait(toolbox: Toolbox, job: int, err: TextIO, program: str) -> int:
-    """An `acquire`'s run, to its end: each event's text on standard error, then the
-    run record's last entry, since the thread writing it dies with this process."""
+    """An `acquire`'s run or a `series`' runs, to the end: each event's text on standard
+    error, then the run record's last entry, since the thread writing it dies with this
+    process."""
     asked: dict[str, object] = {"job": job, "wait_s": PROGRESS_WAIT_MAX_S}
     while True:
         try:

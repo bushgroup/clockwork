@@ -79,6 +79,7 @@ from ..method import (
     is_comment,
 )
 from ..method.text import PaneResult, render_pane, split_trainee_file, start_order
+from ..owner import SeriesJob, SeriesResult
 from . import errors, runqueue
 from .boxstate import Reading
 from .console_panel import ConsoleBar, ConsoleSettings
@@ -1577,7 +1578,11 @@ class MainWindow(QMainWindow):
         # Drained first, so a `RunBegun` still in the mailbox does not refill this
         # after the run it describes has ended.
         self._live_run = ("", "", "")
-        if isinstance(result, SendResult):
+        if isinstance(result, SeriesResult):
+            # A series sends each point itself, so the boxes hold its last send and not
+            # whatever this window last sent (lab record, task 91).
+            self._armed = result.armed
+        elif isinstance(result, SendResult):
             self._armed = result.armed
             self.run_panel.say(
                 f"{'setup, load and arm' if result.setup else 'load and arm'} sent in "
@@ -1605,8 +1610,12 @@ class MainWindow(QMainWindow):
         # A failed Send or Acquire has used its number up, whatever it managed to write,
         # and the next one must not offer it again (lab #3). Before the queue moves on,
         # so its next row sends under the new name.
-        if isinstance(job, (Send, Acquire)):
+        if isinstance(job, (Send, Acquire, SeriesJob)):
             self._refresh_stem()
+        if isinstance(job, SeriesJob):
+            # Part way through, it may have sent any of its points: what the boxes hold
+            # is no longer known here.
+            self._armed = ()
         if job is self._queue_job:
             self._row_finished(FAILED, message)
         self._refresh_actions()

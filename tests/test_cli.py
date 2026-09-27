@@ -298,6 +298,19 @@ def test_a_request_from_the_shell_one_verb_per_process(shell, library, tmp_path)
     code, out, err = shell("run-routine", "--name", "no-such", "--initials", "zz")
     assert code == 1 and "the routines are shell-check" in err
 
+    plan = tmp_path / "grid.toml"
+    plan.write_text(f'plan_schema = 1\ntemplate = "line-b.toml"\nlabels = {{ sample = '
+                    f'"{LABELS["sample"]}" }}\nshuffle = false\n[grid]\nb_ticks = [300, 400]\n',
+                    encoding="utf-8")
+    code, out, err = shell("series", str(plan), "--request", "two points from a shell",
+                           "--initials", "zz")
+    assert code == 0, err
+    ran = json.loads(out)
+    assert (ran["order"], ran["files"], ran["seed"]) == ([1, 2], 2, None)
+    assert "point 2 of 2 (planned 2): b_ticks 400" in err
+    with open(ran["record"], encoding="utf-8") as handle:
+        assert len(json.load(handle)["files"]) == 2, "the verb waited for its record"
+
     with open(os.path.join(output, "mcp-calls.log"), encoding="utf-8") as handle:
         logged = [json.loads(line) for line in handle]
     assert {line["via"] for line in logged} == {"cli"}

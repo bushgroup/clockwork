@@ -118,6 +118,21 @@ holding exactly the method they render. The same words in `--request` continue t
 within one daemon session, so both commands above serve one request and its files share one
 series; `--request-id` continues a request from an earlier session.
 
+## A series from a shell
+
+```
+clockwork discover-boxes --template bradykinin-clock/template.toml --labels sample=bradykinin
+clockwork series amplitude-grid.toml --request "Scan the guard from 30 to 45 V with the defaults either side" --initials AB
+```
+
+To acquire a grid or a set of coupled points in shuffled order, write them as a
+[series plan](series-file-format.md) and give its path to `series`. No `arm` comes first: the
+series sends each point itself, and a point the boxes already hold is acquired without a send.
+The verb answers the seed and the order drawn, then waits for the last file as `acquire` does and
+prints each point's line on standard error as it begins. The plan is refused whole, with nothing
+sent, if any point lies outside the standing limits or the series would spend more of the budget
+than is left.
+
 ## A table of every run
 
 ```
@@ -200,6 +215,7 @@ Each verb is its tool, described in full by `clockwork <verb> --help` and in the
 **Acquisition**
 
 - `acquire`: acquire the armed method, one file per replicate, and wait for the run unless `--no-wait`.
+- `series`: acquire a whole [series plan](series-file-format.md), `clockwork series PLAN`, sending each point itself, and wait for the last file unless `--no-wait`.
 - `progress`: what a job has done since an event number, or with `--follow` until it ends.
 - `stop`: end the acquisition in flight after its current repetition and its fold.
 - `status`: the daemon, the console, the boxes, the job running, what was last armed, the limits and the budget.

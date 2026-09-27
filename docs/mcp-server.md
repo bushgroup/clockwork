@@ -91,6 +91,7 @@ relative to the output directory, unless it is absolute.
 | | `read_box_state` | `boxes` (optional) | Every box's persistent settings read back, as the window's state panel shows them |
 | | `arm` | `request`, `initials`, a method or template, `setup`, `conditions`, `request_id`, `plan` | The request id, the stem the first file takes, what the boxes read back, the cold-start cautions, and the run record's path |
 | Acquisition | `acquire` | as `arm` without `setup` and `conditions`, plus `replicates` | A job number, at once; the run proceeds on the owner |
+| | `series` | `request`, `initials`, `plan`, `conditions`, `setup`, `request_id` | A job number, at once, with the seed, the order drawn and the counts; the daemon arms and acquires every point of the [series plan](series-file-format.md) |
 | | `progress` | `job`, `after`, `wait_s` | The job's events since number `after`, how many files are done of how many were asked for, and whether it is done |
 | | `stop` | `reason` | Whether a run was in flight; it ends after its current repetition and fold |
 | | `status` | none | Simulated or real, the console, the boxes, the running and queued jobs, the method the boxes were last armed with, why sends are refused if they are, the standing limits in force and the budget left |
@@ -135,6 +136,26 @@ scans the frame in progress has published. When the job ends, `done` is true and
 each file the run wrote under `runs`, with any failed frame and the reason, or says why the job
 failed under `failed`.
 
+### Series
+
+To acquire a grid over a template's knobs, or a set of points whose knobs move together, in
+shuffled order, pass a [series plan](series-file-format.md) to `series`, as its TOML text or as
+the path of a file. The whole series is one job of the daemon, so it carries on if the session
+that started it ends, and `stop` ends it after the current repetition. No `arm` is needed
+first. The daemon sends each point to the boxes and acquires its replicates, and a point the boxes
+already hold from the point before is acquired without a send. Each point's `setup` phase is sent
+only where it differs from the one last sent; `setup` applies to the first point, as it does to
+`arm`.
+
+The series is checked whole before anything is sent: every point against the template's ranges,
+the acquisition loop's refusals and the standing limits, the count of its acquisitions, one per
+point, against the budget left, and every distinct method against the boxes read back once. One
+point outside is enough to refuse the plan, and the refusal names the point. The points between
+the references are then shuffled under the plan's seed, or one drawn for it, and `series` answers
+the job number, the seed and the planned indices in the order they will be acquired. `progress`
+follows the job as it follows an `acquire`, and adds under `series` the point in flight and the
+order.
+
 ## Requests
 
 Every `arm` and `acquire` carries `request`, what the experiment is for in the words of the person
@@ -146,7 +167,10 @@ request can span several acquisitions and several sessions.
 
 The request travels with every file it produces. Each run stamps the request id as its series,
 `ClockworkSeriesId`, and its place in the request, counted from 1 across every acquisition of the
-request, as `ClockworkSeriesIndex` ([template file](template-file-format.md)). The words
+request, as `ClockworkSeriesIndex` and `ClockworkSeriesPosition`
+([template file](template-file-format.md)). The two are one number for `acquire`, whereas a file of
+a series stamps its point's planned index, its own position in the order acquired and the seed
+([series plan](series-file-format.md)). The words
 themselves go into the head of each run's wire transcript and send log, beside the file, and into
 the audit log. `list_files` reads the id and place from each file's own stamp and the words from
 the audit log. A run rendered from a template also stamps the template, every knob, the labels
@@ -187,7 +211,8 @@ and the run record applies to it, and answers once it is judged. Its verdict is 
 ## The run record
 
 Every request leaves `<stem>.request.json` beside its files, named after the request's first
-file: the request in the person's words, the `plan` passed to `arm`, each arming with the
+file: the request in the person's words, the `plan` passed to `arm` or a series' plan with its
+seed and order, each arming with the
 template's hash and knob values, each acquisition, each file with a summary of its numbers, and
 the notes added with `note`, and the verdicts given with `verdict`. The server writes it and
 nothing edits it by hand; [the standing limits](instrument-limits.md#the-run-record) describe it in

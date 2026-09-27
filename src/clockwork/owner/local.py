@@ -75,6 +75,7 @@ from ..acq import (
     start_chain,
 )
 from ..acq.fake import INSTRUMENT_PERIOD_SAMPLES
+from ..envelope import cold_start, judge
 from ..instrument import Instrument
 from ..method import Method
 from ..method.template import Rendered, loads_template, render
@@ -98,6 +99,7 @@ from .interface import (
     JobFinished,
     JobStarted,
     OwnerStatus,
+    PointStarted,
     Progress,
     RunDone,
     Said,
@@ -109,11 +111,15 @@ from .jobs import (
     ConsoleStatus,
     Discover,
     Job,
+    PlannedPoint,
     ReadState,
     RestartConsole,
     Send,
     SendResult,
+    SeriesJob,
+    SeriesResult,
     StartConsole,
+    matches_wire,
     wire_fingerprint,
 )
 from .lock import Holder, InstrumentLock, LockError
@@ -469,6 +475,8 @@ class LocalOwner:
             return self._send(job)
         if isinstance(job, Acquire):
             return self._acquire(job)
+        if isinstance(job, SeriesJob):
+            return self._series(job)
         if isinstance(job, ReadState):
             return self._read_state(job)
         raise TypeError(f"no owner handler for {type(job).__name__}")
@@ -726,7 +734,10 @@ class LocalOwner:
         except OSError:
             return None
 
-    def _acquire(self, job: Acquire) -> list[Run]:
+    def _acquire(self, job: Acquire, *, clear_stop: bool = True) -> list[Run]:
+        """A run and its replicates. `clear_stop` false for a point of a series, whose
+        stop was cleared when the series began: a stop asked for between two points
+        must end the series, not be forgotten by the next point."""
         method = _needs_method(job.method)
         self._require_boxes(method)
         problems = refusals(method)
@@ -738,7 +749,8 @@ class LocalOwner:
         if job.stem:
             self._refuse_taken(directory, job.stem, initials=job.initials)
         os.makedirs(directory, exist_ok=True)
-        self._stop.clear()
+        if clear_stop:
+            self._stop.clear()
 
         runs: list[Run] = []
         # Subscribed before anything is configured, because the console binds the data
@@ -780,8 +792,16 @@ class LocalOwner:
                     replicate = job.replicate_only or index > 0
                     series = None
                     if job.series:
-                        place = max(1, job.series_index) + index
-                        series = Series(id=job.series, index=place, position=place)
+                        if job.series_position > 0:
+                            # A point of a planned series: its replicates share its
+                            # planned index and take consecutive positions.
+                            series = Series(id=job.series, index=max(1, job.series_index),
+                                            position=job.series_position + index,
+                                            seed=job.series_seed)
+                        else:
+                            place = max(1, job.series_index) + index
+                            series = Series(id=job.series, index=place, position=place,
+                                            seed=job.series_seed)
                     provenance = (Provenance(rendered=rendered, series=series)
                                   if rendered is not None or series is not None else None)
                     run = self._one_run(
@@ -809,6 +829,100 @@ class LocalOwner:
                             f"`stop acquire` failed: {exc}. THE CONSOLE IS STILL "
                             "HOLDING AN ACQUISITION; restart it before acquiring again.")
         return runs
+
+    def _series(self, job: SeriesJob) -> SeriesResult:
+        """Every point of a planned series, in the order given: arm it, then acquire it.
+
+        A point is sent unless the boxes hold it already from the point before, and its
+        `setup` phase goes with it only where that differs from the one last sent: the
+        stack is the same across a template's points unless a knob moves it. After each
+        send, what the boxes read back is judged against what the point declares, under
+        the series' cold-start rule, as `acquire` judges an `arm`'s read-back; a refusal
+        ends the series before that point acquires anything.
+
+        A stop, from any client, ends the series after the current repetition, or
+        before the next point when it arrives between two. Everything a point raises
+        ends the series too, with the files already written left as they are.
+        """
+        if not job.points:
+            raise ValueError("a series has at least one point")
+        directory = job.directory or os.getcwd()
+        self._stop.clear()
+        runs: list[Run] = []
+        position = max(1, job.first_position)
+        sent: Method | None = None
+        armed: tuple = ()
+        done = 0
+        stopped = ""
+        for number, point in enumerate(job.points, start=1):
+            if self._stop.is_set():
+                stopped = self._stop_reason
+                break
+            method = _needs_method(point.method)
+            sends = sent is None or self._armed is None or not matches_wire(
+                self._armed.fingerprint, method)
+            self._report(PointStarted(
+                index=point.index, position=position, number=number,
+                points=len(job.points), knobs=dict(point.knobs),
+                replicates=point.replicates, reference=point.reference, sends=sends))
+            stem = ""
+            if sends:
+                stem = next_stem(directory, job.initials)
+                result = self._send(Send(
+                    label=f"arming point {point.index} of {job.series}", method=method,
+                    setup=job.setup if sent is None else _setup_differs(sent, method),
+                    conditions=job.conditions, directory=directory, stem=stem,
+                    method_path=job.method_path, instrument=job.instrument,
+                    instrument_path=job.instrument_path))
+                sent, armed = method, result.armed
+                self._judge_send(job, point, result.snapshot)
+                if self._stop.is_set():
+                    stopped = self._stop_reason
+                    break
+            made = self._acquire(Acquire(
+                label=f"acquiring point {point.index} of {job.series}", method=method,
+                instrument=job.instrument, instrument_path=job.instrument_path,
+                method_path=job.method_path, directory=directory, stem=stem,
+                initials=job.initials, replicates=point.replicates,
+                # Nothing sent: on the wire it is a replicate of the point before, and
+                # its send log says where the strings went.
+                replicate_only=not sends,
+                conditions=job.conditions, request=job.request, series=job.series,
+                series_index=point.index, series_position=position,
+                series_seed=job.seed,
+                template=job.template,
+                knobs=dict(point.knobs), labels=dict(job.labels)), clear_stop=False)
+            runs += made
+            position += len(made)
+            if len(made) == point.replicates and not any(run.stopped_early for run in made):
+                done += 1
+            if self._stop.is_set() or any(run.stopped_early for run in made):
+                stopped = self._stop_reason or "a run stopped early"
+                break
+        if stopped and done < len(job.points):
+            self._say(f"series stopped after {done} of {len(job.points)} points "
+                      f"({len(runs)} files): {stopped}")
+        return SeriesResult(runs=tuple(runs), points=len(job.points), points_done=done,
+                            stopped=stopped if done < len(job.points) else "",
+                            armed=armed)
+
+    def _judge_send(self, job: SeriesJob, point: PlannedPoint,
+                    snapshot: Snapshot) -> None:
+        """What a series' send read back, against what its point declares: cautions
+        said, a refusal raised, under the job's cold-start rule; nothing without one."""
+        if not job.cold_start:
+            return
+        method = _needs_method(point.method)
+        refused, cautioned = judge(
+            cold_start(method, snapshot.after or snapshot.before, declared=True),
+            job.cold_start)
+        for line in cautioned:
+            self._report(Warned(f"cold start, point {point.index}: {line}"))
+        if refused:
+            raise AcqError(
+                f"point {point.index}'s send left the boxes holding what the standing "
+                "limits refuse a cold start on: " + "; ".join(refused)
+                + ". The series stopped before acquiring it")
 
     def _one_run(
         self,
@@ -1124,6 +1238,15 @@ def _identities(
         except (MipsError, ValueError):
             rows.append((name, (port, "", "")))
     return rows, lost
+
+
+def _setup_differs(before: Method, after: Method) -> bool:
+    """Whether `after` would send any box a `setup` phase, a DC bias or an RF head
+    other than `before` sent it, which is when a series' send needs its setup."""
+    def stack(method: Method) -> tuple:
+        return tuple((entry.name, tuple(entry.setup), tuple(entry.dc_bias), tuple(entry.rf))
+                     for entry in method.boxes)
+    return stack(before) != stack(after)
 
 
 def _needs_method(method: Method | None) -> Method:

@@ -7,7 +7,8 @@ surface that made it (`mcp` or `cli`; lab record, task 73). A person
 who was away reads what was done from it, `list_files` reads the words of each request
 back from it, since a file stamps only the request's id (lab record, task 69), and the
 standing envelope's budget is counted from it: the accepted `acquire` lines of one
-daemon session (lab record, task 71).
+daemon session, and each accepted `series` line's count of acquisitions (lab record,
+tasks 71 and 91).
 
 **A long text argument is hashed, never quoted.** A method's or a template's text is
 kilobytes, and what an auditor needs is whether two calls were given the same one; the
@@ -102,7 +103,8 @@ class AuditLog:
                 handle.write(text + "\n")
 
     def acquisitions(self, session: str) -> int:
-        """How many `acquire` calls were accepted in daemon session `session`."""
+        """How many acquisitions were accepted in daemon session `session`: one per
+        `acquire` call, and a `series` call's `acquisitions`, one per point."""
         if not session or not self.path or not os.path.isfile(self.path):
             return 0
         count = 0
@@ -112,9 +114,14 @@ class AuditLog:
                     line = json.loads(text)
                 except ValueError:
                     continue
-                if (isinstance(line, dict) and line.get("tool") == "acquire"
-                        and line.get("error") is None and line.get("session") == session):
+                if (not isinstance(line, dict) or line.get("error") is not None
+                        or line.get("session") != session):
+                    continue
+                if line.get("tool") == "acquire":
                     count += 1
+                elif line.get("tool") == "series":
+                    spent = (line.get("result") or {}).get("acquisitions")
+                    count += spent if isinstance(spent, int) and spent > 0 else 1
         return count
 
     def request_for(self, words: str, session: str) -> str | None:

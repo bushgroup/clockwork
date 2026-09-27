@@ -693,6 +693,120 @@ arm = ["SMOD,TBL"]
             owner.join(30)
 
 
+def check_series() -> None:
+    """A series plan, and the `series` tool over the stand-ins (lab record, task 91).
+
+    A grid of two by three with both references and two replicates is eight points and
+    sixteen files, and costs eight acquisitions; one seed gives one order, with the
+    references left at the ends. Then a two-point plan over a `--fake` owner: refused
+    whole before any job when a point is outside the template's range, and otherwise
+    acquired as one job whose every file stamps its planned index, its position and the
+    seed.
+    """
+    import tempfile
+    import time
+
+    from clockwork import series
+    from clockwork.acq.uimf import SUMMED_SUFFIX
+    from clockwork.mcp import Toolbox, ToolFailure
+    from clockwork.mcp.server import SIMULATED
+    from clockwork.method import template as template_module
+    from clockwork.owner import LocalOwner, StartConsole
+    from clockwork.summary import summarize
+
+    template_text = """\
+template_schema = 1
+renders = 2
+start = [["box1", "TBLSTRT"]]
+reset = [["box1", "SMOD,LOC"], ["box1", "SMOD,TBL"]]
+[knobs]
+b_on = { default = 1, min = 1, max = 50, unit = "ticks", description = "line B rises" }
+b_ticks = { default = 500, min = 100, max = 520, unit = "ticks", description = "line B falls" }
+[metadata]
+name = "series self-check"
+created = 2026-09-27
+[acquisition]
+frames = 1
+scans = 32
+accumulations = 2
+repetition_mode = "per_repetition"
+keep_raw = true
+file_stem = "series-self-check"
+enable = { box = "box1", channel = "A" }
+[[boxes]]
+name = "box1"
+port = "COM3"
+setup = ["STBLCLK,EXT"]
+load = ["STBLDAT;0:[A:1,0:A:1,{b_on}:B:1,{b_ticks}:B:0,532:A:0,533:];"]
+arm = ["SMOD,TBL"]
+"""
+    template = template_module.loads_template(template_text)
+    head = ('plan_schema = 1\ntemplate = "grid.toml"\nreferences = ["start", "end"]\n')
+    grid = series.loads(head + "replicates = 2\n[grid]\nb_on = [1, 20]\n"
+                                "b_ticks = [300, 400, 450]\n")
+    points = series.expand(grid, template)
+    check_true("a 2 x 3 grid with both references and two replicates is 8 points, 16 files "
+               "and 8 acquisitions",
+               (len(points), series.files(points), series.acquisitions(points)) == (8, 16, 8))
+    drawn = [point.index for point in series.order(points, 12345)]
+    check_true(f"one seed gives one order, the references at the ends ({drawn})",
+               drawn == [point.index for point in series.order(points, 12345)]
+               and drawn[0] == 1 and drawn[-1] == 8 and sorted(drawn) == list(range(1, 9)))
+    try:
+        series.loads(head + "shuffle = false\nseed = 3\n[grid]\nb_ticks = [300]\n")
+        seeded = ""
+    except series.PlanError as exc:
+        seeded = str(exc)
+    check_true("a seed in an unshuffled plan is refused", "orders a shuffle" in seeded)
+
+    with tempfile.TemporaryDirectory() as scratch:
+        library = os.path.join(scratch, "library")
+        output = os.path.join(scratch, "runs")
+        os.makedirs(library)
+        with open(os.path.join(library, "grid.toml"), "w", encoding="utf-8",
+                  newline="\n") as handle:
+            handle.write(template_text)
+        owner = LocalOwner(fake=True, program="clockwork series self-check").start()
+        owner.submit(StartConsole())
+        try:
+            toolbox = Toolbox(owner, library=library, output=output, instrument=SIMULATED)
+            asked = {"request": "two points and the defaults", "initials": "sc"}
+            toolbox.call("discover_boxes", {"template": "grid.toml"})
+            issued = owner.status().issued
+            try:
+                toolbox.call("series", {**asked, "plan": head + "[grid]\nb_ticks = [90]\n"})
+                outside = ""
+            except ToolFailure as exc:
+                outside = str(exc)
+            check_true("a plan with a point outside its template's range is refused whole, "
+                       "naming it, before any job",
+                       "refused whole" in outside and "point 2 (b_ticks = 90)" in outside
+                       and owner.status().issued == issued)
+            started = toolbox.call("series", {**asked, "plan": head + "seed = 7\n[grid]\n"
+                                                                      "b_ticks = [300, 450]\n"})
+            deadline, last, answer = time.monotonic() + 120, 0, {"done": False}
+            while not answer["done"] and time.monotonic() < deadline:
+                answer = toolbox.call("progress", {"job": started["job"], "after": last,
+                                                   "wait_s": 5})
+                last = answer["last"]
+            stamps = sorted(
+                (summarize(os.path.join(output, name))["clockwork"] for name in
+                 os.listdir(output) if name.endswith(SUMMED_SUFFIX)),
+                key=lambda found: found["ClockworkSeriesPosition"])
+            check_true(
+                "the series runs as one job, every file stamping its planned index, its "
+                f"position and the seed ({started['order']})",
+                answer.get("done") and len(stamps) == 4
+                and [found["ClockworkSeriesIndex"] for found in stamps] == started["order"]
+                and [found["ClockworkSeriesPosition"] for found in stamps] == [1, 2, 3, 4]
+                and {found["ClockworkSeriesSeed"] for found in stamps} == {7})
+        except Exception as exc:  # noqa: BLE001 -- reporting, not handling
+            check_true(f"the series tool acquires a plan over the stand-ins ({exc})", False)
+        finally:
+            owner.shutdown()
+            owner.join(30)
+
+
 def check_routines() -> None:
     """Instrument routines over the stand-ins (lab record, task 76).
 
@@ -2944,6 +3058,9 @@ def main() -> int:
 
     section("the standing envelope")
     check_envelope()
+
+    section("series")
+    check_series()
 
     section("instrument routines")
     check_routines()

@@ -58,9 +58,10 @@ bias_hold_v = 10.0
 - `allow.boxes` lists the boxes, by the names a method uses, that an agent may address. A method
   that names any other box is refused.
 - `budget` is what one daemon session may do unattended. `max_runs` counts acquisitions, i.e.,
-  `acquire` calls, however many files each makes; `max_replicates_per_run` bounds the files one
-  acquisition may ask for; and `max_hours` is the time from the daemon's start after which
-  nothing more is sent. All three are required.
+  `acquire` calls, however many files each makes, and the points of a
+  [series](series-file-format.md), one acquisition each; `max_replicates_per_run` bounds the files
+  one acquisition or one point may ask for; and `max_hours` is the time from the daemon's start
+  after which nothing more is sent. All three are required.
 - `templates.<key>` is one template an agent may run. The key is a free name for the entry.
   `hash` is at least 8 hex digits of the template's hash, as `list_templates` shows it, and a
   template whose hash does not begin with these digits does not match the entry. Editing a
@@ -104,7 +105,9 @@ Before `arm` or `acquire` submits a job, the server refuses:
 value into range, so an agent learns why a choice would be refused before it tries to send it.
 
 The budget is counted from the audit log in the output directory: the `acquire` calls it accepted
-under the daemon's session identifier. Every server and every restart of a server over the same
+under the daemon's session identifier, and the points of each `series` call it accepted. A series
+is counted whole before its first send, so a series that would not fit is refused rather than
+stopped part way. Every server and every restart of a server over the same
 daemon therefore spends one budget. Note that two servers writing to different output directories
 keep separate logs, and so separate counts.
 
@@ -120,7 +123,9 @@ declared stack against the boxes themselves.
 
 `arm` reads back every box the method names, using getters only, as `read_box_state` does, before
 it sends anything. `acquire` compares against what that `arm`'s send read back after its `setup`
-phase. Each comparison produces findings:
+phase. A `series` reads the boxes back once and compares every distinct method in its plan before
+anything is sent, and the daemon then compares what each of its sends read back as `acquire`
+does, ending the series before a point it would refuse. Each comparison produces findings:
 
 | Finding | When | Rule under `refuse` |
 |---|---|---|
@@ -154,7 +159,8 @@ either.
 Every request leaves one small document beside its files, `<stem>.request.json`, where the stem is
 that of the request's first file. The server writes it as the request proceeds and nothing edits
 it by hand. It holds the request in the words of the person it was for, their initials and its
-identifier; the plan the agent stated when it armed; each arming, with the template's hash, every
+identifier; the plan the agent stated when it armed, and for a series the plan's text, its
+seed and the order drawn from it; each arming, with the template's hash, every
 knob value and label, and the cold-start cautions; each acquisition; each file written, with a
 summary of its frames, counts, base peak, pusher period and saturation; the notes the agent
 added with the `note` tool; and each person's verdict on a run given with the `verdict` tool, in

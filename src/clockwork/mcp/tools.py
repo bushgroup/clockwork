@@ -36,6 +36,13 @@ of the request stamps as its series (`ClockworkSeriesId`, with its place in the 
 as `ClockworkSeriesIndex`), and the words go into each run's log header and the audit
 log. Passing `request_id` back continues a request across calls and sessions.
 
+**A planned series is one job, not a loop of calls.** `series` checks a whole plan
+(`clockwork.series`) against the ranges, the limits, the budget and the boxes before
+anything is sent, shuffles it under a recorded seed, and submits a `SeriesJob`, which the
+owner arms and acquires point by point: a session that ends mid-series does not end the
+series, and every file stamps its planned index, its executed position and the seed
+(lab record, task 91).
+
 Qt-free, under the seam with the three lower layers.
 """
 
@@ -59,6 +66,7 @@ from .. import envelope, summary
 from .. import manifest as manifest_module
 from .. import method as method_module
 from .. import routine as routine_module
+from .. import series as series_module
 from ..acq import BatchSeen, Event, Run, Snapshot, cautions, refusals
 from ..acq.uimf import RAW_SUFFIX, SUMMED_SUFFIX
 from ..app import methodlib
@@ -77,14 +85,19 @@ from ..owner import (
     JobFailed,
     JobFinished,
     JobStarted,
+    PlannedPoint,
+    PointStarted,
     Progress,
     ReadState,
     RunDone,
     Send,
     SendResult,
+    SeriesJob,
+    SeriesResult,
     StaleHandle,
     matches_wire,
     sentence,
+    wire_fingerprint,
 )
 from ..owner.remote import DaemonError
 from ..owner.wire import TYPE_KEY, to_wire
@@ -623,6 +636,142 @@ class Toolbox:
                 "cold_start": cautioned, "record": record.path,
                 "follow": f"call progress with job={handle.id}"}
 
+    @tool("acquisition", read_only=False)
+    def series(self, request: str, initials: str, plan: str, conditions: str = "",
+               setup: bool = True, request_id: str = "") -> dict:
+        """Acquire a whole planned series as one job, in shuffled order, and answer at once.
+
+        `plan` is a series plan's TOML text, or the path of a file holding one: a
+        template, its labels, then a `[grid]` of values per knob or a list of
+        `[[points]]` whose knobs move together, `replicates` per point, `references` at
+        the template's defaults (`["start", "end"]` puts one before and one after), an
+        optional `seed`, and `shuffle`, true by default (docs/series-file-format.md).
+        `request`, `initials`, `conditions` and `request_id` are as for `arm`; `setup`
+        is the first point's, and each later point sends its setup only when it differs.
+        No `arm` is needed first: the series sends every point itself, and a point the
+        boxes already hold from the point before is acquired without a send.
+
+        Refused whole, before anything is sent, for a point outside the template's
+        ranges or the standing limits, naming the point; for more acquisitions than the
+        budget has left, counting one per point however many replicates each has; or
+        for a cold-start refusal on any point, after one read-back of the boxes. The
+        points between the references are shuffled under the seed, drawn when the plan
+        gives none; every file stamps the request id, the point's planned index, its
+        own position in the order acquired and the seed. Answers the job number, the
+        seed, the order, the counts and the run record; follow it with `progress` and
+        end it with `stop`, which leaves the finished files and the record saying where
+        it stopped.
+        """
+        who = self._initials(initials)
+        try:
+            planned, plan_path = series_module.resolve(plan)
+            template_path = self._in_library(planned.template)
+            template = template_module.load_template(template_path)
+            points = series_module.expand(planned, template)
+        except (series_module.PlanError, TemplateError) as exc:
+            raise ToolFailure(f"the plan does not load, so nothing was sent: {exc}") from exc
+        except OSError as exc:
+            raise ToolFailure(f"the plan's template {planned.template} does not open: "
+                              f"{exc.strerror or exc}") from exc
+        self._refuse_unless_allowed(None, None, request)
+        renders: list[Rendered] = []
+        refused: list[str] = []
+        real = not self.owner.status().fake  # type: ignore[attr-defined]
+        for point in points:
+            name = series_module.describe(point)
+            try:
+                rendered = template_module.render(template, dict(point.knobs),
+                                                  dict(planned.labels))
+            except TemplateError as exc:
+                refused.append(f"{name}: {exc}")
+                continue
+            found = refusals(rendered.method) + envelope.check(
+                rendered.method, rendered, self.limits, Ledger(), real=real,
+                replicates=point.replicates)
+            if found:
+                refused.append(f"{name}: " + "; ".join(found))
+            renders.append(rendered)
+        if refused:
+            raise ToolFailure("the series was refused whole and nothing was sent: "
+                              + "; ".join(refused))
+        spent = series_module.acquisitions(points)
+        if self.limits is not None:
+            left = self.limits.budget.max_runs - self._ledger().runs
+            if spent > left:
+                raise ToolFailure(
+                    f"the series is {spent} acquisitions ({series_module.files(points)} "
+                    f"files) and this daemon session's budget has {left} of "
+                    f"{self.limits.budget.max_runs} left, so nothing was sent: shorten the "
+                    "plan")
+        found = self._read_boxes(renders[0].method)
+        mode = self._cold_start_mode(renders[0])
+        cautioned: list[str] = []
+        distinct: list[tuple] = []
+        for point, rendered in zip(points, renders, strict=True):
+            fingerprint = wire_fingerprint(rendered.method)
+            if fingerprint in distinct:
+                continue
+            distinct.append(fingerprint)
+            stopped, noted = envelope.judge(
+                envelope.cold_start(rendered.method, found), mode)
+            if stopped:
+                raise ToolFailure(f"{series_module.describe(point)}: "
+                                  + _cold_start_refusal(stopped))
+            cautioned += [line for line in noted if line not in cautioned]
+        identity, words = self._request(request, request_id)
+        count = series_module.files(points)
+        with self._guard:
+            place = self._places.get(identity) or self._next_place_on_disk(identity)
+            self._places[identity] = place + count
+        seed = (planned.seed if planned.seed is not None else series_module.draw_seed()
+                ) if planned.shuffle else None
+        executed = series_module.order(points, seed)
+        by_index = {point.index: rendered for point, rendered in zip(points, renders,
+                                                                     strict=True)}
+        offset = place - 1
+        job = SeriesJob(
+            label=f"acquiring series {identity}",
+            points=tuple(PlannedPoint(index=offset + point.index,
+                                      method=by_index[point.index].method,
+                                      knobs=dict(by_index[point.index].knobs),
+                                      replicates=point.replicates,
+                                      reference=point.reference) for point in executed),
+            series=identity, seed=seed, first_position=place, setup=setup,
+            conditions=conditions, directory=self.output, initials=who, request=words,
+            instrument=self.instrument, instrument_path=self.instrument_path,
+            method_path=template_path, template=template.text,
+            labels=dict(planned.labels),
+            cold_start=mode)
+        handle = self._submit(job)
+        with self._guard:
+            self._planned[handle.id] = count
+        record = RunRecord.open(self.output, next_stem(self.output, who),
+                                request_id=identity, text=words, initials=who)
+        order = [offset + point.index for point in executed]
+        record.append("plans", {
+            "text": planned.description, "job": handle.id, "plan": planned.text,
+            "path": plan_path, "template": template_path, "template_hash": template.hash,
+            "labels": dict(planned.labels), "seed": seed, "shuffled": seed is not None,
+            "first_place": place, "acquisitions": spent, "files": count,
+            "points": [{"index": offset + point.index, "knobs": dict(point.knobs),
+                        "replicates": point.replicates, "reference": point.reference}
+                       for point in points],
+            "order": order})
+        record.append("acquisitions", {
+            "job": handle.id, "series": True, "replicates": planned.replicates,
+            "first_place": place, "points": len(points), "method": template.name,
+            "cold_start": cautioned})
+        recorder = threading.Thread(target=self._record_runs, args=(handle, record),
+                                    name=f"run record, job {handle.id}", daemon=True)
+        with self._guard:
+            self._recorders[handle.id] = recorder
+        recorder.start()
+        return {"job": handle.id, "request_id": identity, "label": handle.label,
+                "seed": seed, "order": order, "first_place": place,
+                "acquisitions": spent, "files": count, "points": len(points),
+                "cold_start": cautioned, "record": record.path,
+                "follow": f"call progress with job={handle.id}"}
+
     @tool("acquisition")
     def progress(self, job: int, after: int = 0, wait_s: float = PROGRESS_WAIT_S) -> dict:
         """What a job has done since event number `after`, waiting up to `wait_s` for news.
@@ -662,7 +811,9 @@ class Toolbox:
             recorded = job in self._recorders
         if planned is None and isinstance(started, Acquire):
             planned = started.replicates
-        if not recorded and isinstance(started, Acquire):
+        if planned is None and isinstance(started, SeriesJob):
+            planned = sum(point.replicates for point in started.points)
+        if not recorded and isinstance(started, (Acquire, SeriesJob)):
             self._record_seen(started, [entry.event.run for entry in entries
                                         if isinstance(entry.event, RunDone)])
         answer: dict[str, Any] = {
@@ -676,6 +827,8 @@ class Toolbox:
             },
             "done": False,
         }
+        if isinstance(started, SeriesJob):
+            answer["series"] = _series_progress(started, history)
         for entry in entries:
             if isinstance(entry.event, JobFinished):
                 answer["done"] = True
@@ -685,6 +838,8 @@ class Toolbox:
                 answer["failed"] = entry.event.message
         if isinstance(answer.get("result"), list):
             answer["runs"] = answer.pop("result")
+        elif isinstance(answer.get("result"), dict) and "runs" in answer["result"]:
+            answer["runs"] = answer["result"].pop("runs")
         return answer
 
     @tool("acquisition", read_only=False)
@@ -692,7 +847,8 @@ class Toolbox:
         """Stop the acquisition in flight after its current repetition and its fold.
 
         What it leaves on disk is a short experiment, not a broken one; replicates not
-        yet started are not acquired. `reason` goes in the file's log.
+        yet started are not acquired, and nor are the points of a series not yet begun.
+        `reason` goes in the file's log, and a series' run record says where it stopped.
         """
         running = self.owner.status().running  # type: ignore[attr-defined]
         self.owner.stop(reason)  # type: ignore[attr-defined]
@@ -1169,7 +1325,7 @@ class Toolbox:
         with self._guard:
             return self._recorders.get(job)
 
-    def _record_seen(self, job: Acquire, runs: list[Run]) -> None:
+    def _record_seen(self, job: Acquire | SeriesJob, runs: list[Run]) -> None:
         """Add files a `progress` call saw to their request's run record, for a job
         another process started and so no thread here is recording: an `acquire` verb
         run with `--no-wait`, followed later. Replaces by stem, so a file seen twice is
@@ -1191,19 +1347,30 @@ class Toolbox:
         reports it, until the job ends. On a thread of its own; a record it cannot
         write is not a reason to disturb the run."""
         seen = 0
+        point: PointStarted | None = None
         try:
             while True:
                 entries = self._wait(handle, seen, 30.0)
                 for entry in entries:
                     seen = entry.seq
                     event = entry.event
-                    if isinstance(event, RunDone):
+                    if isinstance(event, PointStarted):
+                        point = event
+                    elif isinstance(event, RunDone):
                         record.add_file(_file_entry(event.run))
                     elif isinstance(event, JobFailed):
-                        record.append("notes", {"text": f"job {handle.id} failed: "
+                        where = (f" at planned point {point.index}, point {point.number} of "
+                                 f"{point.points} as acquired" if point is not None else "")
+                        record.append("notes", {"text": f"job {handle.id} failed{where}: "
                                                         f"{event.message}", "by": "server"})
                         return
                     elif isinstance(event, JobFinished):
+                        result = event.result
+                        if isinstance(result, SeriesResult) and result.stopped:
+                            record.append("notes", {"text": (
+                                f"series job {handle.id} stopped after {result.points_done} "
+                                f"of {result.points} points, {len(result.runs)} files: "
+                                f"{result.stopped}"), "by": "server"})
                         return
         except Exception:  # noqa: BLE001 -- the record is the run's, never its end
             return
@@ -1249,13 +1416,15 @@ class Toolbox:
         return self.log.request_for(words, session)
 
     def _next_place_on_disk(self, identity: str) -> int:
-        """One past the highest place this request's files already hold, for a request
-        continued by id from an earlier session. Under `_guard`."""
+        """One past the highest place this request's files already hold, index or
+        position, for a request continued by id from an earlier session. Under
+        `_guard`."""
         highest = 0
         for path in glob.glob(os.path.join(self.output, "*" + SUMMED_SUFFIX)):
             stamped = _series(path)
             if stamped is not None and stamped["id"] == identity:
-                highest = max(highest, int(stamped.get("index") or 0))
+                highest = max(highest, int(stamped.get("index") or 0),
+                              int(stamped.get("position") or 0))
         return highest + 1
 
     def _stem_taken(self, stem: str) -> bool:
@@ -1674,6 +1843,10 @@ def _snapshot_text(snapshot: Snapshot | None) -> str:
 
 def _result(result: object) -> Any:
     """A finished job's result, cut to what a caller reads: never a method's text."""
+    if isinstance(result, SeriesResult):
+        return {"runs": [_run_summary(run) for run in result.runs],
+                "points": result.points, "points_done": result.points_done,
+                "stopped": result.stopped or None}
     if isinstance(result, (list, tuple)) and all(isinstance(run, Run) for run in result):
         return [_run_summary(run) for run in result]
     if isinstance(result, SendResult):
@@ -1687,6 +1860,20 @@ def _result(result: object) -> Any:
         return _bare(to_wire(result))
     except TypeError:
         return repr(result)
+
+
+def _series_progress(job: SeriesJob, history: list[Progress]) -> dict:
+    """Where a series job has got to: the point in flight, and the order planned."""
+    point = next((entry.event for entry in reversed(history)
+                  if isinstance(entry.event, PointStarted)), None)
+    return {
+        "points": len(job.points), "seed": job.seed,
+        "order": [entry.index for entry in job.points],
+        "point": None if point is None else {
+            "number": point.number, "index": point.index, "position": point.position,
+            "knobs": dict(point.knobs), "reference": point.reference or None,
+            "replicates": point.replicates, "sends": point.sends},
+    }
 
 
 def _entry(progress: Progress) -> dict:
