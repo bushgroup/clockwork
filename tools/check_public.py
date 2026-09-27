@@ -1414,6 +1414,65 @@ def main() -> int:
         templates.loads_template(template_sample.replace("\n", "\r\n")).hash == t.hash,
     )
 
+    section("rendered method files")
+    # A render written to a file carries its template, knobs and labels in a [rendered]
+    # table that is not part of the method (docs/method-file-format.md, "Where a rendered
+    # method came from"). The round trip: save, load, render again, compare.
+    import tempfile
+
+    from clockwork.app import methodlib
+
+    cell = templates.render(t, {"length_ms": 12.5}, {"sample": "check"})
+    with tempfile.TemporaryDirectory() as folder:
+        cell_path = os.path.join(folder, "cell.toml")
+        method.save(templates.attached(cell), cell_path)
+        with open(os.path.join(folder, "template.toml"), "w", encoding="utf-8",
+                  newline="\n") as handle:
+            handle.write(template_sample)
+        opened = method.load(cell_path)
+        again, why = templates.reproduce(opened)
+        check_true(
+            "a rendered file carries its template's text, knobs and labels",
+            opened.rendered_from is not None
+            and opened.rendered_from.template == template_sample
+            and dict(opened.rendered_from.knobs) == {"cycles": 1, "length_ms": 12.5}
+            and dict(opened.rendered_from.labels) == {"sample": "check"},
+        )
+        check_true(
+            "and renders again to its own strings at those values",
+            why == "" and again is not None and again.method == opened,
+        )
+        check_true(
+            "the [rendered] table is outside the method hash",
+            method.stamp(opened)["method_hash"] == method.stamp(cell.method)["method_hash"]
+            and "[rendered]" not in method.stamp(opened)["method_text"],
+        )
+        entries = {os.path.basename(entry.path): entry
+                   for entry in methodlib.scan_library(folder)}
+        check_true(
+            "the library lists a template as a template and a render by its knobs",
+            entries["template.toml"].is_template and entries["template.toml"].ok
+            and entries["cell.toml"].rendered.startswith(
+                "rendered from check_public-sample at cycles 1, length_ms 12.5 ms"),
+        )
+        with open(cell_path, encoding="utf-8") as handle:
+            text = handle.read()
+        with open(cell_path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text.replace('"STBLCLK,EXT"', '"STBLCLK,INT"', 1))
+        edited = method.load(cell_path)
+        check_true(
+            "a file edited since it was rendered loads, and does not reproduce",
+            edited.rendered_from is not None
+            and templates.reproduce(edited)[0] is None,
+        )
+    check_true(
+        "same_run ignores the name, file stem and ports, and nothing a box is sent",
+        method.same_run(cell.method, dataclasses.replace(
+            cell.method, acquisition=dataclasses.replace(
+                cell.method.acquisition, file_stem="260927_ZZ_001")))
+        and not method.same_run(cell.method, rendered.method),
+    )
+
     section("pane text")
     from clockwork.method import text as pane_text
 

@@ -118,6 +118,22 @@ holding exactly the method they render. The same words in `--request` continue t
 within one daemon session, so both commands above serve one request and its files share one
 series; `--request-id` continues a request from an earlier session.
 
+## A method file from a template
+
+To make a method a person can open in the window, render the template to a file:
+
+```
+clockwork render-template --template bradykinin-clock/template.toml --labels sample=bradykinin --knobs duration_ms=25 --to cells/25ms.toml
+```
+
+`--to` is a path in the library unless it is absolute, and `.toml` is added where it is missing.
+An existing file is left alone, and the verb refuses with one sentence, unless `--overwrite` is
+given. A render with `problems` writes nothing; one outside the standing limits or with refusals
+is still written, since the window runs it regardless, and its answer says so. The answer names
+the file it wrote under `written`. The file is an ordinary method with a `[rendered]` table at
+its foot, which is what makes its runs in the window record the template and knobs
+([`method-file-format.md`](method-file-format.md#where-a-rendered-method-came-from)).
+
 ## A series from a shell
 
 ```
@@ -200,11 +216,11 @@ Each verb is its tool, described in full by `clockwork <verb> --help` and in the
 **Methods and templates**
 
 - `list-templates`: every template in the library, with its knobs, labels and marks, and what the standing limits allow of each.
-- `list-methods`: every hand-written method in the library.
+- `list-methods`: every method in the library, and the template and knob values a rendered one came from.
 - `load-method`: one method's canonical text and fields.
 - `diff-methods`: two methods compared field by field and line by line.
 - `validate-method`: whether a method, or a template at some knob values, can be acquired.
-- `render-template`: a template rendered at some knob values, the method that would be sent.
+- `render-template`: a template rendered at some knob values, the method that would be sent; with `--to FILE`, also written to that file for the window or its run queue.
 
 **The boxes**
 

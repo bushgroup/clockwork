@@ -325,10 +325,12 @@ class Toolbox:
 
     @tool("method")
     def list_methods(self) -> dict:
-        """Every hand-written method in the library: name, hash, date and description.
+        """Every method in the library: name, hash, date and description.
 
-        Templates are listed by `list_templates` instead. A document that does not load
-        is listed with the problem that stopped it.
+        Templates are listed by `list_templates` instead. A method written by
+        `render_template` with `to` says which template and knob values it came from, in
+        `rendered`. A document that does not load is listed with the problem that stopped
+        it.
         """
         methods = []
         for entry in methodlib.scan_library(self.library):
@@ -340,6 +342,7 @@ class Toolbox:
                 "hash": entry.hash,
                 "created": entry.created.isoformat() if entry.created else None,
                 "description": entry.description,
+                **({"rendered": entry.rendered} if entry.rendered else {}),
                 **({"problem": entry.problem} if entry.problem else {}),
             })
         return {"library": self.library, "methods": methods}
@@ -407,9 +410,10 @@ class Toolbox:
             "warnings": list(loaded.warnings),
         }
 
-    @tool("method")
+    @tool("method", read_only=False)
     def render_template(self, template: str, knobs: dict[str, int | float] | None = None,
-                        labels: dict[str, str] | None = None) -> dict:
+                        labels: dict[str, str] | None = None, to: str = "",
+                        overwrite: bool = False) -> dict:
         """A template rendered at some knob values: the method that would be sent.
 
         Knobs not given take their defaults. Answers every knob's value, the derived
@@ -419,6 +423,13 @@ class Toolbox:
         false. A knob inside the template's range and outside the instrument's standing
         limits is rendered, not clamped, and comes back in `limits`, with `ok` false.
         `warnings` are repairs made while loading; they never stop a run.
+
+        `to` also writes the rendered method to a file, a path in the library or an
+        absolute path, for a person to open in the window or put in its run queue. The
+        file carries the template, knobs and labels, so its runs stamp as rendered while
+        it is unedited. An existing file is not replaced unless `overwrite` is true.
+        Answers where it wrote as `written`. Nothing is written where `problems` is not
+        empty; a render with refusals or outside the limits is still written, and says so.
         """
         try:
             loaded, rendered, _ = self._method("", template, knobs, labels)
@@ -427,7 +438,9 @@ class Toolbox:
         assert rendered is not None
         found = refusals(loaded)
         outside = self._outside_limits(loaded, rendered)
+        written = self._write_rendered(rendered, to, overwrite) if to else ""
         return {
+            **({"written": written} if written else {}),
             "ok": not found and not outside,
             "problems": [],
             "limits": outside,
@@ -1204,6 +1217,18 @@ class Toolbox:
             raise ToolFailure(f"{path!r} is not an absolute path and no method library is "
                               "set; start the server with --library")
         return os.path.join(self.library, path)
+
+    def _write_rendered(self, rendered: Rendered, to: str, overwrite: bool) -> str:
+        """Save a render with its `[rendered]` table; the absolute path it went to."""
+        path = os.path.abspath(self._in_library(to))
+        if not path.lower().endswith(".toml"):
+            path += ".toml"
+        if os.path.exists(path) and not overwrite:
+            raise ToolFailure(f"{path} already exists; pass overwrite to replace it, or name "
+                              "another file")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        method_module.save(template_module.attached(rendered), path)
+        return path
 
     def _in_output(self, path: str) -> str:
         return path if os.path.isabs(path) else os.path.join(self.output, path)

@@ -20,8 +20,10 @@ display; `pytest-qt`'s `qtbot` owns the application and the event loop.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import os
+import sqlite3
 import sys
 import threading
 from dataclasses import replace
@@ -93,6 +95,7 @@ from clockwork.app.settings import Settings  # noqa: E402
 from clockwork.app.statepanel import StatePanel  # noqa: E402
 from clockwork.app.window import MainWindow  # noqa: E402
 from clockwork.app.worker import matches_wire  # noqa: E402
+from clockwork.method import template as templates  # noqa: E402
 from clockwork.method.text import render_pane  # noqa: E402
 from clockwork.mips import (  # noqa: E402
     Box,
@@ -2575,3 +2578,196 @@ def test_the_kept_root_is_the_setting_unless_the_environment_names_one(window, t
     monkeypatch.setenv(keep.ENV, str(tmp_path / "env"))
     assert window.kept_root() == str(tmp_path / "env")
     assert window.worker.owner.kept_root == ""  # a --fake window's owner keeps nothing
+
+
+# --- a rendered method in the window: attached, detached (lab record, task 94) ---------
+
+
+_WINDOW_TABLE = per_repetition_table(SCANS).replace(",500:B:0,", ",{b_ticks}:B:0,")
+
+WINDOW_TEMPLATE = f"""\
+template_schema = 1
+renders = 2
+start = [["{BOX}", "TBLSTRT"]]
+reset = [["{BOX}", "SMOD,LOC"], ["{BOX}", "SMOD,TBL"]]
+
+[knobs]
+b_ticks = {{ default = 500, min = 100, max = 520, unit = "ticks", description = "line B high" }}
+
+[labels]
+sample = {{ required = true, description = "what was sprayed" }}
+
+[constants]
+tick_us = 129.0
+
+[marks]
+b_off = {{ ms = "b_ticks * tick_us / 1000", description = "line B falls" }}
+
+[metadata]
+name = "window-template"
+created = 2026-09-27
+description = "make_method with a knob on line B."
+
+[acquisition]
+frames = 1
+scans = {SCANS}
+accumulations = {ACCUMULATIONS}
+repetition_mode = "per_repetition"
+keep_raw = true
+file_stem = "window-template"
+enable = {{ box = "{BOX}", channel = "A" }}
+
+[[boxes]]
+name = "{BOX}"
+port = "COM3"
+setup = ["STBLCLK,EXT", "STBLTRG,POS"]
+load = ["{_WINDOW_TABLE}"]
+arm = ["SMOD,TBL"]
+"""
+"""`make_method` as a template: the same table with line B's fall a knob, a label and a
+mark, so a window run of a rendered file has every kind of parameter to stamp."""
+
+
+def render_to(tmp_path, name: str = "cell", b_ticks: int = 400) -> str:
+    """A rendered method written as `render-template --to` writes it."""
+    rendered = templates.render(templates.loads_template(WINDOW_TEMPLATE),
+                                {"b_ticks": b_ticks}, {"sample": "test mixture"})
+    path = str(tmp_path / f"{name}.toml")
+    method_module.save(templates.attached(rendered), path)
+    return path
+
+
+def stamped(path: str) -> dict[str, str]:
+    """`Global_Params` by name, as text: what a manifest or mainspring reads back."""
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        return {name: value for name, value in conn.execute(
+            "SELECT ParamName, ParamValue FROM Global_Params")}
+
+
+def armed_on(window, qtbot, path: str) -> None:
+    """`ready_to_acquire` for a method file already on disk."""
+    assert window._load_method(path)
+    until(qtbot, lambda: window.worker.boxes and idle(window))
+    window.send(setup=True)
+    until(qtbot, lambda: idle(window) and window._armed)
+    window.start_console()
+    until(qtbot, lambda: window.worker.console is not None
+          and window.worker.console.alive and idle(window))
+
+
+def one_run(window, qtbot) -> object:
+    runs: list[object] = []
+    window.worker.run_done.connect(runs.append)
+    assert window.acquire_button.isEnabled(), window.problems.text()
+    window.acquire()
+    until(qtbot, lambda: runs and idle(window), timeout=180_000)
+    assert runs[0].complete, runs[0].text
+    return runs[0]
+
+
+def test_a_rendered_file_opens_attached_and_its_run_stamps_the_template_and_knobs(
+        window, tmp_path, qtbot):
+    armed_on(window, qtbot, render_to(tmp_path))
+    assert window.rendered is not None
+    assert window.provenance.isVisibleTo(window)
+    assert window.provenance.text() == (
+        "Rendered from window-template at b_ticks 400 ticks, sample 'test mixture'")
+
+    run = one_run(window, qtbot)
+    for path in (run.raw_path, run.summed_path):
+        values = stamped(path)
+        assert float(values["ClockworkKnobBTicks"]) == 400.0, path
+        assert values["ClockworkLabelSample"] == "test mixture"
+        assert float(values["ClockworkMarkBOffMs"]) == pytest.approx(400 * 129.0 / 1000)
+        assert int(values["ClockworkMarkBOffScan"]) == 400
+        assert values["ClockworkTemplateHash"] == templates.loads_template(
+            WINDOW_TEMPLATE).hash
+    assert window.rendered is not None, "a run does not detach the method"
+
+
+def test_editing_a_pane_detaches_once_and_the_run_stamps_as_hand_written(
+        window, tmp_path, qtbot):
+    armed_on(window, qtbot, render_to(tmp_path))
+    before = len(run_log(window))
+    pane = window.panes[BOX]
+    pane.set_text("# a note the trainee added\n" + pane.text())
+    window._pane_changed()
+    window._pane_changed()
+    said = [line for line in run_log(window)[before:] if "now a hand-written" in line]
+    assert len(said) == 1, run_log(window)[before:]
+    assert window.rendered is None and not window.provenance.isVisibleTo(window)
+
+    window.send(setup=True)
+    until(qtbot, lambda: idle(window)
+          and matches_wire(window._armed, window.build_method()))
+    values = stamped(one_run(window, qtbot).raw_path)
+    assert not any(name.startswith(("ClockworkKnob", "ClockworkTemplate", "ClockworkLabel",
+                                    "ClockworkMark")) for name in values)
+
+
+def test_a_file_whose_strings_no_longer_render_opens_hand_written_and_acquires(
+        window, tmp_path, qtbot):
+    path = render_to(tmp_path)
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text.replace('"STBLTRG,POS"', '"STBLTRG,POS", "# edited by hand"', 1))
+    armed_on(window, qtbot, path)
+    warned = [line for line in run_log(window) if "rendered from a template, but" in line]
+    assert len(warned) == 1 and "edited since it was rendered" in warned[0]
+    assert window.rendered is None
+    values = stamped(one_run(window, qtbot).raw_path)
+    assert "ClockworkKnobBTicks" not in values
+
+
+def test_saving_keeps_the_table_while_attached_and_drops_it_once_detached(
+        window, tmp_path, qtbot):
+    window._load_method(render_to(tmp_path))
+    until(qtbot, lambda: window.worker.boxes and idle(window))
+    kept = str(tmp_path / "kept.toml")
+    window.method_path = kept
+    window.save_method()
+    reopened = method_module.load(kept)
+    assert templates.reproduce(reopened)[1] == ""
+    assert dict(reopened.rendered_from.knobs) == {"b_ticks": 400}
+
+    window.frames.setValue(2)
+    dropped = str(tmp_path / "dropped.toml")
+    window.method_path = dropped
+    window.save_method()
+    assert window.rendered is None
+    assert method_module.load(dropped).rendered_from is None
+
+
+def test_a_queue_row_over_a_rendered_file_stamps_as_rendered(window, tmp_path, qtbot):
+    ready_to_acquire(window, qtbot, tmp_path)
+    window.queue.add(runqueue.QueueRow(method_path=render_to(tmp_path, b_ticks=300)))
+    window.queue_panel.refresh()
+    runs: list[object] = []
+    window.worker.run_done.connect(runs.append)
+    window.start_queue()
+    until(qtbot, lambda: not window.queue.running and idle(window), timeout=300_000)
+    assert [row.state for row in window.queue.rows] == [runqueue.DONE]
+    assert float(stamped(runs[0].raw_path)["ClockworkKnobBTicks"]) == 300.0
+
+
+def test_the_library_lists_a_template_and_open_refuses_it_with_the_way_to_render(
+        qtbot, tmp_path):
+    (tmp_path / "template.toml").write_text(WINDOW_TEMPLATE, encoding="utf-8")
+    render_to(tmp_path)
+    dialog = LibraryDialog(str(tmp_path), {})
+    qtbot.addWidget(dialog)
+    rows = {dialog.table.item(row, 3).text(): row for row in range(dialog.table.rowCount())}
+    template_row = next(row for text, row in rows.items() if text.startswith("template;"))
+    rendered_row = next(row for text, row in rows.items() if text.startswith("rendered from"))
+    refused: list[bool] = []
+    dialog.refuse_template = lambda: refused.append(True)
+    dialog.table.selectRow(template_row)
+    assert dialog.open_button.isEnabled()
+    assert not dialog.diff_instrument_button.isEnabled()
+    dialog._open()
+    assert refused == [True] and dialog.chosen_path == ""
+    dialog.table.clearSelection()
+    dialog.table.selectRow(rendered_row)
+    dialog._open()
+    assert dialog.chosen_path.endswith("cell.toml")

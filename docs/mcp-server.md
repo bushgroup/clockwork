@@ -82,11 +82,11 @@ relative to the output directory, unless it is absolute.
 | Group | Tool | Arguments | Answers |
 |---|---|---|---|
 | Method | `list_templates` | none | Every template: its knobs (unit, default, range, integer or not, description), labels and marks, and what the standing limits allow of it |
-| | `list_methods` | none | Every hand-written method: name, hash, date, description, or the problem that stops it loading |
+| | `list_methods` | none | Every method: name, hash, date, description, which template and knob values a rendered one came from, or the problem that stops it loading |
 | | `load_method` | `method` | The method's canonical text and the same as structured fields |
 | | `diff_methods` | `a`, `b` | The two compared field by field and line by line, and whether anything a box is sent differs |
 | | `validate_method` | `method`, or `template` with `knobs` and `labels` | `problems` (does not load or render), `refusals` (clockwork would not acquire it), `cautions` (strings it cannot read well enough to check), and `ok` |
-| | `render_template` | `template`, `knobs`, `labels` | Every knob's value, the derived values, the marks in ms and as expected scans, the method's text and hash, its refusals, and where it lies outside the standing limits |
+| | `render_template` | `template`, `knobs`, `labels`, `to`, `overwrite` | Every knob's value, the derived values, the marks in ms and as expected scans, the method's text and hash, its refusals, and where it lies outside the standing limits; with `to`, also writes the rendered method to that file and answers where, under `written` |
 | Hardware | `discover_boxes` | a method or template under `--fake` | Which boxes answered, on which port, with which firmware |
 | | `read_box_state` | `boxes` (optional) | Every box's persistent settings read back, as the window's state panel shows them |
 | | `arm` | `request`, `initials`, a method or template, `setup`, `conditions`, `request_id`, `plan` | The request id, the stem the first file takes, what the boxes read back, the cold-start cautions, and the run record's path |

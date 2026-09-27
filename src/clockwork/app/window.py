@@ -77,7 +77,10 @@ from ..method import (
     Method,
     RfChannel,
     is_comment,
+    same_run,
 )
+from ..method import template as templates
+from ..method.template import Rendered
 from ..method.text import PaneResult, render_pane, split_trainee_file, start_order
 from ..owner import SeriesJob, SeriesResult
 from . import errors, runqueue
@@ -203,6 +206,16 @@ class MainWindow(QMainWindow):
         fields in the document rather than strings a trainee types -- so they are kept
         here across an edit and written back out unchanged (`method-file-format.md`)."""
 
+        self.rendered: Rendered | None = None
+        """The render the panes are attached to, or None for a hand-written method.
+
+        Set by opening a rendered file whose `[rendered]` table still reproduces its
+        strings (`templates.reproduce`), and cleared -- once, for good, with one line in
+        the run log -- by the first edit after which the panes no longer make the same run
+        (`same_run`). While it is set, an Acquire carries the template, knobs and labels
+        and the run stamps as rendered, exactly as a run Claude acquires from the template
+        does (lab record, task 94). Reopening the file is what attaches it again."""
+
         self.panes: dict[str, BoxPane] = {}
         self.readings: dict[str, Reading] = {}
         """The last state reading of each box, kept here rather than in the pane.
@@ -307,9 +320,21 @@ class MainWindow(QMainWindow):
             "and never typed: TARBTRG before TBLSTRT, box order within each. This is "
             "the experiment's order, not a pane's.")
 
+        self.provenance = QLabel("")
+        """Which template and knob values the panes are rendered from, while attached."""
+        self.provenance.setWordWrap(True)
+        self.provenance.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.provenance.setToolTip(
+            "This method was rendered from a template, and its runs stamp the template, "
+            "its knobs and its labels while the panes are unedited. The first edit that "
+            "changes what is sent makes it a hand-written method.")
+        self.provenance.setVisible(False)
+
         panes_and_order = QWidget()
         column = QVBoxLayout(panes_and_order)
         column.setContentsMargins(0, 0, 0, 0)
+        column.addWidget(self.provenance)
         column.addWidget(self.pane_box, 1)
         column.addWidget(QLabel("Start order"))
         column.addWidget(self.start_order)
@@ -805,6 +830,7 @@ class MainWindow(QMainWindow):
         # button back in that gap would be sending to boxes the queue is about to arm.
         busy = self._job is not None or self.queue.running
         method = self.build_method()
+        self._check_attached(method)
         problems = refusals(method) if method is not None else ["no boxes found yet"]
         notes = (list(method.warnings) + cautions(method)) if method is not None else []
         # The document's channel offset is sent to the console and stamped into the file
@@ -898,6 +924,9 @@ class MainWindow(QMainWindow):
             else:
                 self._complain("That method could not be opened", str(exc))
             return False
+        # Detached while the panes fill, one by one: a half-filled set is not the render,
+        # and judging it would detach the method before it had finished opening.
+        self._attach(None)
         self.method_path = path
         self.settings.method_path = path
         self.metadata = method.metadata
@@ -920,6 +949,14 @@ class MainWindow(QMainWindow):
         self._set_enable(acquisition.enable)
         for message in method.warnings:
             self.run_panel.say(f"{os.path.basename(path)}: {message}", warn=True)
+        if method.rendered_from is not None:
+            rendered, why = templates.reproduce(method)
+            if rendered is None:
+                self.run_panel.say(
+                    f"{os.path.basename(path)} was rendered from a template, but {why}. "
+                    "It is opened as a hand-written method, and its runs will not stamp "
+                    "the template or its knobs.", warn=True)
+            self._attach(rendered)
         self.statusBar().showMessage(f"opened {os.path.basename(path)}")
         if self.fake:
             # The stand-in rack is built from the method, so opening one is what gives
@@ -928,6 +965,31 @@ class MainWindow(QMainWindow):
             self.find_boxes()
         self._pane_changed()
         return True
+
+    def _attach(self, rendered: Rendered | None) -> None:
+        """Attach the panes to a render, or detach them silently, and say which above."""
+        self.rendered = rendered
+        self.provenance.setText(
+            templates.describe(rendered).capitalize() if rendered is not None else "")
+        self.provenance.setVisible(rendered is not None)
+
+    def _check_attached(self, method: Method | None) -> None:
+        """Detach, saying so once, where the panes no longer make the rendered run.
+
+        Every string, sequence and acquisition setting, and not the name, file stem or
+        ports, which the window assigns (`same_run`). One line in the run log rather than
+        a dialog: editing a rendered method is an ordinary thing to do, and what a trainee
+        needs is to know that its runs now stamp as hand-written.
+        """
+        rendered = self.rendered
+        if rendered is None or method is None or same_run(rendered.method, method):
+            return
+        self._attach(None)
+        name = os.path.basename(self.method_path) or "this method"
+        self.run_panel.say(
+            f"{name} is now a hand-written method: the panes or settings no longer match "
+            f"what its template renders at those knobs, so its runs will not stamp the "
+            "template or its knobs. Reopen the file to attach it again.", warn=True)
 
     def save_method(self, ask: bool = False) -> None:
         method = self.build_method()
@@ -948,6 +1010,12 @@ class MainWindow(QMainWindow):
             self.metadata = replace(
                 self.metadata, name=os.path.splitext(os.path.basename(path))[0])
             method = replace(method, metadata=self.metadata)
+        # An attached method keeps its `[rendered]` table, so the file still says what
+        # made it; a detached one is a hand-written method and is saved as one.
+        self._check_attached(method)
+        if self.rendered is not None:
+            method = replace(method,
+                             rendered_from=templates.attached(self.rendered).rendered_from)
         try:
             method_module.save(method, path)
         except (OSError, method_module.MethodError) as exc:
@@ -1126,6 +1194,11 @@ class MainWindow(QMainWindow):
             self.start_console()
         self.settings.conditions = self.conditions.toPlainText()
         self.settings.replicates = self.replicates.value()
+        # Judged on the method this job carries, not on the last refresh: the owner renders
+        # the template again and refuses a render that is not of this method, so a stale
+        # attachment would cost a trainee a run rather than a stamp.
+        self._check_attached(method)
+        rendered = self.rendered
         job = Acquire(
             label="acquiring" if not replicate_only else "acquiring a replicate",
             method=method, instrument=self.instrument,
@@ -1135,6 +1208,9 @@ class MainWindow(QMainWindow):
             replicates=1 if replicate_only else self.replicates.value(),
             conditions=self.conditions.toPlainText(),
             replicate_only=replicate_only,
+            template=rendered.template_text if rendered is not None else "",
+            knobs=dict(rendered.knobs) if rendered is not None else {},
+            labels=dict(rendered.labels) if rendered is not None else {},
         )
         self.worker.submit(job)
         return job

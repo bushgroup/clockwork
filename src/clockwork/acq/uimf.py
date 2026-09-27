@@ -83,7 +83,7 @@ from mainspring.uimf import (
 from mainspring.uimf.writer import CLIENT_PARAM_ID_BASE, ParamDef
 
 from ..instrument import UNCALIBRATED, Instrument
-from ..method import Method, stamp
+from ..method import Method, same_run, stamp
 from ..method.template import Rendered, camel_case
 from .wire import ConsoleInfo, FrameRequest, TofWidth
 
@@ -1259,11 +1259,14 @@ def stamp_globals(
     `provenance` adds how the method was made, where that is more than a document
     somebody wrote: the template and knobs it was rendered from, and the series it was
     acquired in (`provenance_globals`). A render that is not of this method is refused,
-    since stamping it would say the file came from a knob setting it did not.
+    since stamping it would say the file came from a knob setting it did not. "Of this
+    method" is `same_run`: every string, sequence and setting alike, the name, file stem
+    and ports aside, which the window assigns for each run of a rendered file it opened
+    (lab record, task 94).
     """
     record = stamp(method, console_version=console_version or None)
     rendered = provenance.rendered if provenance is not None else None
-    if rendered is not None and stamp(rendered.method)["method_hash"] != record["method_hash"]:
+    if rendered is not None and not same_run(rendered.method, method):
         raise ValueError(
             "the render in this provenance is not of the method being acquired: a method "
             "changed after it was rendered is a hand-written one, and stamps as one"

@@ -439,6 +439,41 @@ def test_the_cold_start_check_refuses_an_undeclared_dc_bias_before_anything_is_s
     assert toolbox.call("status")["last_armed"]["stem"] == armed["stem"]
 
 
+def test_render_template_to_a_file_writes_a_rendered_method_and_will_not_overwrite(
+        library, tmp_path):
+    """`to` is `render-template --to` (lab record, task 94): the file carries its
+    template, knobs and labels, reproduces, and lists as a rendered method."""
+    toolbox = Toolbox(object(), library=library, output=str(tmp_path / "runs"))
+    chosen = {"template": "line-b.toml", "knobs": {"b_ticks": 400}, "labels": LABELS}
+    answer = toolbox.call("render_template", {**chosen, "to": "cells/b-400"})
+    written = answer["written"]
+    assert answer["ok"] and written == os.path.join(library, "cells", "b-400.toml")
+    loaded = method_module.load(written)
+    rendered, why = template_module.reproduce(loaded)
+    assert why == "" and dict(loaded.rendered_from.knobs) == {"b_ticks": 400}
+    assert method_module.stamp(loaded)["method_hash"][:12] == answer["hash"][:12]
+    assert rendered.labels == LABELS
+
+    with pytest.raises(ToolFailure, match="already exists; pass overwrite"):
+        toolbox.call("render_template", {**chosen, "knobs": {"b_ticks": 300},
+                                         "to": written})
+    assert dict(method_module.load(written).rendered_from.knobs) == {"b_ticks": 400}
+    toolbox.call("render_template", {**chosen, "knobs": {"b_ticks": 300}, "to": written,
+                                     "overwrite": True})
+    assert dict(method_module.load(written).rendered_from.knobs) == {"b_ticks": 300}
+
+    # A render with a problem writes nothing.
+    refused = toolbox.call("render_template", {**chosen, "knobs": {"b_ticks": 9999},
+                                               "to": "cells/too-far.toml"})
+    assert not refused["ok"] and not os.path.exists(
+        os.path.join(library, "cells", "too-far.toml"))
+
+    listed = {entry["path"]: entry for entry in toolbox.call("list_methods")["methods"]}
+    assert listed["cells/b-400.toml"]["rendered"].startswith(
+        "rendered from mcp-test at b_ticks 300 ticks")
+    assert "rendered" not in listed["line-b-default.toml"]
+
+
 def test_an_owner_refuses_a_render_that_does_not_reproduce_the_method(fake_owner, library,
                                                                        tmp_path):
     rendered = template_module.render(template_module.loads_template(TEMPLATE), {}, LABELS)

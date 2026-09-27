@@ -31,13 +31,14 @@ with a digit (§5, which §6.6 extends).
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
 import math
 import re
 import tomllib
 from dataclasses import dataclass, field
 
-from . import SCHEMA_VERSION, Method, MethodError
+from . import SCHEMA_VERSION, Method, MethodError, RenderedFrom, same_run
 from . import from_dict as _method_from_dict
 
 TEMPLATE_SCHEMA = 1
@@ -1006,6 +1007,73 @@ def render(
     return _render(template, dict(knobs or {}), dict(labels or {}), check_labels=True)
 
 
+# --- a rendered method on disk ------------------------------------------------------------
+
+
+def attached(rendered: Rendered) -> Method:
+    """The render's method carrying its `[rendered]` table, ready for `method.save`.
+
+    What `render-template --to` writes (lab record, task 94): the template's text rather
+    than its path, every knob, and the labels given.
+    """
+    provenance = RenderedFrom(
+        template_hash=rendered.template_hash, template=rendered.template_text,
+        knobs=tuple(rendered.knobs.items()), labels=tuple(rendered.labels.items()))
+    return dataclasses.replace(rendered.method, rendered_from=provenance)
+
+
+def reproduce(method: Method) -> tuple[Rendered | None, str]:
+    """Render a method's `[rendered]` table again, and say whether it is still the method.
+
+    Answers `(render, "")` where the embedded template, at the recorded knobs and labels,
+    renders to what `method` sends and acquires (`same_run`), and `(None, why)` otherwise:
+    no table, a hash that is not the text's, a template that no longer loads or renders,
+    or strings edited since. Never raises, because every one of those opens the file as
+    the hand-written method it is, with the sentence as its one warning.
+    """
+    provenance = method.rendered_from
+    if provenance is None:
+        return None, "this method carries no [rendered] table"
+    text = provenance.template.replace("\r\n", "\n")
+    if hashlib.sha256(text.encode("utf-8")).hexdigest() != provenance.template_hash:
+        return None, ("its [rendered] template_hash is not the hash of the template text "
+                      "beside it, so the record of which template made it is not to be "
+                      "trusted")
+    try:
+        rendered = render(loads_template(text), dict(provenance.knobs),
+                          dict(provenance.labels))
+    except TemplateError as exc:
+        return None, f"its template no longer renders at the recorded values: {exc}"
+    if not same_run(rendered.method, method):
+        return None, ("its strings or settings have been edited since it was rendered, so "
+                      "they are no longer what the template renders at those values")
+    return rendered, ""
+
+
+def describe(rendered: Rendered | RenderedFrom) -> str:
+    """`rendered from <name> at <knob> <value> <unit>, ...`: the caption and library line.
+
+    Every knob in the template's order, with its unit, and the labels after them. From a
+    `RenderedFrom` alone, which is what a library scan has, the template's name and units
+    are read off the embedded text where it loads, and left out where it does not.
+    """
+    if isinstance(rendered, RenderedFrom):
+        try:
+            template = loads_template(rendered.template)
+        except TemplateError:
+            template = None
+    else:
+        template = rendered.template
+    knobs, labels = dict(rendered.knobs), dict(rendered.labels)
+    short = rendered.template_hash[:8]
+    units = {knob.name: knob.unit for knob in template.knobs} if template else {}
+    name = template.name if template is not None and template.name else f"template {short}"
+    values = [f"{knob} {format_number(value)}" + (f" {units[knob]}" if units.get(knob) else "")
+              for knob, value in knobs.items()]
+    values += [f"{label} {value!r}" for label, value in labels.items()]
+    return f"rendered from {name}" + (f" at {', '.join(values)}" if values else "")
+
+
 __all__ = [
     "DECIMALS",
     "TEMPLATE_SCHEMA",
@@ -1016,12 +1084,15 @@ __all__ = [
     "Rendered",
     "Template",
     "TemplateError",
+    "attached",
     "camel_case",
+    "describe",
     "format_number",
     "from_dict",
     "is_template",
     "load_template",
     "loads_template",
     "render",
+    "reproduce",
     "round_half_away",
 ]

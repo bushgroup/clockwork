@@ -152,7 +152,9 @@ two are equal for a correct template, and the comparison is the first thing to r
 edit to it.
 
 A template handed to the method loader as if it were a method is refused with a sentence
-saying so, since a library directory holds both kinds of document.
+saying so, and naming the two ways to render it to a method:
+`clockwork render-template --to FILE`, or asking Claude. A library directory holds both kinds of document, and the window's
+method library lists a template as a template, with its knobs.
 
 ## What a rendered run records
 
@@ -197,9 +199,13 @@ method stamps none of the template parameters, a run outside any series stamps n
 series parameters, a series acquired in planned order stamps no seed, and a label left empty is
 not stamped. Absence therefore means a method written by hand or a run acquired ad hoc.
 
-A render is stamped only onto the method it rendered. A method edited after rendering is a
-hand-written method, and an acquisition that attaches a render to any other method is refused
-before a file is created.
+A render is stamped only onto the method it rendered: the same strings on every box, the same
+declared analog state, start and reset sequences and acquisition settings. The name, the file
+stem and the ports may differ, since the window assigns the last two for each run. A method
+edited after rendering is a hand-written method, and an acquisition that attaches a render to
+any other method is refused before a file is created. A rendered method saved to a file carries
+its template with it, in the `[rendered]` table
+[`method-file-format.md`](method-file-format.md#where-a-rendered-method-came-from) describes.
 
 To read one of these parameters, look it up by name. The fixed parameters have fixed IDs in
 clockwork's block, 2001 to 2099, whereas the per-template parameters are numbered upward from

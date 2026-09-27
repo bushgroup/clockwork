@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 from ..method import Method
 from .boxstate import Reading
 from .methodlib import (
+    TEMPLATE_REFUSAL,
     BoxDiff,
     FieldDiff,
     LibraryEntry,
@@ -172,16 +173,26 @@ class LibraryDialog(QDialog):
 
     def _update_buttons(self) -> None:
         selected = self._selected()
+        methods = [entry for entry in selected if not entry.is_template]
+        # Open stays pressable on a template, so that pressing it says how a method is
+        # made from one; the diffs compare methods and have nothing to say about it.
         self.open_button.setEnabled(len(selected) == 1)
-        self.diff_methods_button.setEnabled(len(selected) == 2)
-        self.diff_instrument_button.setEnabled(len(selected) == 1)
+        self.diff_methods_button.setEnabled(len(methods) == 2 == len(selected))
+        self.diff_instrument_button.setEnabled(len(methods) == 1 == len(selected))
 
     def _open(self) -> None:
         selected = self._selected()
         if len(selected) != 1:
             return
+        if selected[0].is_template:
+            self.refuse_template()
+            return
         self.chosen_path = selected[0].path
         self.accept()
+
+    def refuse_template(self) -> None:
+        """What Open says of a template; a method of its own so that a test can answer."""
+        QMessageBox.information(self, "A template is not a method", TEMPLATE_REFUSAL)
 
     def _diff_methods(self) -> None:
         selected = self._selected()

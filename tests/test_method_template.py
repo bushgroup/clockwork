@@ -1,5 +1,7 @@
 """Method templates: load, validate, render, and what the wire format requires of a hole."""
 
+import dataclasses
+import hashlib
 import tomllib
 
 import pytest
@@ -373,3 +375,125 @@ def test_load_template_reads_a_file_and_normalizes_its_line_endings(tmp_path):
     assert t.defaults() == {"pulse_ms": 1.5, "cycles": 10, "wait_ms": 10.0}
     with pytest.raises(KeyError):
         t.knob("duration_ms")
+
+
+# --- a rendered method on disk: the [rendered] table (lab record, task 94) --------------
+
+
+def saved_render(tmp_path, knobs=None, *, text: str = TEMPLATE) -> str:
+    """The fixture rendered at `knobs` and written as `render-template --to` writes it."""
+    rendered = template.render(template.loads_template(text), knobs or {"pulse_ms": 2.0},
+                               LABELS)
+    path = str(tmp_path / "cell.toml")
+    method.save(template.attached(rendered), path)
+    return path
+
+
+def test_a_rendered_file_carries_its_template_knobs_and_labels_and_reproduces(tmp_path):
+    path = saved_render(tmp_path)
+    loaded = method.load(path)
+    provenance = loaded.rendered_from
+    assert provenance is not None and loaded.warnings == ()
+    assert provenance.template == TEMPLATE
+    assert dict(provenance.knobs) == {"pulse_ms": 2.0, "cycles": 10, "wait_ms": 10.0}
+    assert dict(provenance.labels) == LABELS
+    # Embedded as a literal string, so the file shows the template as it was written.
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    assert "template = '''\ntemplate_schema = 1" in text and '\\"' not in text
+
+    rendered, why = template.reproduce(loaded)
+    assert why == "" and rendered is not None
+    assert rendered.knobs["pulse_ms"] == 2.0 and rendered.labels == LABELS
+    assert template.describe(rendered) == (
+        "rendered from smoke-test at pulse_ms 2 ms, cycles 10, wait_ms 10 ms, "
+        "sample 'polyalanine'")
+    assert template.describe(provenance) == template.describe(rendered)
+
+
+def test_the_table_is_not_part_of_the_method_so_a_hand_copy_stamps_alike(tmp_path):
+    loaded = method.load(saved_render(tmp_path))
+    copied = method.loads(method.dumps(loaded))
+    assert copied.rendered_from is None and loaded.rendered_from is not None
+    assert copied == loaded
+    assert method.stamp(copied)["method_hash"] == method.stamp(loaded)["method_hash"]
+    assert "[rendered]" not in method.stamp(loaded)["method_text"]
+
+
+def test_a_template_that_cannot_be_a_literal_string_is_escaped_and_reads_back(tmp_path):
+    text = TEMPLATE.replace('description = "A minimal two-box method for tests."',
+                            "description = \"It's '''quoted'''.\"")
+    loaded = method.load(saved_render(tmp_path, text=text))
+    assert loaded.rendered_from is not None and loaded.rendered_from.template == text
+    assert template.reproduce(loaded)[1] == ""
+
+
+def edited_file(path: str, old: str, new: str) -> None:
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    assert old in text, old
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text.replace(old, new, 1))
+
+
+def test_a_file_edited_since_it_was_rendered_opens_but_does_not_reproduce(tmp_path):
+    path = saved_render(tmp_path)
+    edited_file(path, '"SWFREQ,1,15000"', '"SWFREQ,1,16000"')
+    loaded = method.load(path)
+    assert loaded.rendered_from is not None
+    rendered, why = template.reproduce(loaded)
+    assert rendered is None and "edited since it was rendered" in why
+
+
+def test_a_hash_that_is_not_the_texts_does_not_reproduce(tmp_path):
+    path = saved_render(tmp_path)
+    loaded = method.load(path)
+    edited_file(path, loaded.rendered_from.template_hash, "0" * 64)
+    rendered, why = template.reproduce(method.load(path))
+    assert rendered is None and "template_hash is not the hash" in why
+
+
+def test_a_template_that_no_longer_renders_at_the_recorded_knobs_does_not_reproduce(
+        tmp_path):
+    path = saved_render(tmp_path, {"pulse_ms": 4.0})
+    edited_file(path, "min = 0.5, max = 5.0", "min = 0.5, max = 3.0")
+    loaded = method.load(path)
+    # The embedded text changed, so the hash is recomputed to isolate the render.
+    text = loaded.rendered_from.template
+    edited_file(path, loaded.rendered_from.template_hash,
+                hashlib.sha256(text.encode("utf-8")).hexdigest())
+    rendered, why = template.reproduce(method.load(path))
+    assert rendered is None and "no longer renders" in why and "pulse_ms" in why
+
+
+@pytest.mark.parametrize("old, new, said", [
+    ('template_hash = "', 'template_hash = 7\nwas = "', "template_hash"),
+    ("[rendered.knobs]\npulse_ms = 2.0", "[rendered.knobs]\npulse_ms = \"two\"",
+     "knobs.pulse_ms"),
+    ("[rendered.labels]", "[rendered.labels]\nsurprise = 3", "labels.surprise"),
+])
+def test_a_malformed_table_is_dropped_with_one_warning_and_the_method_still_loads(
+        tmp_path, old, new, said):
+    path = saved_render(tmp_path)
+    edited_file(path, old, new)
+    loaded = method.load(path)
+    assert loaded.rendered_from is None
+    assert len(loaded.warnings) == 1 and said in loaded.warnings[0]
+    assert "hand-written" in loaded.warnings[0]
+
+
+def test_same_run_ignores_what_a_window_assigns_and_nothing_else():
+    rendered = template.render(loads(), {"pulse_ms": 2.0}, LABELS)
+    base = rendered.method
+    boxes = tuple(reversed(tuple(
+        dataclasses.replace(box, port=f"COM{9 + i}") for i, box in enumerate(base.boxes))))
+    assigned = dataclasses.replace(
+        base, boxes=boxes,
+        metadata=dataclasses.replace(base.metadata, name="renamed"),
+        acquisition=dataclasses.replace(base.acquisition, file_stem="260927_ZZ_001"))
+    assert method.same_run(base, assigned)
+    assert not method.same_run(base, dataclasses.replace(
+        base, acquisition=dataclasses.replace(base.acquisition, frames=2)))
+    assert not method.same_run(base, dataclasses.replace(base, start=base.start[::-1]))
+    assert not method.same_run(base, template.render(loads(), {"pulse_ms": 2.5},
+                                                     LABELS).method)

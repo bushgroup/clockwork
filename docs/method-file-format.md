@@ -78,6 +78,9 @@ ARB boxes have neither.
 - `[[boxes]]` is an array of tables, one per box, each naming the box, its COM port, its
   strings in three phases, and optionally the DC bias and RF settings it should hold.
 - `start` and `reset` are the two ordered cross-box sequences, written as `[box, command]` pairs.
+- `rendered` is optional and appears only in a method written by rendering a template. It says
+  which template made the method and at which knob values, and is described
+  [below](#where-a-rendered-method-came-from).
 
 `start` and `reset` are top-level keys and belong above the first `[[boxes]]` table. TOML gives a
 bare key to the table that precedes it, so a `start` written at the foot of the file becomes part
@@ -349,6 +352,68 @@ labels and marks, and a run acquired in a series adds its place in the series; b
 a stable key for grouping acquisitions by the method that produced them. The file name is not one
 of the fields: a technical replicate is the same method written to a different file, so every
 replicate of one method stamps to the same hash.
+
+## Where a rendered method came from
+
+A template rendered to a file, with `clockwork render-template --to FILE` or by asking Claude,
+produces an ordinary method with one more table at its foot. The table carries the template the
+method was rendered from and the values it was rendered at, so that a run of the file records
+its knobs, labels and marks exactly as a run Claude acquires from the template does.
+
+```toml
+[rendered]
+template_hash = "6b9bde70c9357e9a19a77b1124833f6b9e0f612a9cee2cee82ddfba06e39d8d6"
+template = '''
+template_schema = 1
+renders = 2
+...
+'''
+
+[rendered.knobs]
+pulse_ms = 2.0
+cycles = 10
+
+[rendered.labels]
+sample = "polyalanine"
+```
+
+| Key | Content |
+|---|---|
+| `template_hash` | SHA-256 of the template document, line endings normalized to LF |
+| `template` | The template document, in full |
+| `knobs` | Every knob's value, turned or left at its default |
+| `labels` | Every label given at render time |
+
+The template is embedded rather than named by path. A folder of rendered methods copied to
+another computer, or kept after its template was edited, still says what made each one, and no
+path in it can go stale.
+
+The table is not part of the method. The provenance stamp's hash and text leave it out, so a
+rendered file and a copy of its strings typed by hand stamp to the same `method_hash`, and two
+methods that differ only in their `[rendered]` tables compare as equal.
+
+A rendered method is **attached** while what it would send is still what its template renders,
+and **detached** once it is not. Clockwork decides this in two places.
+
+1. When the file is opened, clockwork renders the embedded template again at the recorded knobs
+   and labels and compares the result with the file's own strings. A file whose table is
+   malformed, whose hash does not match its template text, or whose strings no longer match the
+   render opens as a hand-written method, with one warning saying why.
+2. While the method is open in the window, every edit is compared the same way. The first edit
+   that changes what would be sent detaches the method, the run log says so once, and from then
+   on it runs and saves as a hand-written method.
+
+The comparison covers every box's strings and declared analog state, the start and reset
+sequences, and the acquisition settings. It leaves out the name, description and date, the file
+stem and the ports, which the window assigns for each run and which change nothing a box is
+sent. An attached method's runs stamp the template, knobs, labels and marks listed in
+[`template-file-format.md`](template-file-format.md#what-a-rendered-run-records); a detached
+method's runs stamp none of them. Saving an attached method keeps its `[rendered]` table, and
+saving a detached one drops it.
+
+Detaching never stops a run. The standing limits in
+[`instrument-limits.md`](instrument-limits.md) apply only to what Claude sends, so the window
+runs an attached method, a detached one and a hand-written one alike.
 
 ## Validation
 

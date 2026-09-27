@@ -209,6 +209,48 @@ period, collision energy, whatever the day's method does not already state as a 
 The lone **Replicate** button beside Acquire runs one more acquisition off the last run's own
 readback, for the acquisition taken after the fact rather than counted up front.
 
+## A method rendered from a template
+
+A template is a method with holes in its strings and named knobs that fill them, such as a hold
+time or a guard voltage ([`template-file-format.md`](template-file-format.md)). The window opens
+methods, not templates, so a template becomes something to run by rendering it at chosen knob
+values into a method file. There are two ways to get one.
+
+- **Ask Claude**, for example for "the bradykinin CLOCK method with a 25 ms hold, as a file in
+  my folder", or for one file per cell of a grid of holds and guard voltages.
+- **From a shell**, with `render-template` and `--to`, as below. An existing file is replaced
+  only with `--overwrite`.
+
+```
+clockwork render-template --template bradykinin-clock/template.toml --knobs duration_ms=25 --labels sample=bradykinin --to cells/25ms.toml
+```
+
+A rendered file opens in the window like any other method, into the same panes, and can be sent,
+acquired, replicated and put in the run queue. What it adds is a record of where it came from:
+the template, the knob values and the labels are embedded at the foot of the file. The line above
+the panes names them, for example *Rendered from bradykinin-clock at duration_ms 25 ms*, and every
+file acquired from it records each knob, label and mark as its own parameter, so a table of a
+week's runs can be sorted by hold time without anyone reading the strings.
+
+This holds while the method is **attached**, which is for as long as what the panes would send is
+still what the template renders at those values. The first edit that changes that, a table tick,
+a setup line, a comment or the number of frames, **detaches** it. The run log says so once, the
+line above the panes goes away, and from then on the method runs and saves as an ordinary
+hand-written one, whose files record no knobs. Nothing is refused either way. Reopening the file
+attaches it again, as long as the file itself is unedited. A file whose strings were edited in a
+text editor after it was rendered opens detached, with one warning in the run log saying why.
+
+Changing the name, the output directory or the stem does not detach a method, and neither does a
+box answering on a different COM port, since none of those changes what a box is sent.
+
+Templates are listed in the method library too, marked as templates with their knobs and ranges.
+**Open into panes** on a template explains how to render it instead of opening it.
+
+Anyone may edit a template, in a text editor, and check it with
+`clockwork validate-method --template PATH`. Note that an edited template has a new hash, and the instrument's standing limits
+list templates by hash, so Claude cannot run an edited template until its entry in the limits is
+updated. The window is not affected, because the limits apply only to what Claude sends.
+
 ## The run queue
 
 To run a series of samples or conditions unattended, open **Run > Run queue** and add a row

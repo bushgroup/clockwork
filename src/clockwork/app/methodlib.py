@@ -28,16 +28,21 @@ import difflib
 import glob
 import itertools
 import os
+import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from .. import method as method_module
 from ..method import Method
+from ..method import template as templates
 from .boxstate import Reading, StateTable, state_table
 
 __all__ = [
     "HASH_DIGITS",
+    "METHOD",
     "PHASES",
+    "TEMPLATE",
+    "TEMPLATE_REFUSAL",
     "BoxDiff",
     "FieldDiff",
     "LibraryEntry",
@@ -59,6 +64,17 @@ date.
 
 PHASES: tuple[str, ...] = ("setup", "load", "arm")
 
+METHOD = "method"
+TEMPLATE = "template"
+
+TEMPLATE_REFUSAL = (
+    "This is a method template, not a method: it has holes that knob values fill, and the "
+    "window opens methods only. Render it to a method file with clockwork render-template "
+    "--template PATH --to FILE, or ask Claude for the method you want; then open that file "
+    "here or add it to the run queue.")
+"""What "Open into panes" says of a template (lab record, task 94): no knob panel in the
+window, by decision, so the sentence names the two ways a method is made from one."""
+
 
 @dataclass(frozen=True, slots=True)
 class LibraryEntry:
@@ -76,10 +92,22 @@ class LibraryEntry:
     created: _dt.date | None = None
     description: str = ""
     problem: str = ""
+    kind: str = METHOD
+    """`method` or `template`. A template's `hash` is the template's own, which is what
+    the standing limits key it by, and its description lists its knobs; it cannot be
+    opened into panes or diffed, only rendered (`TEMPLATE_REFUSAL`)."""
+    rendered: str = ""
+    """For a method rendered from a template, `rendered from <name> at <knobs>`, and
+    empty for one written by hand. Read off the file's `[rendered]` table; whether it
+    still reproduces is decided when the file is opened, not when it is listed."""
 
     @property
     def ok(self) -> bool:
         return not self.problem
+
+    @property
+    def is_template(self) -> bool:
+        return self.kind == TEMPLATE
 
 
 def scan_library(directory: str) -> list[LibraryEntry]:
@@ -108,21 +136,59 @@ def scan_library(directory: str) -> list[LibraryEntry]:
 def _entry(path: str) -> LibraryEntry:
     stem = os.path.splitext(os.path.basename(path))[0]
     try:
-        loaded = method_module.load(path)
-    except (OSError, method_module.MethodError) as exc:
+        with open(path, "rb") as handle:
+            data = tomllib.load(handle)
+    except OSError as exc:
+        return LibraryEntry(path=path, name=stem, problem=str(exc))
+    except tomllib.TOMLDecodeError as exc:
+        return LibraryEntry(path=path, name=stem, problem=f"invalid TOML: {exc}")
+    if templates.is_template(data):
+        return _template_entry(path, stem)
+    try:
+        loaded = method_module.from_dict(data)
+    except method_module.MethodError as exc:
         return LibraryEntry(path=path, name=stem, problem=str(exc))
     digest = method_module.stamp(loaded)["method_hash"][:HASH_DIGITS]
+    rendered = (templates.describe(loaded.rendered_from)
+                if loaded.rendered_from is not None else "")
     return LibraryEntry(
         path=path,
         name=loaded.metadata.name,
         hash=digest,
         created=loaded.metadata.created,
-        description=loaded.metadata.description,
+        description="; ".join(part for part in (rendered, loaded.metadata.description)
+                              if part),
+        rendered=rendered,
+    )
+
+
+def _template_entry(path: str, stem: str) -> LibraryEntry:
+    """A template as the library lists it: named, hashed, and described by its knobs."""
+    try:
+        loaded = templates.load_template(path)
+    except (OSError, templates.TemplateError) as exc:
+        return LibraryEntry(path=path, name=stem, problem=str(exc), kind=TEMPLATE)
+    metadata = loaded.body.get("metadata", {})
+    created = metadata.get("created")
+    knobs = ", ".join(
+        f"{knob.name} {templates.format_number(knob.min)} to "
+        f"{templates.format_number(knob.max)}" + (f" {knob.unit}" if knob.unit else "")
+        for knob in loaded.knobs)
+    return LibraryEntry(
+        path=path,
+        name=loaded.name or stem,
+        hash=loaded.hash[:HASH_DIGITS],
+        created=created if isinstance(created, _dt.date) else None,
+        description=f"template; knobs {knobs}" if knobs else "template; no knobs",
+        kind=TEMPLATE,
     )
 
 
 def open_entry(entry: LibraryEntry) -> Method:
-    """Load the document an entry names. Raises where `entry.problem` already says why."""
+    """Load the document an entry names. Raises where `entry.problem` already says why,
+    and `MethodError` with `TEMPLATE_REFUSAL` for a template."""
+    if entry.is_template:
+        raise method_module.MethodError([TEMPLATE_REFUSAL])
     return method_module.load(entry.path)
 
 

@@ -266,6 +266,23 @@ class Step:
 
 
 @dataclass(frozen=True, slots=True)
+class RenderedFrom:
+    """A method file's `[rendered]` table: the template it was rendered from, and how.
+
+    The template's text is embedded rather than referenced by path, so a copied folder
+    of cell files still says what made each one and no path goes stale (lab record,
+    task 94). Read by `from_dict` for its shape only; whether the template at these
+    values still renders to the method's strings is `template.reproduce`'s question,
+    since this module does not render.
+    """
+
+    template_hash: str
+    template: str
+    knobs: tuple[tuple[str, int | float], ...] = field(default_factory=tuple)
+    labels: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True, slots=True)
 class Method:
     metadata: Metadata
     acquisition: Acquisition
@@ -279,6 +296,13 @@ class Method:
     Excluded from equality and from `to_dict`, so a document that loaded with
     warnings still round-trips: `dumps` writes the repaired strings, and loading
     that text again warns about nothing.
+    """
+    rendered_from: RenderedFrom | None = field(default=None, compare=False)
+    """The document's `[rendered]` table, or None for a method written by hand.
+
+    Excluded from equality, from `to_dict` and so from `stamp()`'s hash, for the
+    reason the format gives: a rendered file and a hand copy of its strings are the
+    same method. `save` writes it back; `dumps` does not.
     """
 
     def box(self, name: str) -> BoxMethod:
@@ -561,20 +585,75 @@ def _sequence(
     return tuple(steps) if ok else None
 
 
+RENDERED_KEYS = ("template_hash", "template", "knobs", "labels")
+
+
+def _rendered_from(data: dict, warnings: list[str]) -> RenderedFrom | None:
+    """`[rendered]`, where a document has one: read for its shape, never refused.
+
+    A table that is not the shape the format describes is dropped with one warning
+    rather than raised, because the strings above it are a whole method on their own
+    and a broken record of where they came from is no reason not to run them (lab
+    record, task 94): the file opens as the hand-written method it then is.
+    """
+    raw = data.get("rendered")
+    if raw is None:
+        return None
+    problems: list[str] = []
+    if not isinstance(raw, dict):
+        problems.append("expected a table")
+        raw = {}
+    for key in raw:
+        if key not in RENDERED_KEYS:
+            problems.append(f"{key!r} is not one of its keys")
+    digest = raw.get("template_hash")
+    text = raw.get("template")
+    if not isinstance(digest, str) or not digest:
+        problems.append("template_hash: expected the template's SHA-256")
+    if not isinstance(text, str) or not text.strip():
+        problems.append("template: expected the template document")
+    knobs: list[tuple[str, int | float]] = []
+    labels: list[tuple[str, str]] = []
+    for key, into, fits in (
+        ("knobs", knobs,
+         lambda value: isinstance(value, (int, float)) and not isinstance(value, bool)),
+        ("labels", labels, lambda value: isinstance(value, str)),
+    ):
+        table = raw.get(key, {})
+        if not isinstance(table, dict):
+            problems.append(f"{key}: expected a table")
+            continue
+        for name, value in table.items():
+            if fits(value):
+                into.append((name, value))
+            else:
+                problems.append(f"{key}.{name}: {value!r} is not a "
+                                + ("number" if key == "knobs" else "string"))
+    if problems:
+        warnings.append(
+            "rendered: " + "; ".join(problems) + ". Opened as a hand-written method, "
+            "since the table does not say which template made it")
+        return None
+    return RenderedFrom(template_hash=digest, template=text.replace("\r\n", "\n"),
+                        knobs=tuple(knobs), labels=tuple(labels))
+
+
 def from_dict(data: dict) -> Method:
     """Build and validate a `Method` from a parsed TOML document.
 
     Collects every problem before raising `MethodError`, so a trainee's typo-laden
     method reports all of it at once rather than one round trip per fix. Repairs
     that are safe to make silently are made and reported in `Method.warnings`
-    instead.
+    instead, and so is a malformed `[rendered]` table, which is dropped.
     """
     if "template_schema" in data:
         # One sentence rather than a line per template key: a library directory holds
-        # both kinds of document, and what a reader of this one needs is which it is.
+        # both kinds of document, and what a reader of this one needs is which it is,
+        # and how to get the other kind from it.
         raise MethodError([
-            "this document is a method template, not a method: it has holes to fill and is "
-            "rendered by clockwork.method.template before anything is sent"
+            "this document is a method template, not a method: it has holes to fill. "
+            "Render it to a method first, with clockwork render-template --to FILE or by "
+            "asking Claude, and open that"
         ])
 
     problems: list[str] = []
@@ -594,9 +673,11 @@ def from_dict(data: dict) -> Method:
     _no_unknown_keys(
         data,
         "(document)",
-        ("schema_version", "metadata", "acquisition", "boxes", "start", "reset"),
+        ("schema_version", "metadata", "acquisition", "boxes", "start", "reset",
+         "rendered"),
         problems,
     )
+    rendered_from = _rendered_from(data, warnings)
 
     metadata_raw = _require_table(data, "metadata", problems)
     metadata = None
@@ -744,6 +825,7 @@ def from_dict(data: dict) -> Method:
         start=start,
         reset=reset,
         warnings=tuple(warnings),
+        rendered_from=rendered_from,
     )
 
 
@@ -870,10 +952,77 @@ def dumps(method: Method) -> str:
     return tomli_w.dumps(to_dict(method))
 
 
+def document_text(method: Method) -> str:
+    """The text `save` writes: `dumps`, and the `[rendered]` table where there is one.
+
+    The table goes at the foot, after the boxes, so the method reads as it always has
+    and the template's text -- the longest thing in the file -- is out of its way.
+    """
+    text = dumps(method)
+    rendered = method.rendered_from
+    if rendered is None:
+        return text
+    return text + "\n" + _rendered_text(rendered)
+
+
+def _rendered_text(rendered: RenderedFrom) -> str:
+    """`[rendered]` as TOML, the template as a literal multi-line string.
+
+    Literal so the embedded template reads in the file exactly as it does in its own,
+    quotes unescaped. Where it cannot be one -- a template containing `'''`, ending in a
+    quote, or carrying a character a literal string may not -- `tomli_w` writes it as an
+    escaped basic string instead, which reads back to the same text.
+    """
+    head = tomli_w.dumps({"template_hash": rendered.template_hash})
+    text = rendered.template
+    literal = ("'''" not in text and not text.endswith("'")
+               and all(char in "\n\t" or (ord(char) >= 0x20 and ord(char) != 0x7F)
+                       for char in text))
+    if literal:
+        body = "template = '''\n" + text + "'''\n"
+    else:
+        body = tomli_w.dumps({"template": text})
+    # Nested under `rendered` here, so `tomli_w` writes the two headers itself; the
+    # `[rendered]` header and its keys above come first, as TOML needs.
+    tables = tomli_w.dumps({"rendered": {"knobs": dict(rendered.knobs),
+                                         "labels": dict(rendered.labels)}})
+    return ("# Where this method came from: the template it was rendered from and the values\n"
+            "# it was rendered at. Not part of the method; see docs/method-file-format.md.\n"
+            "[rendered]\n" + head + body + "\n" + tables)
+
+
 def save(method: Method, path: str) -> None:
-    """Write a method document to a TOML file."""
+    """Write a method document to a TOML file, its `[rendered]` table included."""
     with open(path, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(dumps(method))
+        handle.write(document_text(method))
+
+
+def run_dict(method: Method) -> dict:
+    """What a method sends and acquires, for `same_run`: `to_dict` less what a run assigns.
+
+    Out go the name, description and date, `file_stem` and every box's port, which the
+    window fills for each run and which change nothing a box is sent; the boxes are put
+    in name order, since the order the window's panes happen to stand in is the rack's
+    and not the experiment's. The start and reset lists keep their order, which is.
+    """
+    data = to_dict(method)
+    del data["metadata"]
+    del data["acquisition"]["file_stem"]
+    for box in data["boxes"]:
+        del box["port"]
+    data["boxes"].sort(key=lambda box: box["name"])
+    return data
+
+
+def same_run(a: Method, b: Method) -> bool:
+    """Whether two methods put the same strings on the wire and acquire the same way.
+
+    The one test of whether a render still describes a method (lab record, task 94):
+    the window asks it to decide whether its panes are still attached to the rendered
+    method they were opened from, and the stamp asks it before writing a render's knobs
+    into a file (`clockwork.acq.uimf.stamp_globals`).
+    """
+    return run_dict(a) == run_dict(b)
 
 
 def stamp(method: Method, *, console_version: str | None = None) -> dict[str, object]:
@@ -908,10 +1057,15 @@ __all__ = [
     "Enable",
     "BoxMethod",
     "Method",
+    "RENDERED_KEYS",
+    "RenderedFrom",
     "RfChannel",
     "Step",
     "declared_commands",
+    "document_text",
     "from_dict",
+    "run_dict",
+    "same_run",
     "is_comment",
     "to_dict",
     "loads",

@@ -18,6 +18,10 @@ import clockwork
 from clockwork import method as method_module
 from clockwork.app.boxstate import AGREES, DIFFERS, FOUND, Reading
 from clockwork.app.methodlib import (
+    TEMPLATE as TEMPLATE_KIND,
+)
+from clockwork.app.methodlib import (
+    TEMPLATE_REFUSAL,
     LibraryEntry,
     instrument_diff,
     method_diff,
@@ -25,7 +29,9 @@ from clockwork.app.methodlib import (
     scan_library,
 )
 from clockwork.method import BoxMethod, Metadata, Method, RfChannel
+from clockwork.method import template as templates
 from clockwork.mips import Box, FakeBox, read_state
+from test_method_template import LABELS, TEMPLATE
 
 BOX = "box1"
 
@@ -99,6 +105,46 @@ def test_the_golden_library_lists_both_experiments(name):
     entries = scan_library(directory)
     names = [entry.name for entry in entries]
     assert f"golden-{name}" in names
+
+
+# --- templates and rendered methods in the library (lab record, task 94) ---------------
+
+
+def test_a_template_is_listed_as_a_template_with_its_knobs_and_is_not_opened(tmp_path):
+    (tmp_path / "t.toml").write_text(TEMPLATE, encoding="utf-8")
+    [entry] = scan_library(str(tmp_path))
+    assert entry.ok and entry.is_template and entry.kind == TEMPLATE_KIND
+    assert entry.name == "smoke-test"
+    assert entry.hash == templates.loads_template(TEMPLATE).hash[:12]
+    assert entry.created == datetime.date(2026, 9, 6)
+    assert entry.description.startswith("template; knobs pulse_ms 0.5 to 5 ms, cycles 1 to 100")
+    with pytest.raises(method_module.MethodError) as exc_info:
+        open_entry(entry)
+    assert str(exc_info.value) == TEMPLATE_REFUSAL
+    assert "render-template" in TEMPLATE_REFUSAL and "Claude" in TEMPLATE_REFUSAL
+
+
+def test_a_template_that_does_not_load_is_listed_as_a_template_with_its_problem(tmp_path):
+    (tmp_path / "t.toml").write_text(TEMPLATE.replace("max = 5.0", "max = 1.0"),
+                                     encoding="utf-8")
+    [entry] = scan_library(str(tmp_path))
+    assert entry.is_template and not entry.ok and "pulse_ms" in entry.problem
+
+
+def test_a_rendered_method_is_described_by_its_template_and_knob_values(tmp_path):
+    rendered = templates.render(templates.loads_template(TEMPLATE), {"pulse_ms": 2.0},
+                                LABELS)
+    method_module.save(templates.attached(rendered), str(tmp_path / "cell.toml"))
+    method_module.save(rendered.method, str(tmp_path / "copy.toml"))
+    by_path = {os.path.basename(entry.path): entry for entry in scan_library(str(tmp_path))}
+    cell, copy = by_path["cell.toml"], by_path["copy.toml"]
+    assert cell.kind == copy.kind == "method"
+    assert cell.rendered.startswith("rendered from smoke-test at pulse_ms 2 ms")
+    assert cell.description == (f"{cell.rendered}; A minimal two-box method for tests.")
+    assert copy.rendered == "" and copy.description == "A minimal two-box method for tests."
+    # The table is not part of the method: both hash alike and both open.
+    assert cell.hash == copy.hash
+    assert open_entry(cell) == open_entry(copy)
 
 
 # --- method_diff -------------------------------------------------------------------------
