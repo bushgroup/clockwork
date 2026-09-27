@@ -2,7 +2,8 @@
 
 clockwork depends on `mainspring[fast]` for the fold's decode (lab record, task 34) and,
 since mainspring 1.7.0, for its write too: `UimfWriter.write_scans` encodes the summed
-frame through `decode.encode_frame_blobs`, three more kernels. A fresh process pays
+frame through `decode.encode_frame_blobs`, three more kernels, and since 1.9.0 for its
+sum, `sum_frames`' kernel. A fresh process pays
 2.5-4.7 s compiling the four decode kernels when no on-disk numba cache exists yet,
 against 0.9-1.4 s once one does (mainspring's task 04), and the encoders add their own
 compile on top. Unlike mainspring's own build, that cost lands inside clockwork's first
@@ -40,7 +41,7 @@ def main() -> int:
     os.environ["NUMBA_CACHE_DIR"] = SEED_DIR
 
     import numpy as np
-    from mainspring.uimf import decode
+    from mainspring.uimf import SparseFrame, decode, sum_frames
 
     if not decode.numba_available():
         print("numba is not importable in this environment; nothing to warm.")
@@ -68,6 +69,13 @@ def main() -> int:
             [blob, None, blob], dtype=dtype
         )
         assert values_out.dtype == dtype and int(counts.sum()) == 2 * bin_index.size
+        # The fold's sum, compiled since mainspring 1.9.0. Two frames, because one frame
+        # alone is handed back without reaching the kernel.
+        frame = SparseFrame(frame=1, scans=3, bins=4097, scan_start=scan_start,
+                            bin_index=np.concatenate([bin_index, bin_index]).astype(np.int32),
+                            intensity=np.concatenate([intensity, intensity]))
+        total = sum_frames([frame, frame])
+        assert total.intensity.dtype == dtype and total.intensity.tolist() == [2, 4, 6, 8] * 2
         print(f"warmed {type_name} ({dtype})")
 
     written = [

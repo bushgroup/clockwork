@@ -1029,8 +1029,13 @@ class Recording:
                 repetitions_planned=self._raw_globals.repetitions_planned,
                 extra=dict(self._raw_globals.extra),
             )
+            # An 8 KiB page for the companion only: its blobs run to tens of kilobytes,
+            # each an overflow chain, and at 8192 a beam-on companion's insert, commit
+            # and checkpoint took 6.5 s rather than 11 s for a file of the same size
+            # (mainspring 1.9.0). The raw file keeps SQLite's page, which is the
+            # console's to append to.
             self._summed = UimfWriter(self.summed_path, globals_,
-                                      overwrite=self._overwrite)
+                                      overwrite=self._overwrite, page_size=8192)
         return self._summed
 
     # --- how the run ended ----------------------------------------------------------------

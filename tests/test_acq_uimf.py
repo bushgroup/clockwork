@@ -399,9 +399,20 @@ def test_the_summed_file_is_todays_shape(tmp_path):
         start_chain(console, stream, settle=1.0, quiet=0.05)
         with Recording.create(tmp_path, method, geometry) as recording:
             summed = recording.summed_path
+            raw = recording.raw_path
             acquire(recording, console, stream, method)
             assert recording.frames_of(2) == [4, 5, 6]
         console.stop_acquire()
+
+    # The companion takes an 8 KiB page and the raw file keeps SQLite's, which the
+    # console appends to; both stay WAL.
+    for path, page in ((summed, 8192), (raw, 4096)):
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            assert conn.execute("PRAGMA page_size").fetchone()[0] == page
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        finally:
+            conn.close()
 
     opened = UimfFile(summed)
     assert opened.frame_numbers() == [1, 2]
