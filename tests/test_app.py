@@ -1381,7 +1381,12 @@ def test_the_panel_button_reads_only_its_own_box(window, tmp_path, qtbot):
     a trainee who has just changed one box's front panel should not pay for three.
     """
     load_into(window, tmp_path, make_method())
-    until(qtbot, lambda: window.worker.boxes and idle(window))
+    # Until the button is offered, not merely until the rack exists: `worker.boxes` is
+    # filled on the worker thread before the scan's `started_job` and `finished_job`
+    # reach this one, `idle` is as true before the first as after the second, and a
+    # `click()` on the button `_refresh_actions` greyed out at load does nothing.
+    until(qtbot, lambda: window.worker.boxes and idle(window)
+          and window.panes[BOX].state.refresh.isEnabled())
     window.panes[BOX].state.refresh.click()
     until(qtbot, lambda: idle(window) and window.panes[BOX].state.reading.state)
     assert "on demand" in window.panes[BOX].state.reading.when
