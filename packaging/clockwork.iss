@@ -55,6 +55,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
+[InstallDelete]
+; Everything a previous version installed under _internal goes first: Setup never deletes a
+; file the new build does not carry, so an upgrade would keep the old numba seed and the
+; old libraries beside the new ones (mainspring's lab record, task 34).
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
 Source: "..\dist\clockwork\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 

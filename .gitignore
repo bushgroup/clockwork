@@ -21,8 +21,9 @@ build/
 # tools/write_commit.py's build-time output: the commit a frozen .exe was built from,
 # written before every build and never tracked. A checkout has none and answers None.
 src/clockwork/_commit.py
-# tools/warm_numba_cache.py's build-time output, bundled into the .exe by
-# packaging/clockwork.spec; regenerated before every build, never tracked.
+# Where builds before mainspring 1.10.0 wrote a source-tree numba seed; the seed is now
+# written into dist/ by the built exe (tools/warm_numba_cache.py). Kept ignored so a stale
+# one left in a checkout is never tracked.
 packaging/numba_cache_seed/
 # tools/stage_console.py's build-time output: the acquisition console's exe, DLLs,
 # config.txt and app.h, copied from a lab-side build; regenerated before every build,

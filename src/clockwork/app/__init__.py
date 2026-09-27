@@ -153,23 +153,73 @@ def _open_report_file() -> str | None:
     return path if stream is not None else None
 
 
+SEEDED_MARKER = ".seeded-by"
+"""The file in the cache folder naming the executable whose seed was last copied in."""
+
+WARM_OPTION = "--warm-numba-cache"
+"""What the build runs the built `.exe` with, and a directory: compile into it and exit.
+
+Not an argparse option, because nobody but `tools/warm_numba_cache.py` has a reason to
+type it. The seed has to come from the frozen executable itself: numba stamps a frozen
+program's cache with the executable's modification time and size, which the installer
+preserves, so a cache compiled by any other interpreter is never read. mainspring 1.10.0
+makes a frozen program's numba cache one folder, `clockwork_uimf` under
+`NUMBA_CACHE_DIR`, where before it was a folder per launch directory under numba's own
+(mainspring's lab record, task 34).
+"""
+
+
+def _exe_stamp() -> str:
+    st = os.stat(sys.executable)
+    return f"{os.path.basename(sys.executable)} {int(st.st_mtime)} {st.st_size}"
+
+
 def _seed_numba_cache(cache_dir: str) -> None:
-    """Copy a build-time pre-warmed numba cache into `cache_dir`, on a frozen build's
-    first launch only (`tools/warm_numba_cache.py`; mirrors mainspring's
-    `viewer.app._seed_numba_cache`, task 07). Unseeded, the cost lands inside clockwork's
-    first fold rather than at launch, since the decode kernels are touched on the folding
-    thread, not at start (task 32's progress log).
+    """Copy the build's pre-warmed numba cache into `cache_dir`, once per executable
+    (`tools/warm_numba_cache.py`; mirrors mainspring's `viewer.app._seed_numba_cache`).
+    Unseeded, the cost lands inside clockwork's first fold rather than at launch, since
+    the decode kernels are touched on the folding thread, not at start (task 32's
+    progress log).
+
+    Once per executable rather than into an empty folder only: an upgrade lands on a
+    folder the previous version filled, and its seed must still arrive. A marker names
+    the executable (file name, modification time, size) whose seed was copied.
     """
     if not getattr(sys, "frozen", False):
         return
-    if os.path.isdir(cache_dir) and os.listdir(cache_dir):
-        return  # already seeded, or numba has already compiled into it
     import shutil
 
     bundle_root = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
     seed = os.path.join(bundle_root, "numba_cache_seed")
-    if os.path.isdir(seed):
-        shutil.copytree(seed, cache_dir, dirs_exist_ok=True)
+    if not os.path.isdir(seed):
+        return
+    marker = os.path.join(cache_dir, SEEDED_MARKER)
+    stamp = _exe_stamp()
+    try:
+        with open(marker, encoding="utf-8") as fh:
+            if fh.read().strip() == stamp:
+                return
+    except OSError:
+        pass
+    shutil.copytree(seed, cache_dir, dirs_exist_ok=True)
+    with open(marker, "w", encoding="utf-8") as fh:
+        print(stamp, file=fh)
+
+
+def _warm_numba_cache(directory: str) -> int:
+    """`WARM_OPTION`: compile every mainspring kernel into `directory`; an exit status."""
+    os.environ["NUMBA_CACHE_DIR"] = os.path.abspath(directory)
+    os.makedirs(os.environ["NUMBA_CACHE_DIR"], exist_ok=True)
+    from mainspring.uimf import decode
+
+    try:
+        decode.warm_kernels()
+    except Exception:  # noqa: BLE001 -- the build reads the status, not a traceback
+        return 1
+    # A frozen build that warmed without the locator wrote a cache nothing will read.
+    if getattr(sys, "frozen", False) and not decode.install_frozen_cache_locator():
+        return 1
+    return 0
 
 
 def _prepare_numba_cache() -> str:
@@ -440,6 +490,10 @@ def main(argv: list[str] | None = None) -> int:
     # there, whether or not `--self-check` is the argument that follows.
     sys.stdout = _GuardedStream(sys.stdout)
     sys.stderr = _GuardedStream(sys.stderr)
+
+    early = list(sys.argv[1:] if argv is None else argv)
+    if len(early) == 2 and early[0] == WARM_OPTION:
+        return _warm_numba_cache(early[1])
 
     parser = argparse.ArgumentParser(prog="clockwork")
     parser.add_argument("--version", action="store_true",

@@ -1,23 +1,24 @@
-"""Pre-compile mainspring's UIMF kernels and seed a cache to bundle into clockwork.exe.
+"""Seed the built clockwork.exe with its own compiled UIMF kernels, so an install compiles nothing.
+
+Run after PyInstaller and before Inno Setup; `tools/build_exe.ps1` does. It starts
+`dist\\clockwork\\clockwork.exe --warm-numba-cache <dir>` with `<dir>` the bundle's
+`_internal\\numba_cache_seed`, waits for it, and checks that every kernel landed in the one
+folder the installed program will look in, `clockwork_uimf` (mainspring's
+`decode.frozen_cache_folder`). `clockwork.app._seed_numba_cache` copies that seed into
+the per-user cache the first time each executable runs.
 
 clockwork depends on `mainspring[fast]` for the fold's decode (lab record, task 34) and,
-since mainspring 1.7.0, for its write too: `UimfWriter.write_scans` encodes the summed
-frame through `decode.encode_frame_blobs`, three more kernels, and since 1.9.0 for its
-sum, `sum_frames`' kernel. A fresh process pays
-2.5-4.7 s compiling the four decode kernels when no on-disk numba cache exists yet,
-against 0.9-1.4 s once one does (mainspring's task 04), and the encoders add their own
-compile on top. Unlike mainspring's own build, that cost lands inside clockwork's first
-fold rather than at window-open, because both sets are first touched on the folding
-thread, not at launch -- but it is the same fix, moved here from `tools/write_commit.py`'s
-sibling in mainspring (task 20, task 07): pay it once, at build time, rather than during
-the first acquisition.
+since mainspring 1.7.0, for its write too, and since 1.9.0 for its sum; the kernels are
+mainspring's (`decode.warm_kernels`: four decode, three encode, the sum, for all three
+intensity types). Unseeded, their compile lands inside the first fold, on the folding
+thread.
 
-Writes compiled kernels for every intensity dtype the format uses (ADC int32, TDC int16,
-FOLDED float32; `mainspring.uimf.decode.INTENSITY_DTYPES`) to
-`packaging/numba_cache_seed/`, which `packaging/clockwork.spec` bundles as data and
-`clockwork.app._seed_numba_cache` copies into the real per-user `NUMBA_CACHE_DIR` the
-first time it finds that directory empty. `tools/build_exe.ps1` runs this before every
-build; run it by hand only to inspect or refresh the seed on its own.
+Why the built executable and not this interpreter. numba stamps a frozen program's cache
+with `sys.executable`'s modification time and size, and a cache compiled from the source
+tree is stamped with a source file and filed under a hash of its path, so an installed
+copy never read the seed this script used to write (mainspring's lab record, task 34).
+Inno Setup rounds every installed file's modification time down to an even second, so the
+executable is rounded first and the installer has nothing left to change.
 
 Run:  uv run tools/warm_numba_cache.py
 """
@@ -25,68 +26,57 @@ Run:  uv run tools/warm_numba_cache.py
 from __future__ import annotations
 
 import os
+import pickle
 import shutil
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
-SEED_DIR = os.path.join(ROOT, "packaging", "numba_cache_seed")
+EXE = os.path.join(ROOT, "dist", "clockwork", "clockwork.exe")
+SEED_DIR = os.path.join(ROOT, "dist", "clockwork", "_internal", "numba_cache_seed")
+FOLDER = "clockwork_uimf"
+KERNELS = ("decode._k_lzf_sizes", "decode._k_lzf_expand", "decode._k_rlz_count",
+           "decode._k_rlz_fill", "decode._k_rlz_encode_sizes", "decode._k_rlz_encode_fill",
+           "decode._k_lzf_compress", "frame._k_sum_rows")
+
+
+def _stamp_of(index_path: str) -> tuple:
+    """The executable stamp numba pickled into one index file, as it reads it back."""
+    with open(index_path, "rb") as fh:
+        pickle.load(fh)  # numba's version
+        stamp, _ = pickle.loads(fh.read())
+    return tuple(stamp)
 
 
 def main() -> int:
-    # Numba reads NUMBA_CACHE_DIR at import time, so it must be set before the first
-    # `import numba` -- which `mainspring.uimf.decode` does lazily, on first call.
+    if not os.path.isfile(EXE):
+        print(f"{EXE} does not exist; build it first (tools/build_exe.ps1).")
+        return 1
+    st = os.stat(EXE)
+    os.utime(EXE, (st.st_atime, float(int(st.st_mtime) // 2 * 2)))
     shutil.rmtree(SEED_DIR, ignore_errors=True)
-    os.makedirs(SEED_DIR, exist_ok=True)
-    os.environ["NUMBA_CACHE_DIR"] = SEED_DIR
-
-    import numpy as np
-    from mainspring.uimf import SparseFrame, decode, sum_frames
-
-    if not decode.numba_available():
-        print("numba is not importable in this environment; nothing to warm.")
+    os.makedirs(SEED_DIR)
+    # The executable is windowed, so the exit status and the files it leaves are the
+    # whole answer.
+    status = subprocess.run([EXE, "--warm-numba-cache", SEED_DIR], timeout=600).returncode
+    if status != 0:
+        print(f"{EXE} --warm-numba-cache exited {status}.")
         return 1
-
-    # One compiled specialisation per element type: the fold's fill kernel's output
-    # array is dtype-specific, so each of the three the format uses needs its own compile.
-    for type_name in sorted(decode.INTENSITY_DTYPES):
-        dtype = decode.dtype_for(type_name)
-        bin_index = np.array([0, 3, 500, 4096], dtype=np.int64)
-        intensity = np.array([1, 2, 3, 4], dtype=dtype)
-        # The encoders with the argument types `write_scans` passes them: an int64 row
-        # pointer and an int64 bin index over a CSR block of several scans, one empty,
-        # with the intensities already in the element type. Anything else would compile
-        # a specialisation the fold never asks for and leave the one it does cold.
-        scan_start = np.array([0, 4, 4, 8], dtype=np.int64)
-        blobs = decode.encode_frame_blobs(
-            scan_start, np.concatenate([bin_index, bin_index]),
-            np.concatenate([intensity, intensity]), dtype, backend="numba",
-        )
-        assert blobs[1] == b"" and blobs[0] == blobs[2]
-        blob = decode.encode_intensities(bin_index, intensity, dtype, backend="pure")
-        assert blob == blobs[0]
-        counts, bins_out, values_out = decode.decode_frame_blobs(
-            [blob, None, blob], dtype=dtype
-        )
-        assert values_out.dtype == dtype and int(counts.sum()) == 2 * bin_index.size
-        # The fold's sum, compiled since mainspring 1.9.0. Two frames, because one frame
-        # alone is handed back without reaching the kernel.
-        frame = SparseFrame(frame=1, scans=3, bins=4097, scan_start=scan_start,
-                            bin_index=np.concatenate([bin_index, bin_index]).astype(np.int32),
-                            intensity=np.concatenate([intensity, intensity]))
-        total = sum_frames([frame, frame])
-        assert total.intensity.dtype == dtype and total.intensity.tolist() == [2, 4, 6, 8] * 2
-        print(f"warmed {type_name} ({dtype})")
-
-    written = [
-        os.path.join(dirpath, name)
-        for dirpath, _, names in os.walk(SEED_DIR)
-        for name in names
-    ]
-    if not written:
-        print(f"numba compiled with no on-disk output under {SEED_DIR}; nothing to bundle.")
+    folder = os.path.join(SEED_DIR, FOLDER)
+    names = os.listdir(folder) if os.path.isdir(folder) else []
+    missing = [k for k in KERNELS if not any(n.startswith(k + "-") and n.endswith(".nbi")
+                                             for n in names)]
+    stray = [n for n in os.listdir(SEED_DIR) if n != FOLDER]
+    if missing or stray:
+        print(f"seed incomplete: missing {missing or 'nothing'}, unexpected {stray or 'nothing'}")
         return 1
-    print(f"{len(written)} cache files written to {SEED_DIR}")
+    stamps = {_stamp_of(os.path.join(folder, n)) for n in names if n.endswith(".nbi")}
+    want = (os.stat(EXE).st_mtime, os.stat(EXE).st_size)
+    if stamps != {want}:
+        print(f"seed stamped {sorted(stamps)}, but the executable is {want}")
+        return 1
+    print(f"{len(names)} cache files for {len(KERNELS)} kernels in {folder}, stamped {want}")
     return 0
 
 

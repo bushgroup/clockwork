@@ -27,15 +27,9 @@ $buildDir = Join-Path $root "build"
 $exePath = Join-Path $distDir "clockwork\clockwork.exe"
 
 if (-not $SkipBuild) {
-    Write-Host "Warming the numba kernel cache for packaging/numba_cache_seed..." -ForegroundColor Cyan
-    uv run tools/warm_numba_cache.py
-    if ($LASTEXITCODE -ne 0) {
-        throw "Warming the numba cache failed (exit $LASTEXITCODE)."
-    }
-
     Write-Host "Recording the commit this build is built from..." -ForegroundColor Cyan
-    # Gitignored, rewritten before every build; left in place afterwards, like the
-    # numba seed above (lab record, task 32; mirrors mainspring's task 20).
+    # Gitignored, rewritten before every build; left in place afterwards (lab record,
+    # task 32; mirrors mainspring's task 20).
     uv run tools/write_commit.py
     if ($LASTEXITCODE -ne 0) {
         throw "Recording the build commit failed (exit $LASTEXITCODE)."
@@ -66,6 +60,15 @@ if (-not $SkipBuild) {
         }
     } finally {
         $env:PATH = $savedPath
+    }
+
+    Write-Host "Seeding the build with its own compiled numba kernels..." -ForegroundColor Cyan
+    # After PyInstaller, from the built .exe: numba stamps a frozen program's cache with the
+    # executable, so only the executable can write a seed an installed copy will read
+    # (mainspring's lab record, task 34).
+    uv run tools/warm_numba_cache.py
+    if ($LASTEXITCODE -ne 0) {
+        throw "Seeding the numba cache failed (exit $LASTEXITCODE)."
     }
 }
 
