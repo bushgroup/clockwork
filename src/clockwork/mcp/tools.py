@@ -88,7 +88,7 @@ from ..owner import (
 )
 from ..owner.remote import DaemonError
 from ..owner.wire import TYPE_KEY, to_wire
-from ..record import RECORD_SUFFIX, RunRecord, brief
+from ..record import RECORD_SUFFIX, VERDICTS, RunRecord, brief, find_for_stem, newest_verdict
 from ..record import find as find_record
 from ..routine import Routine, RoutineError
 from ..transcript import send_log_name
@@ -98,6 +98,10 @@ from .guard import guard_acquisition
 __all__ = ["TOOLS", "Tool", "ToolFailure", "Toolbox", "tool"]
 
 JOB_WAIT_S = 120.0
+
+UNREQUESTED = "verdict on a file acquired without a request"
+"""The request text of a record `verdict` begins for a file no record holds: one the
+window acquired, which writes none (lab record, task 90)."""
 """How long `discover_boxes`, `read_box_state` and `arm` wait for their job before
 answering that it is still running. A send of three boxes' tables takes seconds; a job
 queued behind an acquisition waits for the acquisition."""
@@ -745,9 +749,9 @@ class Toolbox:
         """Add a note to a request's run record, beside its files.
 
         For what the files alone will not say: why the next acquisition is the one you
-        chose, what you told the person, a judgement on a file, why you stopped. One
-        note per call; `request_id` is the one `arm` answered. Answers the record's path
-        and how many notes it holds.
+        chose, what you told the person, your reading of a file, why you stopped; a
+        person's own verdict on a run goes to `verdict`. One note per call; `request_id`
+        is the one `arm` answered. Answers the record's path and how many notes it holds.
         """
         if not text.strip():
             raise ToolFailure("a note says something: pass its text")
@@ -758,6 +762,55 @@ class Toolbox:
         record = RunRecord(found)
         record.append("notes", {"text": text.strip(), "by": "session"})
         return {"record": record.path, "notes": len(record.read().get("notes", []))}
+
+    @tool("acquisition", read_only=False)
+    def verdict(self, path: str, verdict: str, initials: str, words: str = "") -> dict:
+        """Record a person's verdict on one run, in the run record beside its files.
+
+        The person's judgement, not the machine's: a run that completed with nothing in
+        it is `completed` and its verdict is `no_signal`. `verdict` is one of `worked`,
+        `no_signal`, `saturated`, `wrong_sample` or `other`; `words` are the person's
+        own, required with `other`. `initials` are the person's, who gave it, never the
+        session's. `path` is either file of the run, raw or summed, or its stem, in the
+        output directory or absolute. A second verdict on a run supersedes the first,
+        which is kept. A file no record holds, such as one the window acquired, gets a
+        record begun for it. Answers the record's path, the entry, and how many
+        verdicts the run has had.
+        """
+        who = clean_initials(initials)
+        if not who:
+            raise ToolFailure("say whose verdict this is: give the initials of the person "
+                              "who gave it")
+        if verdict not in VERDICTS:
+            raise ToolFailure(f"{verdict!r} is not a verdict; say one of "
+                              f"{', '.join(VERDICTS)}, and anything more in words")
+        if verdict == "other" and not words.strip():
+            raise ToolFailure("a verdict of other says what it is: pass its words")
+        directory, stem, files = _run_files(self._in_output(path))
+        if not files:
+            raise ToolFailure(f"no UIMF file of {stem} in {directory}")
+        stamped = _series(files[0])
+        identity = stamped["id"] if stamped is not None else None
+        found = find_for_stem(directory, stem, identity)
+        begun = found is None
+        if begun:
+            words_asked = self.log.requests().get(identity, "") if identity else ""
+            record = RunRecord.open(directory, stem, request_id=identity or f"verdict-{stem}",
+                                    text=words_asked or UNREQUESTED,
+                                    source="agent" if identity else "window",
+                                    initials=who)
+            record.add_file(_found_file(stem, files))
+        else:
+            record = RunRecord(found)
+        try:
+            count = record.add_verdict(stem, verdict, who, words)
+        except ValueError as exc:
+            # Its request's record, still being written: the file's entry comes as the
+            # owner reports the run.
+            raise ToolFailure(f"{exc}; a verdict waits until the run's file is in its "
+                              "record") from exc
+        return {"record": record.path, "begun": begun, "stem": stem,
+                "verdict": newest_verdict(record.read(), stem), "verdicts_on_stem": count}
 
     # -- data --------------------------------------------------------------------
 
@@ -822,6 +875,13 @@ class Toolbox:
             "id": identity, "index": stamps.get("ClockworkSeriesIndex"),
             "position": stamps.get("ClockworkSeriesPosition"),
             "text": self.log.requests().get(str(identity), "")}
+        directory, stem, _ = _run_files(self._in_output(path))
+        kept = find_for_stem(directory, stem, str(identity) if identity else None)
+        try:
+            found["verdict"] = None if kept is None else newest_verdict(
+                RunRecord(kept).read(), stem)
+        except (OSError, ValueError):
+            found["verdict"] = None
         return found
 
     @tool("data")
@@ -1562,6 +1622,32 @@ def _file_entry(run: Run) -> dict:
             "complete": run.complete, "stopped_early": run.stopped_early,
             "replicate": run.replicate, "seconds": round(run.seconds, 2),
             "summary": numbers}
+
+
+def _run_files(path: str) -> tuple[str, str, list[str]]:
+    """The directory, stem and files on disk of the run `path` names: either of its
+    files or its stem. The summed file first, where there is one."""
+    directory, name = os.path.split(os.path.abspath(path))
+    for suffix in (SUMMED_SUFFIX, RAW_SUFFIX):
+        if name.lower().endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    files = [candidate for candidate in (os.path.join(directory, name + SUMMED_SUFFIX),
+                                         os.path.join(directory, name + RAW_SUFFIX))
+             if os.path.isfile(candidate)]
+    return directory, name, files
+
+
+def _found_file(stem: str, files: list[str]) -> dict:
+    """A run's entry in a record begun after it was acquired: its files and the summary
+    of the first, as `_file_entry` keeps one for a run the server saw."""
+    summed = next((file for file in files if file.endswith(SUMMED_SUFFIX)), None)
+    raw = next((file for file in files if not file.endswith(SUMMED_SUFFIX)), None)
+    try:
+        numbers: dict[str, Any] = brief(summary.summarize(files[0]))
+    except Exception as exc:  # noqa: BLE001 -- the record says why, never raises
+        numbers = {"problem": sentence(exc)}
+    return {"stem": stem, "raw": raw, "summed": summed, "summary": numbers}
 
 
 def _records(directory: str) -> dict[str, str]:

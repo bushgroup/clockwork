@@ -262,7 +262,11 @@ def test_a_request_from_the_shell_one_verb_per_process(shell, library, tmp_path)
     [run] = shell.json("list-files")["runs"]
     assert run["folded"] and run["request"]["text"] == REQUEST
     summed = run["summed"]["name"]
-    assert shell.json("summarize-file", "--path", summed)["frames"]["count"] == 1
+    given = shell.json("verdict", "--path", summed, "--verdict", "other", "--initials", "zz",
+                       "--words", "spray spat twice")
+    assert not given["begun"] and given["verdict"]["by"] == "ZZ"
+    read_back = shell.json("summarize-file", "--path", summed)
+    assert read_back["frames"]["count"] == 1 and read_back["verdict"]["verdict"] == "other"
     windowed = shell.json("windowed-intensities", "--path", summed,
                           "--windows", "low=[100,500]", "--windows", "high=[500,1500]",
                           "--reference", "low")
@@ -272,8 +276,8 @@ def test_a_request_from_the_shell_one_verb_per_process(shell, library, tmp_path)
     code, out, err = shell("manifest")
     assert code == 0 and "1 runs, 0 with a problem" in err
     [row] = list(csv.DictReader(io.StringIO(out)))
-    assert (row["stem"], row["kind"], row["b_ticks"], row["notes"]) == (
-        armed["stem"], "summed", "400", "1")
+    assert (row["stem"], row["kind"], row["b_ticks"], row["notes"], row["verdict"]) == (
+        armed["stem"], "summed", "400", "1", "other")
     assert row["series_id"] == armed["request_id"] and row["sample"] == LABELS["sample"]
     written = shell.json("manifest", "--out", "manifest.csv")
     assert written["files"] == 1 and os.path.isfile(written["out"])

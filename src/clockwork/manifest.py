@@ -73,7 +73,7 @@ from .acq.loop import check_pusher_period
 from .acq.uimf import KNOB_PREFIX, LABEL_PREFIX, MARK_PREFIX, RAW_SUFFIX
 from .method import template as template_module
 from .naming import parse_stem
-from .record import RECORD_SUFFIX
+from .record import RECORD_SUFFIX, holds, newest_verdict
 from .summary import file_kind
 
 __all__ = ["FIXED", "manifest", "to_csv", "write_csv"]
@@ -166,21 +166,15 @@ class _Records:
                 if (entry[1].get("request") or {}).get("id") == request_id:
                     return entry
         for entry in records:
-            data = entry[1]
-            stems = {kept.get("stem") for kept in data.get("files") or []
-                     if isinstance(kept, dict)}
-            if stem in stems or (data.get("request") or {}).get("stem") == stem:
+            if holds(entry[1], stem):
                 return entry
         return None
 
 
 def _verdict(data: Mapping[str, Any], stem: str) -> str | None:
-    """The newest verdict on `stem`, from a `verdicts` section if the record has one."""
-    newest = None
-    for entry in data.get("verdicts") or []:
-        if isinstance(entry, dict) and entry.get("stem") == stem and entry.get("verdict"):
-            newest = str(entry["verdict"])
-    return newest
+    """The newest verdict's word on `stem` (`clockwork.record.newest_verdict`)."""
+    newest = newest_verdict(data, stem)
+    return None if newest is None else str(newest["verdict"])
 
 
 # --- one row ------------------------------------------------------------------------

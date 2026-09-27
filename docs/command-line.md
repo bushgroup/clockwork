@@ -204,6 +204,7 @@ Each verb is its tool, described in full by `clockwork <verb> --help` and in the
 - `stop`: end the acquisition in flight after its current repetition and its fold.
 - `status`: the daemon, the console, the boxes, the job running, what was last armed, the limits and the budget.
 - `note`: add a note to a request's run record.
+- `verdict`: record a person's verdict on one run in its run record: `worked`, `no_signal`, `saturated`, `wrong_sample` or `other` with words.
 
 **Reading the files back**
 

@@ -435,6 +435,21 @@ arm = ["SMOD,TBL"]
                     break
             seen["done"] = answer
             seen["files"] = await call("list_files")
+            # The run's file entry reaches its record as the owner reports the run, a
+            # moment after `progress` says done; a verdict waits for it (task 90).
+            runs_done = answer.get("runs") or []
+            seen["verdict"] = None
+            for _ in range(40):
+                if not runs_done:
+                    break
+                try:
+                    seen["verdict"] = await call("verdict", path=runs_done[0]["summed_path"],
+                                                 verdict="worked", initials="sc")
+                    break
+                except RuntimeError as exc:
+                    if "waits until" not in str(exc):
+                        raise
+                    await asyncio.sleep(0.25)
             seen["manifest"] = await call("manifest")
             return seen
 
@@ -487,6 +502,12 @@ arm = ["SMOD,TBL"]
                 and row.get("series_id") == seen["started"]["request_id"]
                 and row.get("record") is not None and row.get("problem") is None
                 and seen["manifest"]["columns"][:4] == ["file", "kind", "day", "stem"])
+            given = seen["verdict"] or {}
+            check_true(
+                "verdict records the person's word in the run's own record, and the "
+                f"manifest reads it back ({row.get('verdict')})",
+                not given.get("begun", True) and given.get("record") == seen["armed"]["record"]
+                and row.get("verdict") == "worked")
             with open(os.path.join(output, "mcp-calls.log"), encoding="utf-8") as handle:
                 lines = [json.loads(line) for line in handle]
             check_true(

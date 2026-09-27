@@ -95,8 +95,9 @@ relative to the output directory, unless it is absolute.
 | | `stop` | `reason` | Whether a run was in flight; it ends after its current repetition and fold |
 | | `status` | none | Simulated or real, the console, the boxes, the running and queued jobs, the method the boxes were last armed with, why sends are refused if they are, the standing limits in force and the budget left |
 | | `note` | `request_id`, `text` | Adds one note to the request's run record |
+| | `verdict` | `path`, `verdict`, `initials`, `words` | Records a person's verdict on one run (`worked`, `no_signal`, `saturated`, `wrong_sample` or `other`) in its run record, beginning a record for a run that has none |
 | Data | `list_files` | `directory` (optional) | Each run's files with sizes and times, its logs, the request it served, and whether its summed file was written |
-| | `summarize_file` | `path`, `frames`, `points`, `texts` | Frames, scans, total counts, total ion current, base peak, calibration, pusher period, saturation, every clockwork stamp, and the request the run served |
+| | `summarize_file` | `path`, `frames`, `points`, `texts` | Frames, scans, total counts, total ion current, base peak, calibration, pusher period, saturation, every clockwork stamp, the request the run served, and the run's newest verdict |
 | | `windowed_intensities` | `path`, `windows`, `reference`, `scans`, `frames` | Summed intensity in named m/z windows and each window's ratio to a reference |
 | | `arrival_time_distribution` | `path`, `mz`, `preset`, `frames`, `points` | Intensity against scan in one m/z window, with the peak in scans and in ms |
 | | `ion_events` | `path`, `frames` | Ion arrivals push by push in a file of single pushes: events per push, the fraction of pushes holding any, event heights in stored units and millivolts, widths, and how many reached the card's top code |
@@ -188,9 +189,31 @@ and the run record applies to it, and answers once it is judged. Its verdict is 
 Every request leaves `<stem>.request.json` beside its files, named after the request's first
 file: the request in the person's words, the `plan` passed to `arm`, each arming with the
 template's hash and knob values, each acquisition, each file with a summary of its numbers, and
-the notes added with `note`. The server writes it and nothing edits it by hand;
-[the standing limits](instrument-limits.md#the-run-record) describe it in full. `list_files` names
-each run's record.
+the notes added with `note`, and the verdicts given with `verdict`. The server writes it and
+nothing edits it by hand; [the standing limits](instrument-limits.md#the-run-record) describe it in
+full. `list_files` names each run's record.
+
+A verdict is a person's judgement of one run, and it is a different thing from the run's outcome.
+The outcome is stamped in the file by the acquisition itself and says how it ended: `completed`,
+`stopped`, `failed` or `incomplete`. The verdict says whether the data is any good, in the words
+of the person who looked at it. A run that completed with no ions in it has the outcome
+`completed` and the verdict `no_signal`. The words are a fixed set so that the manifest's column
+can be filtered:
+
+| Verdict | Meaning |
+|---|---|
+| `worked` | The run gave the data it was taken for |
+| `no_signal` | No ions, or too few to use, where some were expected |
+| `saturated` | The signal reached the card's top code where it mattered |
+| `wrong_sample` | The file holds something other than what it was meant to |
+| `other` | Anything else, said in `words`, which `other` requires |
+
+`initials` are those of the person who gave the verdict, and `words` are theirs too. A verdict
+names a run by either of its files or by its stem, and a run's raw and summed files share one
+verdict. A later verdict on the same run takes the place of the earlier one, and the record keeps
+both with their times. A run the window acquired has no run record, so its first verdict begins one
+with `window` as its source; a run whose request's record does not yet list its file is refused
+until it does.
 
 ## The manifest
 

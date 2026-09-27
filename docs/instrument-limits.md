@@ -156,8 +156,9 @@ that of the request's first file. The server writes it as the request proceeds a
 it by hand. It holds the request in the words of the person it was for, their initials and its
 identifier; the plan the agent stated when it armed; each arming, with the template's hash, every
 knob value and label, and the cold-start cautions; each acquisition; each file written, with a
-summary of its frames, counts, base peak, pusher period and saturation; and the notes the agent
-added with the `note` tool. A request continued in a later session by its identifier finds its
+summary of its frames, counts, base peak, pusher period and saturation; the notes the agent
+added with the `note` tool; and each person's verdict on a run given with the `verdict` tool, in
+their words and under their initials. A request continued in a later session by its identifier finds its
 record by that identifier and appends to it. A run started from the window records `window` as its
 source in the same document.
 
