@@ -97,7 +97,10 @@ def scan_library(directory: str) -> list[LibraryEntry]:
     """
     if not directory or not os.path.isdir(directory):
         return []
-    paths = sorted(glob.glob(os.path.join(directory, "**", "*.toml"), recursive=True))
+    # A saved run queue is TOML too and is not a method (`runqueue.QUEUE_SUFFIX`).
+    paths = sorted(path for path in glob.glob(
+        os.path.join(directory, "**", "*.toml"), recursive=True)
+        if not path.endswith(".queue.toml"))
     entries = [_entry(path) for path in paths]
     return sorted(entries, key=lambda entry: (entry.name or entry.path, entry.path))
 

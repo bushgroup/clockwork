@@ -17,6 +17,12 @@ to redraw, and the alternative -- keeping widget state in step with a model that
 background job mutates twice a row -- is where the bugs would be. The one thing kept
 across a rebuild is the selection, by row number, because a trainee reordering a row
 watches it move.
+
+**Randomize is the panel's button, the rules are the queue's** (lab record, task 86).
+The dialog asks for a number of passes and whether each gets its own order; what that
+does to the rows is `RunQueue.randomize`, and the window applies it, asks before
+replacing passes that exist, and writes the seed and order to the run log. The `pass`
+column is shown only once a queue has passes.
 """
 
 from __future__ import annotations
@@ -25,11 +31,16 @@ from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QMenu,
     QPushButton,
+    QSpinBox,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -46,23 +57,25 @@ from .runqueue import (
     RunQueue,
 )
 
-__all__ = ["HEADINGS", "QueuePanel"]
+__all__ = ["HEADINGS", "QueuePanel", "RandomizeDialog"]
 
-HEADINGS = ("", "state", "method", "sample or conditions", "reps", "setup",
-            "go on if it fails", "outcome")
+HEADINGS = ("", "pass", "state", "method", "sample or conditions", "reps", "setup",
+            "stays first", "go on if it fails", "outcome")
 
-STATE_COLUMN = 1
-METHOD_COLUMN = 2
-CONDITIONS_COLUMN = 3
-REPLICATES_COLUMN = 4
-SETUP_COLUMN = 5
-GO_ON_COLUMN = 6
-OUTCOME_COLUMN = 7
+PASS_COLUMN = 1
+STATE_COLUMN = 2
+METHOD_COLUMN = 3
+CONDITIONS_COLUMN = 4
+REPLICATES_COLUMN = 5
+SETUP_COLUMN = 6
+STAYS_FIRST_COLUMN = 7
+GO_ON_COLUMN = 8
+OUTCOME_COLUMN = 9
 
 EDITABLE = (CONDITIONS_COLUMN, REPLICATES_COLUMN)
 """The two columns a trainee types into. The method is a document, chosen with a
 picker rather than typed, because a path typed wrong is a row that fails at three in
-the morning; the two flags are check boxes; the rest is what the queue reports."""
+the morning; the three flags are check boxes; the rest is what the queue reports."""
 
 STRETCH_COLUMN = OUTCOME_COLUMN
 """The column that absorbs the width left over. The outcome is the longest thing in
@@ -86,6 +99,11 @@ class QueuePanel(QWidget):
     report_requested = Signal(int)
     """"Report this run" on a finished row, by row number: the window keeps that row's
     files and method and opens the report on them, not on whatever ran last (lab #2)."""
+    randomize_requested = Signal()
+    """Randomize the waiting rows into passes. The window asks, applies and logs."""
+    save_requested = Signal()
+    open_requested = Signal()
+    """Save the queue to a file, or replace it with one. The dialogs are the window's."""
 
     def __init__(self, queue: RunQueue, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -138,6 +156,9 @@ class QueuePanel(QWidget):
         self.up_button = QPushButton("Up")
         self.down_button = QPushButton("Down")
         self.reset_button = QPushButton("Reset")
+        self.randomize_button = QPushButton("Randomize…")
+        self.open_button = QPushButton("Open queue…")
+        self.save_button = QPushButton("Save queue…")
         self.start_button = QPushButton("Start the queue")
         self.stop_button = QPushButton("Stop")
         for button, tip in (
@@ -156,6 +177,15 @@ class QueuePanel(QWidget):
             (self.reset_button, "Put the selected rows back to waiting and clear what "
                                 "the last attempt left on them, so Start runs them "
                                 "again."),
+            (self.randomize_button, "Turn the waiting rows into passes: every pass runs "
+                                    "each row once, in its own shuffled order, so "
+                                    "replicates are spread over the series. Rows ticked "
+                                    "\"stays first\" open every pass. A row's own "
+                                    "replicates stay together."),
+            (self.open_button, "Replace the queue with one saved to a file. Every row "
+                               "opens waiting: the file is a plan, not a record."),
+            (self.save_button, "Save the rows, their passes and the seed to a file, to "
+                               "run the same series again."),
             (self.start_button, "Run every waiting row in order on the one worker: the "
                                 "row's method, sent, then its replicates, then the "
                                 "next row. A failed row ends the series unless it says "
@@ -171,6 +201,9 @@ class QueuePanel(QWidget):
         self.up_button.clicked.connect(lambda: self._move(-1))
         self.down_button.clicked.connect(lambda: self._move(1))
         self.reset_button.clicked.connect(self._reset)
+        self.randomize_button.clicked.connect(lambda: self.randomize_requested.emit())
+        self.open_button.clicked.connect(lambda: self.open_requested.emit())
+        self.save_button.clicked.connect(lambda: self.save_requested.emit())
         self.start_button.clicked.connect(lambda: self.start_requested.emit())
         self.stop_button.clicked.connect(lambda: self.stop_requested.emit())
 
@@ -178,9 +211,12 @@ class QueuePanel(QWidget):
         row = QHBoxLayout(buttons)
         row.setContentsMargins(0, 0, 0, 0)
         for button in (self.add_button, self.add_open_button, self.remove_button,
-                       self.up_button, self.down_button, self.reset_button):
+                       self.up_button, self.down_button, self.reset_button,
+                       self.randomize_button):
             row.addWidget(button)
         row.addStretch(1)
+        row.addWidget(self.open_button)
+        row.addWidget(self.save_button)
         row.addWidget(self.start_button)
         row.addWidget(self.stop_button)
 
@@ -207,6 +243,7 @@ class QueuePanel(QWidget):
         for index in selected:
             if index < self.tree.topLevelItemCount():
                 self.tree.topLevelItem(index).setSelected(True)
+        self.tree.setColumnHidden(PASS_COLUMN, not self.queue.passes)
         self._refresh_caption()
         self._refresh_buttons()
 
@@ -218,6 +255,7 @@ class QueuePanel(QWidget):
                               Qt.AlignmentFlag.AlignRight
                               | Qt.AlignmentFlag.AlignVCenter)
         item.setCheckState(SETUP_COLUMN, _checked(row.setup))
+        item.setCheckState(STAYS_FIRST_COLUMN, _checked(row.stays_first))
         item.setCheckState(GO_ON_COLUMN, _checked(row.go_on))
 
         # A row that has run, and the row in flight, are a record rather than a form:
@@ -268,8 +306,10 @@ class QueuePanel(QWidget):
             name = current.name if current is not None else "between rows"
             self.caption.setText(f"running {where}: {name}")
         else:
+            passes = (f" in {self.queue.passes} randomized passes"
+                      if self.queue.passes else "")
             self.caption.setText(
-                f"{len(self.queue.rows)} row(s), {self.queue.waiting} waiting")
+                f"{len(self.queue.rows)} row(s){passes}, {self.queue.waiting} waiting")
 
     def _refresh_buttons(self) -> None:
         running = self.queue.running
@@ -282,6 +322,10 @@ class QueuePanel(QWidget):
         self.start_button.setEnabled(
             not running and not self._busy and self.queue.waiting > 0)
         self.stop_button.setEnabled(running)
+        self.randomize_button.setEnabled(
+            not running and not self._busy and bool(self.queue.template()))
+        self.open_button.setEnabled(not running)
+        self.save_button.setEnabled(bool(self.queue.rows))
 
     def show_others(self, lines: list[str]) -> None:
         """Other clients' jobs in the daemon, one line each, or nothing to hide it."""
@@ -328,6 +372,8 @@ class QueuePanel(QWidget):
                 row.setup = item.checkState(column) == Qt.CheckState.Checked
             elif column == GO_ON_COLUMN:
                 row.go_on = item.checkState(column) == Qt.CheckState.Checked
+            elif column == STAYS_FIRST_COLUMN:
+                row.stays_first = item.checkState(column) == Qt.CheckState.Checked
             else:
                 item.setText(column, _reported(index, row)[column])
         finally:
@@ -379,17 +425,53 @@ class QueuePanel(QWidget):
         self.changed.emit()
 
 
+class RandomizeDialog(QDialog):
+    """How many passes, and whether each has its own order. The rest is the queue's."""
+
+    def __init__(self, rows: int, passes: int = 0,
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Randomize the queue")
+        self.passes = QSpinBox()
+        self.passes.setRange(1, 99)
+        self.passes.setValue(passes or 1)
+        self.passes.setToolTip("How many times the series runs. 1 is a plain shuffle.")
+        self.reshuffle = QCheckBox("new order each pass")
+        self.reshuffle.setChecked(True)
+        self.reshuffle.setToolTip("Unticked, one shuffled order is repeated in every "
+                                  "pass.")
+        caption = QLabel(
+            f"Each pass runs these {rows} row(s) once, in a shuffled order, and each "
+            "row's replicates stay together. Rows ticked \"stays first\" open every "
+            "pass in the order they were entered. The seed and the order go to the "
+            "run log.")
+        caption.setWordWrap(True)
+        form = QFormLayout(self)
+        form.addRow(caption)
+        form.addRow("Passes:", self.passes)
+        form.addRow("", self.reshuffle)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def chosen(self) -> tuple[int, bool]:
+        return self.passes.value(), self.reshuffle.isChecked()
+
+
 # -- small helpers -------------------------------------------------------------------
 
 
 def _reported(index: int, row: QueueRow) -> list[str]:
-    """One row's eight cells of text, in `HEADINGS` order.
+    """One row's cells of text, in `HEADINGS` order.
 
     One function rather than a literal in `_item`, because `_item_changed` has to be
     able to put a cell back exactly as the table drew it.
     """
     cells = [""] * len(HEADINGS)
     cells[0] = str(index + 1)
+    cells[PASS_COLUMN] = row.pass_label
     cells[STATE_COLUMN] = (row.step or row.state) if row.state == RUNNING else row.state
     cells[METHOD_COLUMN] = row.name
     cells[CONDITIONS_COLUMN] = row.conditions

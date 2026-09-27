@@ -3090,6 +3090,29 @@ def main() -> int:
         runqueue.outcome_of(halted, [queued_run("260918_QQ_003", stopped="by hand")])
         == runqueue.STOPPED and "stopped: by hand" in halted.outcome,
     )
+    shuffled = runqueue.RunQueue(
+        [runqueue.QueueRow(method_path="blank.toml", stays_first=True)]
+        + [runqueue.QueueRow(method_path=f"{name}.toml") for name in "abcde"])
+    order = shuffled.randomize(3, seed=86).order
+    again = runqueue.RunQueue(
+        [runqueue.QueueRow(method_path="blank.toml", stays_first=True)]
+        + [runqueue.QueueRow(method_path=f"{name}.toml") for name in "abcde"])
+    check_true(
+        "randomizing makes N passes of real rows, each running every row once with the "
+        "stays-first row opening it, and the same seed gives the same order",
+        len(shuffled.rows) == 18
+        and all(names[0] == "blank" and sorted(names) == sorted(order[0])
+                for names in order)
+        and again.randomize(3, seed=86).order == order,
+    )
+    reopened = runqueue.loads(runqueue.dumps(shuffled))
+    check_true(
+        "a queue file carries each row's pass and the seed, and opens every row waiting",
+        reopened.seed == 86
+        and [row.pass_label for row in reopened.rows]
+        == [row.pass_label for row in shuffled.rows]
+        and all(row.state == runqueue.WAITING for row in reopened.rows),
+    )
 
     section("hardware")
     skip("a MIPS box answers GVER", "no serial hardware in a self-check; lab record, task 04")

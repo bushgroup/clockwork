@@ -1948,6 +1948,199 @@ def test_a_row_added_while_one_runs_does_not_move_the_index():
     assert queue.current is queue.rows[1] and queue.rows[1].name == "a"
 
 
+# --- randomized passes and the queue file (task 86) -------------------------------------
+
+
+def lettered(*names: str, **row) -> runqueue.RunQueue:
+    return runqueue.RunQueue([runqueue.QueueRow(method_path=f"{n}.toml", **row)
+                              for n in names])
+
+
+def passes_of(queue: runqueue.RunQueue) -> list[list[str]]:
+    by_pass: dict[int, list[str]] = {}
+    for row in queue.rows:
+        by_pass.setdefault(row.pass_number, []).append(row.name)
+    return [by_pass[number] for number in sorted(by_pass)]
+
+
+def test_randomizing_makes_n_passes_each_holding_every_row_once():
+    queue = lettered("a", "b", "c", "d")
+    done = queue.randomize(3, seed=7)
+    assert len(queue.rows) == 12
+    assert [row.pass_label for row in queue.rows[:4]] == ["1/3"] * 4
+    assert [row.pass_label for row in queue.rows[-4:]] == ["3/3"] * 4
+    for names in passes_of(queue):
+        assert sorted(names) == ["a", "b", "c", "d"]
+    assert done.seed == 7 and queue.seed == 7
+    assert [list(names) for names in done.order] == passes_of(queue)
+    assert "seed 7" in done.line and "pass 3:" in done.line
+
+
+def test_the_same_seed_gives_the_same_order_and_a_new_order_each_pass_differs():
+    first = lettered(*"abcdefgh")
+    second = lettered(*"abcdefgh")
+    assert first.randomize(4, seed=12345).order == second.randomize(4, seed=12345).order
+    assert len(set(first.randomize(4, seed=12345).order)) > 1
+
+
+def test_one_order_repeated_when_the_box_is_unticked():
+    queue = lettered(*"abcdefgh")
+    done = queue.randomize(3, reshuffle=False, seed=3)
+    assert len(set(done.order)) == 1 and not done.reshuffle
+
+
+def test_rows_that_stay_first_open_every_pass_in_the_order_they_were_entered():
+    queue = runqueue.RunQueue([
+        runqueue.QueueRow(method_path="x.toml"),
+        runqueue.QueueRow(method_path="blank.toml", stays_first=True),
+        runqueue.QueueRow(method_path="y.toml"),
+        runqueue.QueueRow(method_path="qc.toml", stays_first=True),
+        runqueue.QueueRow(method_path="z.toml"),
+    ])
+    queue.randomize(5, seed=1)
+    for names in passes_of(queue):
+        assert names[:2] == ["blank", "qc"]
+        assert sorted(names[2:]) == ["x", "y", "z"]
+
+
+def test_copies_carry_the_rows_settings_and_are_rows_of_their_own():
+    queue = runqueue.RunQueue([runqueue.QueueRow(
+        method_path="a.toml", conditions="10 uM", replicates=3, setup=False,
+        go_on=True)])
+    queue.randomize(2, seed=0)
+    one, two = queue.rows
+    assert one is not two
+    for row in (one, two):
+        assert (row.conditions, row.replicates, row.setup, row.go_on) == (
+            "10 uM", 3, False, True)
+    one.conditions = "edited"
+    assert two.conditions == "10 uM"
+
+
+def test_randomizing_again_rebuilds_from_pass_one_and_does_not_duplicate():
+    queue = lettered("a", "b", "c")
+    queue.randomize(3, seed=1)
+    first_pass = [row for row in queue.rows if row.pass_number == 1]
+    first_pass[0].replicates = 5
+    later = next(row for row in queue.rows if row.pass_number == 3)
+    later.conditions = "only on pass 3"
+    queue.randomize(2, seed=2)
+    assert len(queue.rows) == 6 and queue.passes == 2
+    changed = [row for row in queue.rows if row.name == first_pass[0].name]
+    assert [row.replicates for row in changed] == [5, 5], "pass 1 is the template"
+    assert all(row.conditions != "only on pass 3" for row in queue.rows)
+
+
+def test_a_row_added_by_hand_after_randomizing_joins_every_new_pass():
+    queue = lettered("a", "b")
+    queue.randomize(2, seed=1)
+    queue.add(runqueue.QueueRow(method_path="c.toml"))
+    queue.randomize(2, seed=1)
+    assert [sorted(names) for names in passes_of(queue)] == [["a", "b", "c"]] * 2
+
+
+def test_finished_rows_stay_where_they_are_above_the_new_passes():
+    queue = lettered("done", "a", "b")
+    queue.begin()
+    queue.finish(runqueue.DONE)
+    queue.running = False
+    queue.index = -1
+    queue.randomize(2, seed=4)
+    assert queue.rows[0].name == "done" and queue.rows[0].state == runqueue.DONE
+    assert queue.rows[0].pass_number == 0
+    assert len(queue.rows) == 5
+    assert all(row.state == runqueue.WAITING for row in queue.rows[1:])
+
+
+def test_skipped_rows_are_taken_by_a_randomization_rather_than_left_to_run_twice():
+    queue = lettered("a", "b", "c")
+    queue.begin()
+    queue.finish(runqueue.FAILED, "TBLSTRT was refused")
+    queue.advance()
+    queue.randomize(1, seed=9)
+    assert [row.state for row in queue.rows] == [
+        runqueue.FAILED, runqueue.WAITING, runqueue.WAITING]
+    assert sorted(row.name for row in queue.rows[1:]) == ["b", "c"]
+
+
+def test_a_running_queue_and_an_empty_one_refuse_to_randomize():
+    queue = lettered("a", "b")
+    queue.begin()
+    with pytest.raises(ValueError, match="running"):
+        queue.randomize(2)
+    with pytest.raises(ValueError, match="no waiting rows"):
+        runqueue.RunQueue().randomize(2)
+    with pytest.raises(ValueError, match="at least one pass"):
+        lettered("a").randomize(0)
+
+
+def test_a_failure_without_go_on_skips_the_later_passes_too():
+    queue = lettered("a", "b")
+    queue.randomize(3, seed=5)
+    queue.begin()
+    queue.finish(runqueue.FAILED, "the console would not start")
+    assert [row.state for row in queue.rows[1:]] == [runqueue.SKIPPED] * 5
+    assert queue.advance() is None
+
+
+def test_a_queue_file_round_trips_its_rows_passes_and_seed(tmp_path):
+    for name in ("a", "b", "blank"):
+        (tmp_path / f"{name}.toml").write_text("", encoding="utf-8")
+    queue = runqueue.RunQueue([
+        runqueue.QueueRow(method_path=str(tmp_path / "a.toml"), conditions="1 uM",
+                          replicates=2, setup=False, go_on=True),
+        runqueue.QueueRow(method_path=str(tmp_path / "b.toml")),
+        runqueue.QueueRow(method_path=str(tmp_path / "blank.toml"), stays_first=True),
+    ])
+    queue.randomize(2, seed=99)
+    queue.rows[0].state = runqueue.DONE
+    queue.rows[0].stems = ("260926_ZZ_001",)
+    path = str(tmp_path / "series.queue.toml")
+    runqueue.save(queue, path)
+
+    opened = runqueue.load(path)
+    assert opened.seed == 99
+    fields = ("method_path", "conditions", "replicates", "setup", "go_on",
+              "stays_first", "pass_number", "pass_count")
+    assert [[getattr(row, f) for f in fields] for row in opened.rows] == \
+        [[getattr(row, f) for f in fields] for row in queue.rows]
+    assert all(row.state == runqueue.WAITING and not row.stems for row in opened.rows), \
+        "a queue file is a plan, not a record"
+
+
+def test_a_queue_copied_with_its_methods_opens_by_the_relative_path(tmp_path):
+    here = tmp_path / "here"
+    (here / "methods").mkdir(parents=True)
+    (here / "methods" / "a.toml").write_text("", encoding="utf-8")
+    runqueue.save(runqueue.RunQueue([runqueue.QueueRow(
+        method_path=str(here / "methods" / "a.toml"))]), str(here / "q.toml"))
+    moved = tmp_path / "moved"
+    here.rename(moved)
+    opened = runqueue.load(str(moved / "q.toml"))
+    assert opened.rows[0].method_path == str(moved / "methods" / "a.toml")
+
+
+def test_a_method_found_by_neither_path_keeps_its_absolute_one(tmp_path):
+    missing = str(tmp_path / "gone.toml")
+    runqueue.save(runqueue.RunQueue([runqueue.QueueRow(method_path=missing)]),
+                  str(tmp_path / "q.toml"))
+    assert runqueue.load(str(tmp_path / "q.toml")).rows[0].method_path == missing
+
+
+@pytest.mark.parametrize("text, reason", [
+    ("not = [toml", "not a queue file"),
+    ("schema_version = 9\n", "schema_version 9"),
+    ("schema_version = 1\n[[rows]]\nconditions = 'x'\n", "names no method"),
+    ("schema_version = 1\n[[rows]]\nmethod = 'a.toml'\nreplicates = 'two'\n",
+     "`replicates` is not a whole number"),
+    ("schema_version = 1\n[[rows]]\nmethod = 'a.toml'\npass = 3\npasses = 2\n",
+     "pass 3 of 2"),
+])
+def test_a_queue_file_that_is_not_one_says_why(text, reason):
+    with pytest.raises(runqueue.QueueFileError, match=reason):
+        runqueue.loads(text)
+
+
 CONDITIONS = queuepanel.CONDITIONS_COLUMN
 REPS = queuepanel.REPLICATES_COLUMN
 OUTCOME = queuepanel.OUTCOME_COLUMN
@@ -2080,6 +2273,78 @@ def test_the_queue_panel_puts_back_a_cell_the_queue_owns(qtbot):
     assert item.text(OUTCOME) == ""
     item.setText(REPS, "not a number")
     assert queue.rows[0].replicates == 3 and item.text(REPS) == "3"
+
+
+def test_stays_first_is_a_check_box_and_the_pass_column_appears_with_passes(qtbot):
+    queue = lettered("a", "b")
+    panel = QueuePanel(queue)
+    qtbot.addWidget(panel)
+    assert panel.tree.isColumnHidden(queuepanel.PASS_COLUMN)
+    panel.tree.topLevelItem(1).setCheckState(queuepanel.STAYS_FIRST_COLUMN,
+                                             Qt.CheckState.Checked)
+    assert queue.rows[1].stays_first
+    queue.randomize(2, seed=1)
+    panel.refresh()
+    assert not panel.tree.isColumnHidden(queuepanel.PASS_COLUMN)
+    assert panel.tree.topLevelItem(0).text(queuepanel.PASS_COLUMN) == "1/2"
+    assert panel.tree.topLevelItem(0).text(queuepanel.METHOD_COLUMN) == "b"
+    assert "2 randomized passes" in panel.caption.text()
+
+
+def run_log(window) -> list[str]:
+    log = window.run_panel.log
+    return [log.topLevelItem(index).text(1) for index in range(log.topLevelItemCount())]
+
+
+def test_randomize_in_the_window_logs_the_seed_and_asks_before_replacing_passes(
+        window, tmp_path):
+    for name in ("a", "b", "c"):
+        queued(window, tmp_path, name, make_method())
+    window._ask_randomize = lambda rows, passes: (3, True)
+    asked: list[str] = []
+    window._confirm = lambda title, detail: asked.append(title) or False
+    window.randomize_queue()
+    assert asked == [], "a queue without passes has nothing to replace"
+    assert len(window.queue.rows) == 9
+    line = next(text for text in run_log(window) if "randomized" in text)
+    assert f"seed {window.queue.seed}" in line and "pass 3:" in line
+
+    window.randomize_queue()
+    assert asked == ["Replace the 3 passes?"] and len(window.queue.rows) == 9
+    window._confirm = lambda title, detail: True
+    window._ask_randomize = lambda rows, passes: (2, False)
+    window.randomize_queue()
+    assert window.queue.passes == 2 and len(window.queue.rows) == 6
+
+
+def test_a_queue_saved_from_the_window_opens_again_with_its_order(window, tmp_path):
+    for name in ("a", "b", "c"):
+        queued(window, tmp_path, name, make_method())
+    window._ask_randomize = lambda rows, passes: (2, True)
+    window.randomize_queue()
+    order = [(row.name, row.pass_label) for row in window.queue.rows]
+    path = str(tmp_path / "series")
+    window._queue_file_path = lambda save: path if save else path + ".queue.toml"
+    window.save_queue()
+    assert os.path.isfile(path + ".queue.toml"), "the suffix is added"
+
+    window.queue.rows[0].state = runqueue.DONE
+    window._confirm = lambda title, detail: False
+    window.open_queue()
+    assert window.queue.rows[0].state == runqueue.DONE, "cancel keeps the queue"
+    window._confirm = lambda title, detail: True
+    window.open_queue()
+    assert [(row.name, row.pass_label) for row in window.queue.rows] == order
+    assert all(row.state == runqueue.WAITING for row in window.queue.rows)
+    assert window.queue_panel.start_button.isEnabled()
+
+
+def test_a_saved_queue_is_not_listed_in_the_method_library(tmp_path):
+    from clockwork.app.methodlib import scan_library
+    method_module.save(make_method(), str(tmp_path / "a.toml"))
+    runqueue.save(lettered("a"), str(tmp_path / "series.queue.toml"))
+    assert [os.path.basename(entry.path) for entry in scan_library(str(tmp_path))] \
+        == ["a.toml"]
 
 
 # --- the method library (task 54) ------------------------------------------------------

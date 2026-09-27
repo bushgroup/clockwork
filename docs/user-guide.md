@@ -193,6 +193,43 @@ period, collision energy, whatever the day's method does not already state as a 
 The lone **Replicate** button beside Acquire runs one more acquisition off the last run's own
 readback, for the acquisition taken after the fact rather than counted up front.
 
+## The run queue
+
+To run a series of samples or conditions unattended, open **Run > Run queue** and add a row
+for each method document. A row names a saved method, a conditions note and a replicate count,
+and the document is read when the row starts, not when it was added, so a typo fixed in the
+file before the row runs is the version that runs. Each row sends its method and then acquires
+its replicates back to back. **setup** sends the whole setup, readback included; unticked, the
+row loads and arms only, for a row whose method the boxes already have. A row that fails ends
+the series and leaves the rows after it **skipped**, unless its **go on if it fails** box is
+ticked. **Start the queue** runs every waiting row, skipped rows included, and **Stop** ends the
+series after the current repetition and its fold.
+
+To spread technical replicates over a series rather than acquire them back to back, press
+**Randomize…**, choose a number of passes, and press OK. Each pass runs every waiting row once,
+in its own shuffled order, and a row's own replicates stay together as one send and its
+acquisitions. The result is ordinary rows, labelled in the **pass** column (`2/3` is the second
+of three passes), so the table shows exactly what will run before **Start** is pressed, and any
+row can still be edited, moved or removed. With **new order each pass** unticked, one shuffled
+order is repeated in every pass, and one pass is a plain shuffle. Rows ticked **stays first**
+open every pass, in the order they were entered, ahead of the shuffled rows, which suits a
+blank or a calibrant. A closing wash is added by hand after randomizing. The run log records the
+seed and every pass's order each time Randomize is applied.
+
+Randomizing a queue that already has passes rebuilds them from pass 1, after asking. An edit
+made to a row of pass 2 or later is lost; to change every pass, edit the row in pass 1 and
+randomize again. A row added by hand after randomizing joins every new pass. Rows that have
+already run stay where they are, above the new passes. Randomize is unavailable while the
+queue runs.
+
+To keep a series for another day, press **Save queue…**. The file, which ends in
+`.queue.toml`, holds each row's method, note, replicate count, the three check boxes and its
+pass, and the last seed. **Open queue…** replaces the queue with a saved one. Every row opens
+waiting, because the file is a plan rather than a record; what the rows did is in the run log
+and their files. Each method is stored by its full path and by its path relative to the queue
+file, so a folder of methods copied to another PC with its queue file beside them still opens.
+A row whose method is found by neither path fails when it starts, and says so in the run log.
+
 ## The state panel
 
 **Run > Read the boxes' state**, or the disclosure arrow on a box's own pane, opens that box's

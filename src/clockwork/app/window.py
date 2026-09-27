@@ -79,7 +79,7 @@ from ..method import (
     is_comment,
 )
 from ..method.text import PaneResult, render_pane, split_trainee_file, start_order
-from . import errors
+from . import errors, runqueue
 from .boxstate import Reading
 from .console_panel import ConsoleBar, ConsoleSettings
 from .launch import (
@@ -92,7 +92,7 @@ from .launch import (
 from .librarypanel import LibraryDialog
 from .naming import clean_initials, next_stem
 from .panes import BoxPane
-from .queuepanel import QueuePanel
+from .queuepanel import QueuePanel, RandomizeDialog
 from .runlog import RunPanel
 from .runqueue import FAILED, STOPPED, QueueRow, RunQueue, outcome_of
 from .serving import serve_command, start_serve
@@ -695,6 +695,9 @@ class MainWindow(QMainWindow):
         self.queue_panel.add_open_requested.connect(self.queue_add_open_method)
         self.queue_panel.changed.connect(self._refresh_actions)
         self.queue_panel.report_requested.connect(self.report_row)
+        self.queue_panel.randomize_requested.connect(self.randomize_queue)
+        self.queue_panel.save_requested.connect(self.save_queue)
+        self.queue_panel.open_requested.connect(self.open_queue)
 
         self.initials.editingFinished.connect(self._initials_changed)
         self.output_dir.editingFinished.connect(self._refresh_stem)
@@ -1202,6 +1205,117 @@ class MainWindow(QMainWindow):
         return QueueRow(method_path=path,
                         conditions=self.conditions.toPlainText().strip(),
                         replicates=self.replicates.value())
+
+    def randomize_queue(self) -> None:
+        """Turn the waiting rows into shuffled passes, and log the seed and the order.
+
+        The rules are `RunQueue.randomize`'s. What is the window's is the asking: how
+        many passes, and -- on a queue that has passes already -- whether to replace
+        them, since the new ones are built from pass 1 and an edit made only to a later
+        pass's row goes with them (lab record, task 86).
+        """
+        if self.queue.running:
+            return
+        template = self.queue.template()
+        if not template:
+            self.run_panel.say("the queue has no waiting rows to randomize", warn=True)
+            return
+        existing = self.queue.passes
+        if existing and not self._confirm(
+                f"Replace the {existing} passes?",
+                f"The new passes are built from pass 1's {len(template)} row(s). Edits "
+                "made only to rows of later passes will be lost; rows that have run stay "
+                "where they are."):
+            return
+        chosen = self._ask_randomize(len(template), existing)
+        if chosen is None:
+            return
+        passes, reshuffle = chosen
+        done = self.queue.randomize(passes, reshuffle)
+        self.run_panel.say(done.line)
+        self.queue_panel.tree.clearSelection()
+        self.queue_panel.refresh()
+        self._refresh_actions()
+
+    def _ask_randomize(self, rows: int, passes: int) -> tuple[int, bool] | None:
+        """The passes dialog, a method of its own so that a test can answer it."""
+        dialog = RandomizeDialog(rows, passes, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return dialog.chosen()
+
+    def save_queue(self) -> None:
+        """Write the rows, their passes and the seed to a queue file."""
+        if not self.queue.rows:
+            return
+        path = self._queue_file_path(save=True)
+        if not path:
+            return
+        if not path.endswith(".toml"):
+            path += runqueue.QUEUE_SUFFIX
+        try:
+            runqueue.save(self.queue, path)
+        except OSError as exc:
+            self._complain("The queue could not be saved", str(exc))
+            return
+        self.run_panel.say(f"the queue is saved to {path}")
+
+    def open_queue(self) -> None:
+        """Replace the queue with a saved one, every row waiting.
+
+        Refused while a series runs, as Randomize is: the rows being replaced include
+        the one in flight.
+        """
+        if self.queue.running:
+            return
+        path = self._queue_file_path(save=False)
+        if not path:
+            return
+        try:
+            opened = runqueue.load(path)
+        except (OSError, runqueue.QueueFileError) as exc:
+            self._complain("That queue could not be opened", str(exc))
+            return
+        if self.queue.rows and not self._confirm(
+                "Replace the queue?",
+                f"The {len(self.queue.rows)} row(s) in the queue now are replaced by "
+                f"the {len(opened.rows)} in {os.path.basename(path)}. What the rows that "
+                "ran left is in the run log and their files."):
+            return
+        self.queue.rows = opened.rows
+        self.queue.seed = opened.seed
+        self.queue.index = -1
+        self.queue.cancelled = ""
+        missing = sum(1 for row in opened.rows if not os.path.isfile(row.method_path))
+        self.run_panel.say(
+            f"the queue is opened from {path}: {len(opened.rows)} row(s)"
+            + (f", seed {opened.seed}" if opened.seed is not None else "")
+            + (f"; {missing} method(s) not found, which fail when they start"
+               if missing else ""), warn=bool(missing))
+        self.queue_dock.setVisible(True)
+        self.queue_panel.tree.clearSelection()
+        self.queue_panel.refresh()
+        self._refresh_actions()
+
+    def _queue_file_path(self, save: bool) -> str:
+        """The file dialog for a queue file, a method of its own so a test can answer."""
+        directory = os.path.dirname(self.method_path) or self.settings.output_dir or ""
+        pattern = f"Queue files (*{runqueue.QUEUE_SUFFIX});;All files (*)"
+        if save:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save the run queue", directory, pattern)
+        else:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Open a run queue", directory, pattern)
+        return path
+
+    def _confirm(self, title: str, detail: str) -> bool:
+        """A yes-or-cancel question, a method of its own so that a test can answer it."""
+        answer = QMessageBox.question(
+            self, title, detail,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        return answer == QMessageBox.StandardButton.Yes
 
     def start_queue(self) -> None:
         """Walk every waiting row in order: load it, send it, acquire its replicates."""

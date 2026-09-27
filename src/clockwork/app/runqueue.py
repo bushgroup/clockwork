@@ -32,13 +32,30 @@ operator stopped folded the method frame it was in and closed its files, so what
 on disk is a short experiment rather than a broken one (`Run.stopped_early`). Calling
 that `done` would claim the row acquired what it was asked for and calling it `failed`
 would claim the files are no good; neither is true.
+
+**Randomized passes are real rows** (lab record, task 86). `RunQueue.randomize` turns
+the waiting rows into N passes, each holding every one of them once in its own shuffled
+order, so a series' technical replicates are spread over it rather than acquired back to
+back. The row is the unit shuffled: its replicates stay together. What comes out is
+ordinary rows with a pass number on them, each with its own state, outcome and report,
+so what the table shows is what runs and a pass can still be edited by hand. There is no
+hidden original list; randomizing again rebuilds every pass from pass 1.
+
+**A queue file is a plan, not a record.** `save` and `load` write and read the rows'
+settings and the last seed, never their outcomes, which stay in the run log and the kept
+files: every row of an opened queue is waiting.
 """
 
 from __future__ import annotations
 
 import os
+import random
+import secrets
+import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+
+import tomli_w
 
 from ..acq import Run
 
@@ -50,9 +67,15 @@ __all__ = [
     "SKIPPED",
     "STOPPED",
     "WAITING",
+    "QueueFileError",
     "QueueRow",
+    "Randomized",
     "RunQueue",
+    "dumps",
+    "load",
+    "loads",
     "outcome_of",
+    "save",
 ]
 
 WAITING = "waiting"
@@ -76,6 +99,10 @@ SKIPPED = "skipped"
 FINISHED = (DONE, FAILED, STOPPED, SKIPPED)
 """The states a row does not leave without being reset."""
 
+UNSTARTED = (WAITING, SKIPPED)
+"""The rows Start would run: a skipped row is offered again (`RunQueue.begin`), so a
+randomization takes it with the waiting ones rather than leaving it to run twice."""
+
 
 @dataclass
 class QueueRow:
@@ -95,6 +122,14 @@ class QueueRow:
     and all, rather than the load and arm alone."""
     go_on: bool = False
     """Walk past this row if it fails, instead of ending the series."""
+    stays_first: bool = False
+    """Open every randomized pass with this row, ahead of the shuffled ones: a blank or
+    a calibrant that has to come first. Several keep the order they were entered in."""
+    pass_number: int = 0
+    """Which randomized pass the row belongs to, from 1; 0 for a row of a queue that was
+    never randomized, or one added by hand afterwards."""
+    pass_count: int = 0
+    """How many passes that randomization made, so the table can say `2/3`."""
 
     state: str = WAITING
     step: str = ""
@@ -115,6 +150,11 @@ class QueueRow:
     console_errors: int = 0
     """`[error]` lines the console logged during the row's runs (`Run.console_errors`)."""
     problem: str = ""
+
+    @property
+    def pass_label(self) -> str:
+        """`k/N` for a row of a randomized pass, empty for any other."""
+        return f"{self.pass_number}/{self.pass_count}" if self.pass_number else ""
 
     @property
     def reportable(self) -> bool:
@@ -182,6 +222,26 @@ def outcome_of(row: QueueRow, runs: Sequence[Run]) -> str:
     return DONE
 
 
+@dataclass(frozen=True)
+class Randomized:
+    """What `RunQueue.randomize` did, for the run log: enough to reproduce and audit it."""
+
+    seed: int
+    passes: int
+    reshuffle: bool
+    order: tuple[tuple[str, ...], ...]
+    """Each pass's rows by name, and note where there is one, in the order they run."""
+
+    @property
+    def line(self) -> str:
+        how = "a new order each pass" if self.reshuffle else "one order repeated"
+        rows = len(self.order[0]) if self.order else 0
+        passes = "; ".join(f"pass {number}: {', '.join(names)}"
+                           for number, names in enumerate(self.order, start=1))
+        return (f"the queue is randomized: {rows} row(s) in {self.passes} pass(es), "
+                f"{how}, seed {self.seed} -- {passes}")
+
+
 class RunQueue:
     """The rows, which one is in flight, and whether the series goes on.
 
@@ -197,6 +257,8 @@ class RunQueue:
         self.cancelled = ""
         """Why the series is ending, where something asked it to. The row in flight
         still finishes and closes itself; nothing after it starts."""
+        self.seed: int | None = None
+        """The seed of the last randomization, which a saved queue file carries."""
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -246,6 +308,67 @@ class RunQueue:
             return index
         self.rows.insert(where, self.rows.pop(index))
         return where
+
+    # -- randomized passes --------------------------------------------------
+
+    @property
+    def passes(self) -> int:
+        """How many passes the last randomization made; 0 when there are none."""
+        return max((row.pass_count for row in self.rows if row.pass_number), default=0)
+
+    def template(self) -> list[QueueRow]:
+        """The rows a randomization is built from, in table order.
+
+        Pass 1 when the queue has passes -- "pass 1 is the template", so an edit made
+        only to a later pass's copy is not carried -- together with any waiting row
+        added by hand since, which has no pass and joins every new one. A queue never
+        randomized offers its waiting rows; its finished rows are the record of what
+        ran and are not offered again.
+        """
+        if self.passes:
+            return [row for row in self.rows
+                    if row.pass_number == 1
+                    or (not row.pass_number and row.state in UNSTARTED)]
+        return [row for row in self.rows if row.state in UNSTARTED]
+
+    def randomize(self, passes: int, reshuffle: bool = True,
+                  seed: int | None = None) -> Randomized:
+        """Replace the unstarted rows with `passes` passes of the template, shuffled.
+
+        Each pass holds a fresh copy of every template row once: its `stays_first` rows
+        open the pass in template order and the rest follow in an order drawn from
+        `seed`, drawn again for each pass unless `reshuffle` is off. Finished rows are
+        left where they are, above the new passes. Refused while the queue runs, which
+        keeps `move`'s rule -- nothing on or above the row in flight -- true without a
+        second case.
+        """
+        if self.running:
+            raise ValueError("a running queue cannot be randomized")
+        if passes < 1:
+            raise ValueError("a randomization needs at least one pass")
+        template = self.template()
+        if not template:
+            raise ValueError("there are no waiting rows to randomize")
+        if seed is None:
+            seed = secrets.randbits(32)
+        draw = random.Random(seed)
+        first = [row for row in template if row.stays_first]
+        rest = [row for row in template if not row.stays_first]
+        order = list(rest)
+        built: list[QueueRow] = []
+        names: list[tuple[str, ...]] = []
+        for number in range(1, passes + 1):
+            if reshuffle or number == 1:
+                order = list(rest)
+                draw.shuffle(order)
+            copies = [_fresh(row, number, passes) for row in first + order]
+            built.extend(copies)
+            names.append(tuple(_described(row) for row in copies))
+        self.rows = [row for row in self.rows if row.state not in UNSTARTED] + built
+        self.index = -1
+        self.seed = seed
+        return Randomized(seed=seed, passes=passes, reshuffle=reshuffle,
+                          order=tuple(names))
 
     # -- walking it ----------------------------------------------------------
 
@@ -312,3 +435,134 @@ class RunQueue:
                   for state in FINISHED}
         parts = [f"{counts[state]} {state}" for state in FINISHED if counts[state]]
         return f"the queue is finished: {', '.join(parts) or 'nothing ran'}"
+
+
+def _fresh(row: QueueRow, number: int, count: int) -> QueueRow:
+    """A waiting copy of a row's settings, in pass `number` of `count`."""
+    return QueueRow(method_path=row.method_path, conditions=row.conditions,
+                    replicates=row.replicates, setup=row.setup, go_on=row.go_on,
+                    stays_first=row.stays_first, pass_number=number, pass_count=count)
+
+
+def _described(row: QueueRow) -> str:
+    return f"{row.name} ({row.conditions})" if row.conditions else row.name
+
+
+# -- the queue file ------------------------------------------------------------------
+
+QUEUE_SCHEMA = 1
+"""The queue file's own version, apart from the method document's."""
+
+QUEUE_SUFFIX = ".queue.toml"
+"""What a queue file is called, so the method library can tell one from a method."""
+
+
+_KINDS = {str: "text", int: "a whole number", bool: "true or false"}
+
+
+class QueueFileError(ValueError):
+    """A queue file that could not be read, with the reason a trainee can act on."""
+
+
+def dumps(queue: RunQueue, directory: str = "") -> str:
+    """The queue as TOML: each row's settings and the last seed, no outcomes.
+
+    Every method is written by its absolute path and, where one exists, by its path
+    relative to `directory` (the queue file's folder), so a queue copied to another PC
+    with its methods beside it opens by the second when the first is gone.
+    """
+    data: dict[str, object] = {"schema_version": QUEUE_SCHEMA}
+    if queue.seed is not None:
+        data["seed"] = queue.seed
+    rows = []
+    for row in queue.rows:
+        path = os.path.abspath(row.method_path)
+        entry: dict[str, object] = {"method": path.replace(os.sep, "/")}
+        if directory:
+            try:
+                entry["relative"] = os.path.relpath(path, directory).replace(os.sep, "/")
+            except ValueError:
+                pass  # another drive on Windows: there is no relative path
+        entry.update(conditions=row.conditions, replicates=row.replicates,
+                     setup=row.setup, go_on=row.go_on, stays_first=row.stays_first)
+        if row.pass_number:
+            entry.update({"pass": row.pass_number, "passes": row.pass_count})
+        rows.append(entry)
+    data["rows"] = rows
+    return tomli_w.dumps(data)
+
+
+def loads(text: str, directory: str = "") -> RunQueue:
+    """A queue from `dumps`' TOML, every row waiting.
+
+    `directory` resolves the relative paths. A method found by neither path keeps its
+    absolute one, so its row fails when it starts and says why, as a row whose file was
+    moved after it was added always has.
+    """
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise QueueFileError(f"this is not a queue file: {exc}") from exc
+    if data.get("schema_version") != QUEUE_SCHEMA:
+        raise QueueFileError(
+            f"this is not a queue file this version reads (schema_version "
+            f"{data.get('schema_version')!r}, expected {QUEUE_SCHEMA})")
+    seed = data.get("seed")
+    if seed is not None and (not isinstance(seed, int) or isinstance(seed, bool)):
+        raise QueueFileError("the seed is not a whole number")
+    entries = data.get("rows", [])
+    if not isinstance(entries, list):
+        raise QueueFileError("`rows` is not a list of rows")
+    queue = RunQueue([_row(number, entry, directory)
+                      for number, entry in enumerate(entries, start=1)])
+    queue.seed = seed
+    return queue
+
+
+def _row(number: int, entry: object, directory: str) -> QueueRow:
+    if not isinstance(entry, dict):
+        raise QueueFileError(f"row {number} is not a table")
+
+    def value(key: str, kind: type, default: object):  # noqa: ANN202
+        found = entry.get(key, default)
+        if not isinstance(found, kind) or (kind is int and isinstance(found, bool)):
+            raise QueueFileError(f"row {number}: `{key}` is not {_KINDS[kind]}")
+        return found
+
+    path = value("method", str, "")
+    if not path:
+        raise QueueFileError(f"row {number} names no method")
+    relative = value("relative", str, "")
+    if not os.path.isfile(path) and relative and directory:
+        beside = os.path.normpath(os.path.join(directory, relative))
+        if os.path.isfile(beside):
+            path = beside
+    path = os.path.normpath(path)
+    replicates = value("replicates", int, 1)
+    pass_number = value("pass", int, 0)
+    pass_count = value("passes", int, 0)
+    if replicates < 1:
+        raise QueueFileError(f"row {number}: `replicates` is less than 1")
+    if pass_number and not 1 <= pass_number <= pass_count:
+        raise QueueFileError(f"row {number}: pass {pass_number} of {pass_count}")
+    return QueueRow(method_path=path, conditions=value("conditions", str, ""),
+                    replicates=replicates, setup=value("setup", bool, True),
+                    go_on=value("go_on", bool, False),
+                    stays_first=value("stays_first", bool, False),
+                    pass_number=pass_number,
+                    pass_count=pass_count if pass_number else 0)
+
+
+def save(queue: RunQueue, path: str) -> None:
+    """Write the queue to `path`, its methods named relative to the file's folder too."""
+    text = dumps(queue, os.path.dirname(os.path.abspath(path)))
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+
+
+def load(path: str) -> RunQueue:
+    """Read a queue file: `OSError` for one that will not open, `QueueFileError` for
+    one that opens and is not a queue."""
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    return loads(text, os.path.dirname(os.path.abspath(path)))
