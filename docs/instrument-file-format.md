@@ -15,6 +15,7 @@ schema_version = 1
 [instrument]
 name = "SLIM3"
 description = "SLIMPHONY, 20 dB attenuation after the preamplifier."
+pusher_period_us = 129.0
 
 [calibration]
 slope = 0.738123
@@ -32,6 +33,14 @@ inverted = false
 - `instrument.name` is written into the finished file as `InstrumentName`, the standard UIMF
   global parameter, so a tool that has never heard of clockwork still reports which machine
   acquired the data.
+- `instrument.pusher_period_us` is the pusher period every run on this instrument expects, in
+  microseconds. A method's tables count pusher triggers, so a method written for 129 µs runs
+  every event at half its time behind a pusher set to 62 µs. Before the first frame the
+  acquisition compares the period the console measured with the tick a rendered method declares,
+  or with this value for a method written by hand, and refuses the run beyond a 10% difference
+  and warns beyond 2%. Without this key a hand-written method's run is not checked, and the send
+  log says so. The value is stamped into every file as `ClockworkPusherPeriodUs`, so the same
+  comparison can be made on a file long after it was acquired.
 - `calibration` is the pair a frame carries as `CalibrationSlope` and `CalibrationIntercept`,
   plus the day they were determined. A calibration with no date cannot be told from one nobody
   has checked, which is why the date is part of the document.
@@ -115,8 +124,8 @@ of zero the acquisition was looking at, and `inverted` is the only place a file 
 `clockwork.instrument.load()` and `.loads()` collect every problem in a document before raising
 `InstrumentError`, so a document with several mistakes reports all of them in one pass. Rejected:
 an unrecognized `schema_version`, a key the schema does not define, a value of the wrong type, a
-number that is not finite, a negative `slope`, a `full_scale_v` that is not positive, and a
-`measured` that is not a date. A negative `offset_v` is accepted, because the offset is a position
+number that is not finite, a negative `slope`, a `full_scale_v` or `pusher_period_us` that is not
+positive, and a `measured` that is not a date. A negative `offset_v` is accepted, because the offset is a position
 within the window rather than a size.
 
 What the SA220P itself accepts for full scale is a property of the card and of the console that

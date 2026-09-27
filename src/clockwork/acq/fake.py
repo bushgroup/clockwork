@@ -97,6 +97,15 @@ published, and a realistic one makes every test move a megabyte a batch for
 nothing. Pass the real figures when the size is the point.
 """
 
+INSTRUMENT_PERIOD_SAMPLES = 258007
+"""The instrument's pusher period at 2 GS/s, 129.0036 us, as its console measures it.
+
+What `measured_period_samples` is set to when a stand-in should *claim* the instrument's
+pusher -- the `--fake` owner's does, so that a rendered method declaring the instrument's
+129 us tick is not refused by the pusher period check against a 4 us stand-in
+(`clockwork.acq.loop.check_pusher_period`) -- without publishing records that size.
+"""
+
 DEFAULT_POST_TRIGGER_SAMPLES = 1024
 DEFAULT_REARM_SAMPLES = 256
 DEFAULT_NOTIFY_ON_SCANS_COUNT = NOTIFY_ON_SCANS_COUNT
@@ -147,6 +156,7 @@ class FakeConsole:
         full_scale_v: float | None = 0.5,
         instruments: int = 1,
         pusher_period_samples: int = DEFAULT_PERIOD_SAMPLES,
+        measured_period_samples: int | None = None,
         post_trigger_samples: int = DEFAULT_POST_TRIGGER_SAMPLES,
         rearm_samples: int = DEFAULT_REARM_SAMPLES,
         notify_on_scans_count: int = DEFAULT_NOTIFY_ON_SCANS_COUNT,
@@ -199,6 +209,16 @@ class FakeConsole:
         """
 
         self.pusher_period_samples = pusher_period_samples
+        self.measured_period_samples = (pusher_period_samples
+                                        if measured_period_samples is None
+                                        else int(measured_period_samples))
+        """The period `acquire` and `tof width` report, `pusher_period_samples` unless set.
+
+        Apart from it because the two do different jobs here: `pusher_period_samples`
+        sizes every record published and spaces the trigger timestamps, so it is kept
+        small, and this is only the number a client reads back as `AverageTOFLength` and
+        checks a method's declared tick against (`INSTRUMENT_PERIOD_SAMPLES`)."""
+
         self.post_trigger_samples = post_trigger_samples
         self.rearm_samples = rearm_samples
         self.record_samples = record_size_samples(
@@ -619,7 +639,7 @@ class FakeConsole:
 
     def tof_width(self) -> TofWidth:
         return TofWidth(
-            pusher_pulse_width=self.pusher_period_samples,
+            pusher_pulse_width=self.measured_period_samples,
             num_samples=self.num_samples,
         )
 

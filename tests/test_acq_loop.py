@@ -65,6 +65,7 @@ from clockwork.acq import (
 )
 from clockwork.acq import loop as loop_module
 from clockwork.acq import send_phases as _send_phases
+from clockwork.instrument import Instrument
 from clockwork.mips import Box, BoxRejected, FakeBox, compile_table, digital_events
 from clockwork.mips import compressor as mips_compressor
 
@@ -1094,7 +1095,7 @@ def test_the_progress_stream_reports_every_stage_in_order(rig):
     send_phases(method, boxes)
     rig.acquire(method, boxes, progress=seen.append)
     kinds = [type(event) for event in seen]
-    assert kinds[0] is RunBegun
+    assert kinds[:2] == [acq.PusherPeriodChecked, RunBegun]
     assert kinds.count(FrameBegun) == ACCUMULATIONS
     assert kinds.count(FrameEnded) == ACCUMULATIONS
     assert kinds.count(Folded) == 1
@@ -1179,23 +1180,41 @@ def test_a_replicate_that_reuses_a_stem_collides_rather_than_overwriting(rig):
         rig.acquire(method, boxes, replicate=True)
 
 
-def test_a_rendered_run_carries_its_provenance_through_to_both_files(rig):
-    """`run_acquisition` takes one `Provenance` and hands it to the recording it
-    creates; the knobs, the mark and the series land in the raw file and the companion
-    alike (lab record, task 66). The fixture template shrunk to a table this rig runs."""
+def samples_at_2gsps(period_us: float) -> int:
+    """A pusher period as the console reports it, in samples at the instrument's rate."""
+    return round(period_us * 2000)
+
+
+def shrunk_template(tick_us: float | None = None):
+    """The template fixture shrunk to a table this rig runs, rendered, and its boxes.
+
+    The fixture's box2 carries a compression table this stand-in does not model, and a
+    non-strict box acknowledges it: the subject of every test using this is the stamp."""
     from clockwork.method import template as templates
     from test_method_template import LABELS, TEMPLATE
 
     text = (TEMPLATE.replace("accumulations = 10", "accumulations = 2")
             .replace("scans = 100", "scans = 32").replace("100:];", "32:];"))
+    if tick_us is not None:
+        text = text.replace("tick_us = 100.0", f"tick_us = {tick_us}")
     rendered = templates.render(templates.loads_template(text), {"cycles": 1}, LABELS)
-    # The fixture's box2 carries a compression table this stand-in does not model,
-    # and a non-strict box acknowledges it: the subject here is the stamp.
     boxes = make_boxes("box1", "box2",
                        transport=lambda: FakeBox(arb_modules=1, strict=False))
+    return rendered, boxes
+
+
+def test_a_rendered_run_carries_its_provenance_through_to_both_files(tmp_path):
+    """`run_acquisition` takes one `Provenance` and hands it to the recording it
+    creates; the knobs, the mark and the series land in the raw file and the companion
+    alike (lab record, task 66). The stand-in claims the template's 100 us pusher, or
+    the pusher period check would refuse the run against its own 4 us."""
+    from test_method_template import LABELS
+
+    rendered, boxes = shrunk_template()
     send_phases(rendered.method, boxes)
-    run = rig.acquire(rendered.method, boxes, provenance=acq.Provenance(
-        rendered=rendered, series=acq.Series("plan-1", index=3, position=1, seed=7)))
+    with Rig(tmp_path, measured_period_samples=samples_at_2gsps(100.0)) as rig:
+        run = rig.acquire(rendered.method, boxes, provenance=acq.Provenance(
+            rendered=rendered, series=acq.Series("plan-1", index=3, position=1, seed=7)))
     assert run.complete
     for path in (run.raw_path, run.summed_path):
         extra = UimfFile(path).global_params().extra
@@ -1204,6 +1223,94 @@ def test_a_rendered_run_carries_its_provenance_through_to_both_files(rig):
         assert extra["ClockworkLabelSample"] == LABELS["sample"]
         assert (extra["ClockworkSeriesId"], extra["ClockworkSeriesIndex"],
                 extra["ClockworkSeriesSeed"]) == ("plan-1", "3", "7")
+
+
+# --- the pusher period check ---------------------------------------------------------------
+
+
+def period_checks(seen: list) -> list[acq.PusherPeriodChecked]:
+    return [event for event in seen if isinstance(event, acq.PusherPeriodChecked)]
+
+
+def test_a_rendered_run_at_half_its_tick_is_refused_before_its_first_frame(tmp_path):
+    """The 2026-09-26 failure: a method rendered for 129 us, a pusher at 62 us. Refused
+    with both numbers in the sentence, no frame asked for and no file left behind
+    (lab record, task 88)."""
+    rendered, boxes = shrunk_template(tick_us=129.0)
+    send_phases(rendered.method, boxes)
+    seen: list[acq.Event] = []
+    with Rig(tmp_path, measured_period_samples=samples_at_2gsps(62.0)) as rig:
+        with pytest.raises(acq.PusherPeriodRefused) as refused:
+            rig.acquire(rendered.method, boxes, stem="halved", progress=seen.append,
+                        provenance=acq.Provenance(rendered=rendered))
+        assert rig.fake.frames == []
+    message = str(refused.value)
+    assert "62.0 us" in message and "129.0 us" in message and "the template" in message
+    assert refused.value.check.verdict == acq.PERIOD_REFUSED
+    assert refused.value.check.ratio == pytest.approx(62.0 / 129.0)
+    assert [check.verdict for check in period_checks(seen)] == [acq.PERIOD_REFUSED]
+    assert not any(isinstance(event, RunBegun) for event in seen)
+    assert not [name for name in os.listdir(tmp_path) if name.endswith(".uimf")]
+
+
+@pytest.mark.parametrize(("measured_us", "verdict"), [
+    (62.0, acq.PERIOD_REFUSED),
+    (126.0, acq.PERIOD_CAUTION),
+    (129.0036, acq.PERIOD_AGREES),
+])
+def test_a_hand_written_method_is_checked_against_the_instruments_period(
+        tmp_path, measured_us, verdict):
+    """A method written by hand declares no tick, so the instrument document's
+    `pusher_period_us` is the expectation: refused past ten per cent, cautioned past two
+    and run, silent at the instrument's own 0.003 %."""
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    seen: list[acq.Event] = []
+    instrument = Instrument(pusher_period_us=129.0)
+    with Rig(tmp_path, measured_period_samples=samples_at_2gsps(measured_us)) as rig:
+        if verdict == acq.PERIOD_REFUSED:
+            with pytest.raises(acq.PusherPeriodRefused, match="the instrument document"):
+                rig.acquire(method, boxes, instrument=instrument, progress=seen.append)
+            assert rig.fake.frames == []
+            return
+        run = rig.acquire(method, boxes, instrument=instrument, progress=seen.append)
+    [check] = period_checks(seen)
+    assert check.verdict == verdict and check.declared_by == "the instrument document"
+    assert run.complete
+    if verdict == acq.PERIOD_CAUTION:
+        assert run.warnings[0] == check.text
+        assert "126.0 us" in check.text and "129.0 us" in check.text
+    else:
+        assert not any("pusher period" in warning for warning in run.warnings)
+
+
+def test_the_templates_tick_is_preferred_to_the_instruments_period(tmp_path):
+    """A rendered method is checked against the tick its tables were computed from,
+    whatever the instrument document expects."""
+    rendered, boxes = shrunk_template()
+    send_phases(rendered.method, boxes)
+    seen: list[acq.Event] = []
+    with Rig(tmp_path, measured_period_samples=samples_at_2gsps(100.0)) as rig:
+        run = rig.acquire(rendered.method, boxes, progress=seen.append,
+                          instrument=Instrument(pusher_period_us=129.0),
+                          provenance=acq.Provenance(rendered=rendered))
+    assert run.complete
+    [check] = period_checks(seen)
+    assert (check.verdict, check.declared_us, check.declared_by) == (
+        acq.PERIOD_AGREES, 100.0, "the template")
+
+
+def test_a_run_with_no_declared_period_runs_and_says_it_was_not_checked(rig):
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    seen: list[acq.Event] = []
+    run = rig.acquire(method, boxes, progress=seen.append)
+    assert run.complete
+    [check] = period_checks(seen)
+    assert check.verdict == acq.PERIOD_UNCHECKED and check.declared_us is None
+    assert "was not checked" in check.text
 
 
 # --- the re-arm fallback -----------------------------------------------------------------

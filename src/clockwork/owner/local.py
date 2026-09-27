@@ -74,6 +74,7 @@ from ..acq import (
     send_phases,
     start_chain,
 )
+from ..acq.fake import INSTRUMENT_PERIOD_SAMPLES
 from ..instrument import Instrument
 from ..method import Method
 from ..method.template import Rendered, loads_template, render
@@ -591,7 +592,11 @@ class LocalOwner:
             return self.console_status
         self._set_status(ConsoleStatus(state="starting"))
         if self.fake:
-            self.console = FakeConsoleProcess(open_batches=1)
+            # Claiming the instrument's pusher, so a dry run of a method rendered for
+            # the instrument's 129 us tick is checked against 129 us and passes, rather
+            # than refused against the stand-in's own 4 us (lab record, task 88).
+            self.console = FakeConsoleProcess(
+                open_batches=1, measured_period_samples=INSTRUMENT_PERIOD_SAMPLES)
         elif job.command:
             self.console = ConsoleProcess(job.command)
         else:

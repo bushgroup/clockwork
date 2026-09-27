@@ -138,5 +138,6 @@ def brief(summary: Mapping[str, Any]) -> dict[str, Any]:
         "base_peak_mz": base.get("mz"),
         "base_peak_intensity": base.get("intensity"),
         "pusher_period_ns": summary.get("pusher_period_ns"),
+        "pusher_period_ratio": (summary.get("pusher_period_check") or {}).get("ratio"),
         "saturated_fraction": saturation.get("fraction"),
     }

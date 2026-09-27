@@ -18,7 +18,7 @@ from mainspring.uimf import Calibration as MzCalibration
 from mainspring.uimf import FrameSpec, GlobalSpec, SparseFrame, UimfWriter
 
 import clockwork
-from clockwork import summary
+from clockwork import record, summary
 from clockwork.acq.uimf import Provenance, Series, stamp_globals
 from clockwork.instrument import Calibration, Instrument
 from test_acq_loop import BOX, SCANS, Rig, make_boxes, make_method, send_phases
@@ -37,7 +37,8 @@ def bin_at(mz: float) -> int:
     return int(round(float(AXIS.bin_of(mz))))
 
 
-def write(path, frames, *, stamped=True, calibrated=True, provenance=None):
+def write(path, frames, *, stamped=True, calibrated=True, provenance=None,
+          period_ns=PERIOD_NS, instrument=None):
     """A file of `frames`, each `(FrameSpec keywords, {scan: [(bin, value), ...]})`.
 
     `stamped` gives it a hand-written method's clockwork stamp, which is what makes it one
@@ -46,14 +47,15 @@ def write(path, frames, *, stamped=True, calibrated=True, provenance=None):
     extra = {}
     if stamped:
         _loaded, rendered = rendered_fixture({"pulse_ms": 3.0})
-        extra = stamp_globals(rendered.method, provenance=provenance)
+        extra = stamp_globals(rendered.method, provenance=provenance,
+                              **({"instrument": instrument} if instrument else {}))
     with UimfWriter(path, GlobalSpec(bins=BINS, bin_width_ns=BIN_WIDTH_NS,
                                      detector_bits=14, extra=extra)) as writer:
         for keywords, points in frames:
             spec = FrameSpec(
                 calibration_slope=SLOPE if calibrated else 0.0,
                 calibration_intercept=INTERCEPT_US if calibrated else 0.0,
-                average_tof_length_ns=PERIOD_NS, **keywords)
+                average_tof_length_ns=period_ns, **keywords)
             number = writer.add_frame(spec)
             writer.write_sparse_frame(number, SparseFrame.from_scans(
                 frame=number, scans=spec.scans, bins=BINS,
@@ -236,6 +238,50 @@ def test_frame_totals_and_profiles_are_summed_in_blocks_and_lose_nothing(tmp_pat
 # --- provenance -----------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(("period_ns", "verdict"), [
+    (48_000.0, "refused"), (97_000.0, "caution"), (100_000.3, "agrees")])
+def test_the_pusher_period_is_checked_against_the_stamped_tick(tmp_path, period_ns, verdict):
+    """The sentence the acquisition would have said, for a file already written: the
+    2026-09-25 files ran at 0.48 of their tick (lab record, task 88)."""
+    _loaded, rendered = rendered_fixture({"pulse_ms": 3.0})
+    path = write(tmp_path / "run.uimf", [(dict(scans=40), clock_spectrum())],
+                 provenance=Provenance(rendered=rendered), period_ns=period_ns)
+    result = summary.summarize(path)
+    check = result["pusher_period_check"]
+    assert check["verdict"] == verdict
+    assert check["declared_us"] == 100.0
+    assert check["ratio"] == pytest.approx(period_ns / 100_000.0)
+    assert f"{period_ns / 1000:.1f} us" in check["text"] and "100.0 us" in check["text"]
+    assert record.brief(result)["pusher_period_ratio"] == check["ratio"]
+
+
+def test_a_hand_written_file_is_checked_against_the_instruments_stamped_period(tmp_path):
+    """Addison's 2026-09-25 case: hand-written methods, no tick, a pusher at 62 us. The
+    instrument's expected period is stamped, so the file can be judged afterwards."""
+    path = write(tmp_path / "hand.uimf", [(dict(scans=40), clock_spectrum())],
+                 period_ns=62_000.0, instrument=Instrument(pusher_period_us=129.0))
+    result = summary.summarize(path)
+    assert result["clockwork"]["ClockworkPusherPeriodUs"] == 129.0
+    check = result["pusher_period_check"]
+    assert (check["verdict"], check["declared_us"], check["declared_by"]) == (
+        "refused", 129.0, "the instrument document")
+    assert "62.0 us" in check["text"] and "129.0 us" in check["text"]
+
+
+def test_a_rendered_files_tick_is_preferred_to_the_stamped_instrument_period(tmp_path):
+    _loaded, rendered = rendered_fixture({"pulse_ms": 3.0})
+    path = write(tmp_path / "run.uimf", [(dict(scans=40), clock_spectrum())],
+                 provenance=Provenance(rendered=rendered), period_ns=100_000.0,
+                 instrument=Instrument(pusher_period_us=129.0))
+    check = summary.summarize(path)["pusher_period_check"]
+    assert (check["verdict"], check["declared_by"]) == ("agrees", "the template")
+
+
+def test_a_file_that_stamped_no_tick_has_no_period_check(tmp_path):
+    path = write(tmp_path / "hand.uimf", [(dict(scans=40), clock_spectrum())])
+    assert summary.summarize(path)["pusher_period_check"] is None
+
+
 def test_every_clockwork_parameter_is_read_back_typed_with_the_template_grouped(tmp_path):
     loaded, rendered = rendered_fixture({"pulse_ms": 3.0})
     provenance = Provenance(rendered=rendered,
@@ -258,6 +304,9 @@ def test_every_clockwork_parameter_is_read_back_typed_with_the_template_grouped(
         "knobs": {"PulseMs": 3.0, "Cycles": 1.0, "WaitMs": 10.0},
         "labels": {"Sample": "polyalanine"}, "marks": {"Off": {"ms": 4.0, "scan": 40}}}
     assert result["method"] == rendered.method.metadata.name
+
+    # The fixture's tick is 100 us and this file's pusher 129 us.
+    assert result["pusher_period_check"]["verdict"] == "refused"
 
     long_text = stamped["ClockworkTemplateText"]
     assert isinstance(long_text, dict) and long_text["chars"] > summary.TEXT_LIMIT

@@ -1628,6 +1628,7 @@ def main() -> int:
         ),
         vertical=instrument_module.Vertical(full_scale_v=0.5, offset_v=0.251,
                                             inverted=True),
+        pusher_period_us=129.0,
     )
     check_true("the two forms of one calibration agree to a part in 1e9",
                abs(machine.calibration.slope - 0.738123) < 1e-9
@@ -1758,6 +1759,11 @@ def main() -> int:
                    and stamped["ClockworkChannelOffset"] == "0.251"
                    and stamped["ClockworkInverted"] == "1"
                    and raw_file.global_params().extra["ClockworkFullScale"] == "0.5")
+        check_true("the pusher period the instrument expects is stamped beside the one "
+                   "measured, so a hand-written file can be judged after the fact",
+                   float(stamped["ClockworkPusherPeriodUs"]) == 129.0
+                   and float(raw_file.global_params().extra["ClockworkPusherPeriodUs"])
+                   == 129.0)
         check_true("the boxes' state and the conditions note are stamped too, so a file "
                    "says what shaped the beam and not only what strings were sent "
                    "(lab record, task 40)",
@@ -2320,6 +2326,33 @@ def main() -> int:
                 fake.data_error_status = False
                 fake.short_frames = []
 
+                # The pusher at half the period the method was written for: every
+                # push-counted event at half its time, and a whole series lost to it
+                # before this check existed (lab record, task 88). The stand-in claims
+                # 62 us; the instrument document expects 129.
+                fake.measured_period_samples = 124_000
+                frames_before = len(fake.frames)
+                try:
+                    acq.run_acquisition(
+                        recipe, boxes=boxes, console=console, stream=stream,
+                        directory=directory,
+                        post_trigger_samples=fake.post_trigger_samples,
+                        stem="selfcheck-loop-halved", silence=0.3, gate_dwell=dwell,
+                        instrument=instrument_module.Instrument(pusher_period_us=129.0),
+                    )
+                    halved = ""
+                except acq.PusherPeriodRefused as exc:
+                    halved = str(exc)
+                check_true(
+                    "a pusher at 62 us against an instrument that expects 129 us is "
+                    "refused before the first frame, naming both, and leaves no file",
+                    "62.0 us" in halved and "129.0 us" in halved
+                    and len(fake.frames) == frames_before
+                    and not os.path.exists(os.path.join(directory,
+                                                        "selfcheck-loop-halved.uimf")),
+                )
+                fake.measured_period_samples = fake.pusher_period_samples
+
                 # The one failure that produces a full frame of plausible data at the
                 # wrong offset, from a table that left the enable high or an enable
                 # lead off a pulled-up input (lab record, task 05). The start list is
@@ -2457,7 +2490,10 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as directory:
         boxes = {"box1": mips_module.Box(transport=mips_module.FakeBox(), name="box1")}
         acq.send_phases(recipe, boxes)
-        with acq.FakeConsole() as fake:
+        # Claiming the instrument's pusher, which `machine` expects: the pusher period
+        # check would otherwise refuse this run against the stand-in's own 4 us.
+        with acq.FakeConsole(
+                measured_period_samples=acq.fake.INSTRUMENT_PERIOD_SAMPLES) as fake:
             fake.frame_hold_s = 0.05
             with acq.DataStream(fake.data_endpoint) as stream, \
                     acq.Console(fake.command_endpoint) as console:

@@ -338,9 +338,10 @@ traces back to the exact strings sent to every box and the order they went in.
 | `console_version` | The acquisition console's reported version, or `None` if unavailable |
 
 Those five fields land in the finished UIMF file's `Global_Params`, under parameter IDs clockwork
-owns. Three more join them there from the [instrument file](instrument-file-format.md),
+owns. Four more join them there from the [instrument file](instrument-file-format.md):
 `ClockworkChannelOffset`, `ClockworkFullScale` and `ClockworkInverted`, which record the window the
-acquisition ran through; and two more from the run itself, `ClockworkBoxState` and
+acquisition ran through, and `ClockworkPusherPeriodUs`, the pusher period the instrument was
+expected to run at, to compare with the `AverageTOFLength` it was measured at; and two more from the run itself, `ClockworkBoxState` and
 `ClockworkConditions`, which record what the boxes were holding and what the operator said about
 the rest of the instrument. A method rendered from a template adds the template, its knobs,
 labels and marks, and a run acquired in a series adds its place in the series; both sets are in

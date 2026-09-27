@@ -44,7 +44,7 @@ from collections.abc import Callable
 from typing import TextIO
 
 from .. import __version__
-from ..acq import Event, Warned
+from ..acq import Event, PusherPeriodChecked, Warned
 from ..acq.process import listening_on, stop_listener
 from ..acq.wire import COMMAND_PORT
 from ..mips import Discovery
@@ -65,9 +65,11 @@ WATCH_S = 2.0
 """How often the console is looked at. A dead console costs nothing until a job needs
 it, so this is about the log line appearing promptly, not about the instrument."""
 
-_LOGGED = (JobStarted, JobFinished, JobFailed, Said, Warned, RunDone, ConsoleChanged)
+_LOGGED = (JobStarted, JobFinished, JobFailed, Said, Warned, PusherPeriodChecked, RunDone,
+           ConsoleChanged)
 """The events worth a line in the log. Not `BatchSeen`, fifteen a second, nor a
-`PhaseSent` per string, which the run's own send log already holds."""
+`PhaseSent` per string, which the run's own send log already holds. The pusher period
+line is one a run, and the one that says what period a run believed it had."""
 
 
 def log_path() -> str:

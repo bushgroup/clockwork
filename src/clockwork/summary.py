@@ -65,6 +65,7 @@ from mainspring.uimf import (
     summed_companion,
 )
 
+from .acq.loop import check_pusher_period
 from .acq.uimf import (
     KNOB_PREFIX,
     LABEL_PREFIX,
@@ -494,6 +495,16 @@ def summarize(
     - `calibration`: the first frame's pair, whether the file says it is done, whether it
       makes an axis, and whether every frame read carries the same pair.
     - `pusher_period_ns`: the first frame's `AverageTOFLength`, and its spread over the rest.
+    - `pusher_period_check`: that period against the `ClockworkTickUs` a rendered run
+      stamped, or else the `ClockworkPusherPeriodUs` the instrument document expected, as
+      the acquisition itself checks it (`clockwork.acq.check_pusher_period`):
+      `measured_us`, `declared_us`, `declared_by`, `ratio` (measured over declared, the
+      fraction of its time every push-counted event took), `verdict` (`agrees`,
+      `caution`, `refused`) and `text`, the sentence to repeat. `None` for a file that
+      stamped neither, which is every file acquired before 2026-09-27 by a hand-written
+      method. A file acquired before the check existed can carry `refused` here, and is the
+      reason this is reported at all: the 2026-09-25 and 09-26 files ran at 0.48 (lab
+      record, task 88).
     - `saturation`: see below.
     - `method`, `instrument`, `date_started`: PNNL's `AcquisitionMethod`, `InstrumentName`
       and `DateStarted`.
@@ -579,6 +590,20 @@ def summarize(
     scans_per_point, tic_profile = _decimate(_exact(profile, integral), points)
     clockwork, template = _provenance(opened.globals_, texts)
     extra = opened.globals_.extra
+    def declared(value: object) -> float | None:
+        return float(value) if _is_number(value) and value > 0 else None
+
+    tick_us = declared(template.get("tick_us") if template is not None else None)
+    expected_us = declared(clockwork.get("ClockworkPusherPeriodUs"))
+    period_check = None
+    if tick_us is not None or expected_us is not None:
+        checked = check_pusher_period(periods[0] / 1000.0, tick_us=tick_us,
+                                      instrument_period_us=expected_us)
+        period_check = {"measured_us": checked.measured_us,
+                        "declared_us": checked.declared_us,
+                        "declared_by": checked.declared_by,
+                        "ratio": checked.ratio, "verdict": checked.verdict,
+                        "text": checked.text}
     return opened.header() | {
         "written_by": opened.globals_.written_by or None,
         "method": extra.get("AcquisitionMethod") or None,
@@ -595,6 +620,7 @@ def summarize(
         "bin_width_ns": float(opened.globals_.bin_width_ns),
         "pusher_period_ns": periods[0],
         "pusher_period_spread_ns": max(periods) - min(periods),
+        "pusher_period_check": period_check,
         "total_counts": _py(_exact(np.asarray([spectrum.sum()]), integral)[0]),
         "stored_points": stored_points,
         "frame_tic": {"frames_per_point": frames_per_point, "values": frame_tic},

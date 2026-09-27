@@ -72,6 +72,8 @@ from PySide6.QtWidgets import (
 
 from ..acq import (
     DECLARED_ELSEWHERE,
+    PERIOD_CAUTION,
+    PERIOD_REFUSED,
     BatchSeen,
     BoxReady,
     BoxSaid,
@@ -82,6 +84,7 @@ from ..acq import (
     FrameEnded,
     GateChecked,
     PhaseSent,
+    PusherPeriodChecked,
     ReadingBack,
     Retried,
     RunBegun,
@@ -351,6 +354,11 @@ class RunPanel(QWidget):
             return
         if isinstance(event, Warned):
             self._warned(event.message)
+            return
+        if isinstance(event, PusherPeriodChecked):
+            # Shown on every run, in the warning colour once it is past the caution: the
+            # one number a push-counted method's timing rests on (lab record, task 88).
+            self.say(event.text, warn=event.verdict in (PERIOD_CAUTION, PERIOD_REFUSED))
             return
         if isinstance(event, ReadingBack):
             self.reading_back(event.box, listing=event.listing)

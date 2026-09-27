@@ -148,6 +148,10 @@ PROVENANCE_KEYS: tuple[tuple[ParamDef, str], ...] = (
               "Instrument conditions no getter reads, as the operator stated them: "
               "sample, MCP voltage, pusher period, pDRE, collision energy"),
      "conditions"),
+    (ParamDef(CLIENT_PARAM_ID_BASE + 17, "ClockworkPusherPeriodUs", "System.Double",
+              "The pusher period in microseconds the instrument document expected every "
+              "run to have, to compare with AverageTOFLength, which is the one measured"),
+     "pusher_period_us"),
 )
 """The stamp's fields as `Global_Params` parameters, each paired with the `stamp()` key
 it carries.
@@ -191,6 +195,14 @@ something no downstream tool has a name for. `ClockworkConditions` is the operat
 free text, the one part of an experiment that exists only if somebody typed it. Both were
 absent until task 40, and a file without them says what strings were sent and nothing
 about what the instrument was set to.
+
+`ClockworkPusherPeriodUs` is the instrument document's `pusher_period_us`, the period a
+method written by hand was checked against before its first frame, and the only record of
+that expectation a hand-written file can carry: a rendered run has its template's
+`ClockworkTickUs`, and without this a hand-written file acquired behind a moved pusher is
+indistinguishable afterwards from one acquired on purpose at that period. Every one of the
+316 hand-written files of 2026-09-25 was the first kind (lab record, task 88). Out of
+numerical order because +10 to +16 were taken by the render and the series by then.
 """
 
 RENDER_KEYS: tuple[ParamDef, ...] = (
@@ -1274,6 +1286,7 @@ def stamp_globals(
     # (lab record, task 40). An empty string is written by nothing, below.
     record["box_state"] = box_state
     record["conditions"] = conditions
+    record["pusher_period_us"] = instrument.pusher_period_us
     values: dict[str, object] = {"AcquisitionMethod": record["method_name"]}
     if adc_name:
         values["ADCName"] = adc_name

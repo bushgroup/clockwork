@@ -155,6 +155,12 @@ __all__ = [
     "FRAME_TIMEOUT_FLOOR_S",
     "FRAME_TIMEOUT_SLACK",
     "GATE_PUBLISH_ALLOWANCE_S",
+    "PERIOD_AGREES",
+    "PERIOD_CAUTION",
+    "PERIOD_REFUSED",
+    "PERIOD_UNCHECKED",
+    "PUSHER_CAUTION_FRACTION",
+    "PUSHER_REFUSAL_FRACTION",
     "ROW_SETTLE_S",
     "SILENCE_S",
     "START_STEP_GAP_S",
@@ -172,6 +178,8 @@ __all__ = [
     "FrameRecord",
     "GateChecked",
     "PhaseSent",
+    "PusherPeriodChecked",
+    "PusherPeriodRefused",
     "Run",
     "RunBegun",
     "Retried",
@@ -182,6 +190,7 @@ __all__ = [
     "WHEN_BEFORE",
     "Warned",
     "cautions",
+    "check_pusher_period",
     "DECLARED_ELSEWHERE",
     "declared_differences",
     "enable_witness",
@@ -277,6 +286,26 @@ waits next (lab record, task 35).
 It was six seconds until task 34, when it was the only criterion there was, and it was
 then the whole of the per-repetition dead time: the day's frames delivered their last
 batch 0.69 to 0.75 s after `acquire frame` and the loop waited a further six.
+"""
+
+PUSHER_CAUTION_FRACTION = 0.02
+PUSHER_REFUSAL_FRACTION = 0.10
+"""How far the pusher period the console measured may sit from the one the method assumed.
+
+As a fraction of the declared period: past the first a run is cautioned and goes on, past
+the second it is refused before its first frame (`check_pusher_period`). **The assumption
+is the whole of a push-counted method's timing.** A table counts pusher triggers, so every
+event on it lands at `ticks * measured period`, and a method written or rendered for
+129 us runs each of its events at `measured / declared` of the time it meant. From
+2026-09-25 the Q-Tof's pusher ran at 62 us and nothing noticed for two days: every file
+stamped `AverageTOFLength` 62 000 ns beside `ClockworkTickUs` 129.0, a 200 ms activation
+ran ~96 ms, and a whole CLOCK series was lost to it (lab record, task 88).
+
+Both numbers are proposals, not measurements. The instrument's measured period sits
+0.003 % from its declared 129.0 us and the failure was 52 %; nothing in between has been
+seen. Two per cent is already a 4 ms shift across a 200 ms event, which is the margin a
+template's two clock domains are designed around, and ten per cent is a method that no
+longer means what it says.
 """
 
 FRAME_POLL_S = 0.050
@@ -448,6 +477,20 @@ class AcquisitionRefused(AcqError):
     """
 
 
+class PusherPeriodRefused(AcqError):
+    """The pusher is not running at the period the method was written for.
+
+    Raised after the chain has started and before the first frame, which is as early as
+    the measurement exists: the boxes are already armed, which is harmless, and no file
+    has been created. Something has been sent, unlike `AcquisitionRefused`, which is why
+    it is not one. `check` carries both numbers.
+    """
+
+    def __init__(self, check: PusherPeriodChecked) -> None:
+        self.check = check
+        super().__init__(check.text)
+
+
 class EnableGateError(AcqError):
     """The digitizer was recording before the frame was released.
 
@@ -512,6 +555,89 @@ class Warned(Event):
     @property
     def text(self) -> str:
         return self.message
+
+
+PERIOD_UNCHECKED = "unchecked"
+PERIOD_AGREES = "agrees"
+PERIOD_CAUTION = "caution"
+PERIOD_REFUSED = "refused"
+"""`PusherPeriodChecked.verdict`: nothing declared, within the caution, past it, past the
+refusal. Words rather than an enum because they go into JSON (`clockwork.summary`)."""
+
+
+@dataclass(frozen=True, slots=True)
+class PusherPeriodChecked(Event):
+    """The pusher period the console measured, against the one the method assumed.
+
+    `declared_us` is the rendered template's `tick_us` where the method came from one,
+    otherwise the instrument document's `pusher_period_us`, otherwise `None` and nothing
+    was compared; `declared_by` says which. `text` is the one sentence a window, a send
+    log and `clockwork.summary.summarize` all show, and it names both numbers.
+    """
+
+    measured_us: float
+    declared_us: float | None = None
+    declared_by: str = ""
+
+    @property
+    def ratio(self) -> float | None:
+        """`measured / declared`: the fraction of its declared time each event takes."""
+        if self.declared_us is None:
+            return None
+        return self.measured_us / self.declared_us
+
+    @property
+    def verdict(self) -> str:
+        ratio = self.ratio
+        if ratio is None:
+            return PERIOD_UNCHECKED
+        off = abs(ratio - 1.0)
+        if off > PUSHER_REFUSAL_FRACTION:
+            return PERIOD_REFUSED
+        if off > PUSHER_CAUTION_FRACTION:
+            return PERIOD_CAUTION
+        return PERIOD_AGREES
+
+    @property
+    def text(self) -> str:
+        measured = f"the pusher period measured {self.measured_us:.1f} us"
+        ratio = self.ratio
+        if ratio is None:
+            return (f"{measured}; neither a template nor the instrument document declares "
+                    "one, so it was not checked")
+        against = (f"{abs(ratio - 1.0) * 100:.2g} % from the {self.declared_us:.1f} us "
+                   f"{self.declared_by} declares")
+        verdict = self.verdict
+        if verdict == PERIOD_AGREES:
+            return f"{measured}, {against}"
+        if verdict == PERIOD_CAUTION:
+            return (f"caution: {measured}, {against}; every push-counted event runs at "
+                    f"{ratio:.3g} of its declared time")
+        return (f"refused before the first frame: {measured}, {against}, so every "
+                f"push-counted event would run "
+                f"at {ratio:.2g} of its declared time; has the pusher been changed?")
+
+
+def check_pusher_period(
+    measured_us: float,
+    *,
+    tick_us: float | None = None,
+    instrument_period_us: float | None = None,
+) -> PusherPeriodChecked:
+    """Compare a measured pusher period with the one a method assumed.
+
+    The template's tick is preferred to the instrument's period because it is the number
+    the method's tables were computed from; the instrument document's is the expectation
+    for a method written by hand, which declares nothing
+    (`clockwork.instrument.Instrument.pusher_period_us`). Neither declared is a verdict
+    of its own and not an agreement. The thresholds are `PUSHER_CAUTION_FRACTION`'s.
+    """
+    if tick_us is not None:
+        return PusherPeriodChecked(float(measured_us), float(tick_us), "the template")
+    if instrument_period_us is not None:
+        return PusherPeriodChecked(float(measured_us), float(instrument_period_us),
+                                   "the instrument document")
+    return PusherPeriodChecked(float(measured_us))
 
 
 @dataclass(frozen=True, slots=True)
@@ -2117,6 +2243,13 @@ def run_acquisition(
     same one, since it is the same render; a series' next run passes its own position.
     It reaches only a recording created here -- one handed in was stamped by its maker.
 
+    **The pusher period is checked before the first frame**: the one the console measured
+    against the rendered template's `tick_us`, or failing that the `instrument`
+    document's `pusher_period_us` (`check_pusher_period`). The comparison is reported as a
+    `PusherPeriodChecked` whatever it finds; past `PUSHER_CAUTION_FRACTION` it is also one
+    of the run's warnings, and past `PUSHER_REFUSAL_FRACTION` the run raises
+    `PusherPeriodRefused` with no file created (lab record, task 88).
+
     `stop` is asked, between one repetition and the next, whether to end the run; a
     string is the reason and ends it, `None` carries on. **This is the whole of a
     window's Stop button**, and it is a question asked between repetitions rather than
@@ -2161,6 +2294,7 @@ def run_acquisition(
     owns_chain = width is None
     if width is None:
         width = start_chain(console, stream, ungate=ungate_chain)
+    period_warnings: list[str] = []
     try:
         if recording is None:
             if directory is None or post_trigger_samples is None:
@@ -2172,6 +2306,23 @@ def run_acquisition(
                 width, sample_rate_hz=_sample_rate(console),
                 post_trigger_samples=post_trigger_samples,
             )
+        else:
+            geometry = recording.geometry
+        # As early as the measurement exists and before any file does, so a run whose
+        # pusher is not the one its method was written for leaves nothing behind but the
+        # line saying why (`PUSHER_REFUSAL_FRACTION`, lab record, task 88).
+        rendered = provenance.rendered if provenance is not None else None
+        checked = check_pusher_period(
+            geometry.average_tof_length_ns / 1000.0,
+            tick_us=rendered.tick_us if rendered is not None else None,
+            instrument_period_us=instrument.pusher_period_us,
+        )
+        report(checked)
+        if checked.verdict == PERIOD_REFUSED:
+            raise PusherPeriodRefused(checked)
+        if checked.verdict == PERIOD_CAUTION:
+            period_warnings.append(checked.text)
+        if recording is None:
             recording = Recording.create(
                 directory, method, geometry, stem=stem, instrument=instrument,
                 adc_name=adc_name, console_version=info.text,
@@ -2222,7 +2373,7 @@ def run_acquisition(
     kept = os.path.isfile(run.raw_path)
     keep_raw = (recording.keep_raw if recording is not None
                 else method.acquisition.keep_raw)
-    warnings = list(run.warnings)
+    warnings = period_warnings + list(run.warnings)
     if kept and not keep_raw:
         # Nothing here lies about the directory -- `raw_kept` and `Run.text` are stats
         # rather than predictions -- but `raw_kept = True` reads identically whether the

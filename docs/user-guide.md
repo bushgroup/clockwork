@@ -117,6 +117,15 @@ available. Send setup again if the box needs that line.
 **Stop** ends a run after its current repetition and fold rather than mid-flight, so what a stopped
 run leaves on disk is a short experiment and not a broken one.
 
+**A run whose pusher is not running at the method's period is refused before its first frame.**
+Before each run's first frame the run log gives the pusher period the digitizer measured beside the
+one the method was written for, which is the template's tick for a rendered method and the
+instrument file's `pusher_period_us` for one written by hand. A method's tables count pushes, so
+behind a pusher at 62 µs a method written for 129 µs runs every event at 0.48 of its time. Beyond
+a 10% difference the run stops there with the reason named and leaves no data file; beyond 2% it
+runs and the line is shown as a warning. Either means the time-of-flight's pusher setting has
+changed, so ask whoever set up the instrument that day before acquiring again.
+
 ## What the progress bar counts, and the wait at the end
 
 The bar counts **scans across the whole run**, not repetitions, and it advances about fifteen

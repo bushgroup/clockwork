@@ -17,6 +17,7 @@ document in the same flat TOML the method uses (lab record, task 25, decided wit
     [instrument]
     name = "SLIM3"
     description = "SLIMPHONY, 20 dB after the preamplifier"
+    pusher_period_us = 129.0
 
     [calibration]
     slope = 0.738123
@@ -32,6 +33,13 @@ Every table is optional and so is the document: `UNCALIBRATED` is what an acquis
 when nobody supplies one, and it writes the file this code wrote before this module existed,
 `CalibrationDone = 0` and no vertical settings in the stamp. A file acquired that way is
 calibratable afterwards from its own parameters, which is why nothing ever blocked on this.
+
+**`pusher_period_us` is what every run on this instrument expects the pusher to be.** A
+rendered method declares its own tick and is checked against that; a method written by hand
+declares nothing, and this is what its run is checked against instead
+(`clockwork.acq.check_pusher_period`, lab record, task 88). Absent, such a run is not checked.
+It is a property of the instrument for the same reason the calibration is: the TOF's pusher
+is set on the TOF, not in the strings.
 
 **The calibration is stated against the file's own bin axis**, `mz = (slope * (t - intercept))^2`
 with `t = bin * BinWidth_ns / 1000` in microseconds -- UIMF-Library's formula, implemented
@@ -175,6 +183,7 @@ class Instrument:
 
     name: str = ""
     description: str = ""
+    pusher_period_us: float | None = None
     calibration: Calibration = field(default_factory=Calibration)
     vertical: Vertical = field(default_factory=Vertical)
     schema_version: int = SCHEMA_VERSION
@@ -276,9 +285,12 @@ def from_dict(data: dict) -> Instrument:
                      ("schema_version", "instrument", "calibration", "vertical"), problems)
 
     identity = _table(data, "instrument", problems)
-    _no_unknown_keys(identity, "instrument", ("name", "description"), problems)
+    _no_unknown_keys(identity, "instrument", ("name", "description", "pusher_period_us"),
+                     problems)
     name = _text(identity, "name", "instrument", problems)
     description = _text(identity, "description", "instrument", problems)
+    pusher_period = _number(identity, "pusher_period_us", "instrument", problems,
+                            positive=True)
 
     raw_calibration = _table(data, "calibration", problems)
     _no_unknown_keys(raw_calibration, "calibration",
@@ -311,6 +323,7 @@ def from_dict(data: dict) -> Instrument:
     return Instrument(
         name=name,
         description=description,
+        pusher_period_us=pusher_period,
         calibration=Calibration(slope=slope or 0.0, intercept=intercept or 0.0,
                                 measured=measured),
         vertical=Vertical(full_scale_v=full_scale, offset_v=offset, inverted=inverted),
@@ -331,6 +344,8 @@ def to_dict(instrument: Instrument) -> dict:
         identity["name"] = instrument.name
     if instrument.description:
         identity["description"] = instrument.description
+    if instrument.pusher_period_us is not None:
+        identity["pusher_period_us"] = instrument.pusher_period_us
     if identity:
         data["instrument"] = identity
 

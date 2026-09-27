@@ -12,6 +12,7 @@ schema_version = 1
 [instrument]
 name = "SLIM3"
 description = "20 dB after the preamplifier."
+pusher_period_us = 129.0
 
 [calibration]
 slope = 0.738123
@@ -30,6 +31,7 @@ def test_loads_sample_document() -> None:
     assert machine.schema_version == instrument.SCHEMA_VERSION == 1
     assert machine.name == "SLIM3"
     assert machine.description == "20 dB after the preamplifier."
+    assert machine.pusher_period_us == 129.0
     assert machine.calibration == instrument.Calibration(
         slope=0.738123, intercept=0.07690495, measured=datetime.date(2026, 9, 9)
     )
@@ -140,6 +142,15 @@ def test_accepts_a_negative_offset() -> None:
     """The offset is a position within the window, not a size."""
     machine = instrument.loads("[vertical]\noffset_v = -0.2\n")
     assert machine.vertical.offset_v == -0.2
+
+
+def test_the_pusher_period_is_optional_and_positive() -> None:
+    """Absent, a hand-written method's run is not checked; stated, it has to be a period."""
+    assert instrument.loads('[instrument]\nname = "SLIM3"\n').pusher_period_us is None
+    assert "pusher_period_us" not in instrument.dumps(instrument.UNCALIBRATED)
+    with pytest.raises(instrument.InstrumentError) as excinfo:
+        instrument.loads("[instrument]\npusher_period_us = 0\n")
+    assert "instrument.pusher_period_us" in str(excinfo.value)
 
 
 def test_rejects_an_unknown_key() -> None:
