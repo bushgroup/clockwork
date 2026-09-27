@@ -74,6 +74,7 @@ from mainspring.uimf.writer import FRAME_KEYS, GLOBAL_KEYS
 from ..method import NOTIFY_ON_SCANS_COUNT
 from .wire import (
     ACK,
+    DATA_ERROR_PREFIX,
     ERROR_PREFIX,
     FINISHED,
     FINISHED_ACQUIRE,
@@ -301,6 +302,12 @@ class FakeConsole:
         (lab record, task 83). The frame after one carries on from the real end of the
         counter. Combine with `short_frames` for the shape the instrument has shown; on
         its own it is the replay that counts out."""
+
+        self.data_error_status = False
+        """Whether a batch `short_frames` withholds is also reported on `status`, as
+        `error data: ...`, the way a fork from 1.3.0 reports a batch its data subscriber
+        refused (`docs/console-protocol.md`, "Two status messages the fork adds"). Off,
+        the batch is only missing, which is every earlier console."""
 
         self.short_frame_errors = 3
         self.logged_errors = 0
@@ -646,6 +653,10 @@ class FakeConsole:
                 # Written and never published: `short_frames`.
                 if request.file_name and write_error is None:
                     write_error = self._write_scans(request, first_scan, scans)
+                if self.data_error_status:
+                    self._publish(TOPIC_STATUS, (
+                        f"{DATA_ERROR_PREFIX} index oob error -> index: 526398123 in scan "
+                        f"{first_scan} of frame {request.frame_number}").encode())
             elif index >= upfront:
                 # Owed to the frame and published after its end, by the serve thread
                 # between commands. The last of them carries the whole delay, so that a

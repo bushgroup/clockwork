@@ -163,6 +163,7 @@ def test_a_crlf_file_is_written_back_with_crlf(tmp_path):
         ("ControlIoPort=7", "ControlIoPort must be between 1 and 3"),
         ("TriggerSlope=sideways", "TriggerSlope must be rising or falling"),
         ("TriggerLevel=high", "TriggerLevel must be a number"),
+        ("MarkerDiagnostics=2", "MarkerDiagnostics must be 0 or 1"),
     ],
 )
 def test_the_values_the_fork_refuses_to_start_on_are_caught_here(line, expected):

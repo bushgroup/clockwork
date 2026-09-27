@@ -893,10 +893,20 @@ class FrameRecord:
 
     The card's clock runs on within a chain, across frames and runs alike, so a frame
     whose first published timestamp is not past the latest the chain's stream has carried
-    (`DataStream.last_stamp`) is the previous frame's markers stream read a second time, its scans filled with samples that belong to neither frame
+    (`DataStream.last_stamp`) is the previous frame's markers stream read a second time,
+    its scans filled with samples that belong to neither frame
     (`docs/console-protocol.md`, "Trigger timestamps run on across frames"; lab record,
     task 83). Such a frame is lost whatever it counts, so it is `damaged` even when every
     scan arrived.
+    """
+
+    data_errors: int = 0
+    """How many `error data:` lines the console published while this frame ran.
+
+    Each is a batch the console's data subscriber refused and so never published, the
+    frame's acquisition carrying on to its `finished` (`docs/console-protocol.md`, "Two
+    status messages the fork adds"). A fork from 1.3.0 says so; before it the same batch
+    was only missing. Such a frame is `damaged` however it ended (lab record, task 83).
     """
 
     retry: bool = False
@@ -930,14 +940,14 @@ class FrameRecord:
 
     @property
     def damaged(self) -> bool:
-        """Acquired, but not a repetition to keep: `short`, or `replayed`.
+        """Acquired, but not a repetition to keep: `short`, `replayed`, or with `data_errors`.
 
         What the retry, the completion marker and the fold key on (lab record, tasks 82
         and 83). Every replayed frame seen so far also came up short, but a replay that
         corrupted no trigger would count out, and would otherwise be folded as a second
         copy of the repetition before it.
         """
-        return self.short or (self.acquired and self.replayed)
+        return self.short or (self.acquired and (self.replayed or self.data_errors > 0))
 
     @property
     def writer_lag_rows(self) -> int | None:
@@ -960,6 +970,9 @@ class FrameRecord:
         fell_back = ", ended on the silence" if self.ended_by == "silence" else ""
         if self.replayed:
             fell_back += ", the previous frame's triggers read again"
+        if self.data_errors:
+            fell_back += (f", {self.data_errors} batch{'es' if self.data_errors != 1 else ''} "
+                          "refused by the console")
         if self.retry:
             fell_back += ", its second attempt"
         if not self.acquired:
@@ -2700,6 +2713,7 @@ class _Loop:
         # its batches, which covers the chain's own opening batches and every earlier
         # frame and run on the chain, thrown-away attempts included.
         mark = self.stream.last_stamp
+        data_errors_before = len(self.stream.data_errors)
         began = self.clock()
         # Cleared here and not when the record is built, so that the window a witness is
         # accepted in runs from this frame's `acquire frame` to its end. A completion
@@ -2708,6 +2722,7 @@ class _Loop:
         self._witnessed_at = None
         outcome, detail, ended_by = "", "", ""
         replayed = False
+        data_errors = 0
         timings: dict[str, float] = {}
         """What `release` measured, which only it can: it runs inside `run_frame`."""
 
@@ -2764,13 +2779,15 @@ class _Loop:
             wait_seconds = self.clock() - wait_began
             rows_after = self.recording.rows_in(request.frame_number)
             replayed = _replayed(seen, mark)
+            data_errors = len(self.stream.data_errors) - data_errors_before
         finally:
             # The completion marker last, after the console has stopped writing to this
             # frame: it is the only thing in the file that tells a frame that finished
             # from one that was cut off, and a frame that failed must not carry it. Nor
             # does a damaged one, which is acquired again or set aside.
             self.recording.end_frame(
-                complete=outcome == "acquired" and ended_by != "silence" and not replayed)
+                complete=(outcome == "acquired" and ended_by != "silence" and not replayed
+                          and not data_errors))
 
         # Last look at the boxes before the record is sealed: the wait drains on
         # `frame_poll` and ends on the poll after its last one, so a completion line that
@@ -2793,6 +2810,7 @@ class _Loop:
             wait_seconds=wait_seconds,
             ended_by=ended_by,
             replayed=replayed,
+            data_errors=data_errors,
             settle_seconds=settle_seconds,
             start_list_seconds=timings.get("start_list", 0.0),
             table_completed_s=(None if self._witnessed_at is None

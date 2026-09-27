@@ -2298,6 +2298,28 @@ def main() -> int:
                 )
                 fake.replayed_frames = []
 
+                # From console 1.3.0 a batch the data subscriber refused is said on
+                # `status` as `error data:`, and the frame runs on: a damaged frame, not
+                # a failed one (docs/console-protocol.md, "Two status messages the fork
+                # adds"; lab record, task 83).
+                fake.data_error_status = True
+                fake.short_frames = [0, 2]
+                refused = acq.run_acquisition(
+                    recipe, boxes=boxes, console=console, stream=stream,
+                    directory=directory,
+                    post_trigger_samples=fake.post_trigger_samples,
+                    stem="selfcheck-loop-data-error", silence=0.3, gate_dwell=dwell,
+                )
+                check_true(
+                    "a repetition whose batches the console refused on status is acquired "
+                    "again rather than failed",
+                    refused.complete and len(refused.retried) == 1
+                    and refused.retried[0].acquired
+                    and refused.retried[0].data_errors == 2,
+                )
+                fake.data_error_status = False
+                fake.short_frames = []
+
                 # The one failure that produces a full frame of plausible data at the
                 # wrong offset, from a table that left the enable high or an enable
                 # lead off a pulled-up input (lab record, task 05). The start list is

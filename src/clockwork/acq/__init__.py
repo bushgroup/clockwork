@@ -176,6 +176,7 @@ from .uimf import (
 from .wire import (
     ACK,
     COMMAND_PORT,
+    DATA_ERROR_PREFIX,
     DATA_PORT,
     ERROR_PREFIX,
     FINISHED,
@@ -242,6 +243,7 @@ __all__ = [
     "DEFAULT_TIMEOUT_S",
     "DataStream",
     "EMPTY_SETTLE_S",
+    "DATA_ERROR_PREFIX",
     "ERROR_PREFIX",
     "EmptyFrameError",
     "EnableGateError",

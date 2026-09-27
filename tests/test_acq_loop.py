@@ -907,6 +907,37 @@ def test_a_repetition_replayed_twice_stops_the_run_and_is_left_out_of_the_fold(b
     assert_companion_sums_the_raw_file(run)
 
 
+def test_a_frame_whose_batches_the_console_refused_is_acquired_again_not_failed(batched):
+    """From 1.3.0 the fork says `error data:` for each batch its data subscriber refused,
+    and the frame runs on to its `finished`. That is a damaged frame and not a failed
+    acquisition: it is acquired again like a short one, and the plain `error` that ends a
+    frame as a failure is not what it becomes (lab record, task 83)."""
+    batched.fake.data_error_status = True
+    batched.fake.short_frames = [0, 2]
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = batched.acquire(method, boxes)
+
+    assert run.complete, run.text
+    (first,) = run.retried
+    assert first.acquired, first.text
+    assert (first.repetition, first.data_errors) == (2, 2)
+    assert "2 batches refused by the console" in first.text
+    assert [record.data_errors for record in run.frames] == [0, 0, 0]
+    assert_companion_sums_the_raw_file(run)
+
+
+def test_a_refused_batch_damages_a_frame_that_counted_out():
+    """The console's count and the stream's can agree and the frame still be damaged:
+    a batch refused is a batch whose rows reached the file wrong."""
+    record = loop_module.FrameRecord(method_frame=1, repetition=1, frame_number=1,
+                                     outcome="acquired", ended_by="counted", data_errors=1)
+    assert record.damaged and not record.short and not record.replayed
+    assert not dataclasses.replace(record, data_errors=0).damaged
+    assert not dataclasses.replace(record, outcome="ConsoleAcquisitionError").damaged
+
+
 def test_a_replay_in_a_runs_first_frame_is_caught_against_the_run_before_on_its_chain(
     batched,
 ):

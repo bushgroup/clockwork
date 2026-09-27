@@ -317,9 +317,10 @@ string. `FullScaleRange` is read at startup and applied by `vertical`, and nothi
 protocol reports it back, so `info` is how a client records the vertical window a file was
 acquired with rather than the window the configuration file was last edited to say.
 
-The fork refuses five of these before they reach the driver, naming the key that is wrong: a
+The fork refuses six settings before they reach the driver, naming the key that is wrong: a
 threshold outside the signed 16-bit range, a hysteresis outside 100 to 1023, a full scale other
-than 0.5 or 2.5, a port other than 1, 2 or 3, and a slope other than `rising` or `falling`. The
+than 0.5 or 2.5, a port other than 1, 2 or 3, a slope other than `rising` or `falling`, and a
+`MarkerDiagnostics` (below) other than 0 or 1. The
 hysteresis bound and the full-scale pair are the SA220P's own documented limits: the card offers
 exactly two full-scale ranges, and it accepts a hysteresis only in [100, 1023], so every other
 value in the span the fork used to allow would have reached the driver and been refused there.
@@ -331,7 +332,19 @@ which is [hysteresis - 32768, +32767] and so moves with the hysteresis. That is 
 -32667 sits one code above the minimum at a hysteresis of 100 and would be refused by the driver
 at a hysteresis of 1023.
 
-### One status message the fork adds
+### One setting the fork adds
+
+`MarkerDiagnostics` (from 1.3.0, default `0`) replaces nothing upstream. At `1` the console's log
+gains, for the first 2000 triggers of every frame, a line per markers fetch (what was asked,
+available and returned, and the 16-element marker hunk either side of the fetch boundary) and a
+line per batch (its first and last trigger's index and timestamp, its gate count). Two reports
+are written whatever it says, because they fire only on a fault: `markers replay`, when a frame's
+first trigger timestamp is not past the previous frame's last, and `gate past the record`, when a
+gate marker places either end of its gate beyond the record, with the hunk it came from, at most
+32 a frame and a count at the frame's end. All of it is at `info` and `warn` in the log and none
+of it reaches the ZeroMQ protocol.
+
+### Two status messages the fork adds
 
 An acquisition that fails publishes
 
@@ -353,6 +366,18 @@ reliable, since the data socket drops messages when a client falls behind, but n
 worth treating as a failure: the console publishes a batch per `NotifyOnScansCount` scans
 whether or not anything crossed the zero-suppress threshold, so a frame with no batches
 acquired nothing.
+
+From 1.3.0 a batch the data subscriber cannot sum into its dense spectrum publishes
+
+    error data: <what went wrong> in scan <scan> of frame <frame>
+
+on the same topic, one line, and that batch is never published on `data`. The acquisition is
+not affected: the frame goes on and ends with its `finished`, and the file writer, which is a
+subscriber of its own, stores the batch's rows as it always did. So this is not a failed
+acquisition but a damaged frame. The one cause seen is a run length past the end of the record,
+the `index oob error` of the previous-frame replay above, whose rows then reach the file at
+impossible m/z. A client that matches `error ` for a failed acquisition should test for
+`error data:` first. Before 1.3.0 the same fault reached only the console's log.
 
 The ZeroMQ protocol is unchanged in every command and in both replies. A client works against
 either build.

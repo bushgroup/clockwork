@@ -126,6 +126,11 @@ class DataStream:
         """Just the ones that reported a failure, for a caller that wants the
         session's history rather than the frame that raised."""
 
+        self.data_errors: list[Status] = []
+        """The fork's `error data:` lines, a batch refused by the data subscriber each.
+        Also in `errors`; kept apart because they damage a frame rather than fail its
+        acquisition, and `wait_for_status` does not raise on them (lab record, task 83)."""
+
         self.last_stamp: int | None = None
         """The latest trigger timestamp any batch on this stream has carried since the
         chain was opened, or None before the first. `start_chain` clears it, because a
@@ -215,6 +220,8 @@ class DataStream:
         self.statuses.append(status)
         if status.is_error:
             self.errors.append(status)
+        if status.is_data_error:
+            self.data_errors.append(status)
         if _LOG.isEnabledFor(logging.DEBUG):
             _LOG.debug("%s %r", topic, status.text,
                        extra=_sent(_DECIDED, _CONSOLE, f"{topic} {status.text!r}"))
@@ -275,7 +282,9 @@ class DataStream:
         its end, and `ConsoleAcquisitionError` is raised then -- also if the
         wait times out instead, since an error already seen says more about
         why than a timeout does. Pass `raise_on_error=False` to collect
-        without raising, which is for a caller doing its own recovery.
+        without raising, which is for a caller doing its own recovery. The
+        fork's `error data:` line is not one of these: it is counted in
+        `data_errors` and the wait goes on.
 
         `on_idle` is called once per poll, which is at least ten times a second,
         and it is for a caller with a second link to service while this one is
@@ -302,6 +311,10 @@ class DataStream:
                     f"({self.batches} batches, {self.scans} scans seen)"
                 )
             event = self.poll(min(remaining, 0.1))
+            if isinstance(event, Status) and event.is_data_error:
+                # A batch the console could not publish, not an acquisition that failed:
+                # the frame runs on to its `finished`, and the caller reads `data_errors`.
+                continue
             if isinstance(event, Status) and event.is_error:
                 errors.append(event)
                 continue

@@ -69,6 +69,15 @@ that carried nothing has to be treated as a failure in its own right (lab
 record, task 20).
 """
 
+DATA_ERROR_PREFIX = "error data:"
+"""What the fork's data subscriber begins a status line with, from 1.3.0.
+
+A batch it could not sum was not published, and the frame carries on to its
+`finished`: a damaged frame rather than a failed acquisition, which is why it
+is told apart from `ERROR_PREFIX` (`docs/console-protocol.md`, "Two status
+messages the fork adds"; lab record, task 83).
+"""
+
 SILENT_COMMANDS = frozenset(
     {
         "trig class",
@@ -365,6 +374,12 @@ class Status:
         return self.text == ERROR_PREFIX or self.text.startswith(ERROR_PREFIX + " ")
 
     @property
+    def is_data_error(self) -> bool:
+        """Whether this is the data subscriber refusing a batch, which damages a frame
+        without failing its acquisition (`DATA_ERROR_PREFIX`)."""
+        return self.text.startswith(DATA_ERROR_PREFIX)
+
+    @property
     def error_text(self) -> str:
         """What the console said, without the prefix. Empty if this is not an error."""
         return self.text[len(ERROR_PREFIX):].strip() if self.is_error else ""
@@ -613,6 +628,7 @@ def encode_batch(batch: Batch) -> bytes:
 __all__ = [
     "ACK",
     "COMMAND_PORT",
+    "DATA_ERROR_PREFIX",
     "DATA_PORT",
     "ERROR_PREFIX",
     "FINISHED",

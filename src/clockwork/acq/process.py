@@ -229,11 +229,14 @@ KEYS: tuple[Key, ...] = (
         "how far a sample must fall back before the gate closes", low=100, high=1023),
     Key("ControlIoPort", "int", "2",
         "which Control I/O port becomes the acquisition enable input", low=1, high=3),
+    Key("MarkerDiagnostics", "int", "0",
+        "1 writes each markers fetch of a frame's first triggers to the console log",
+        allowed=("0", "1")),
 )
 """Every key the console reads, in the order it reads them.
 
 `docs/console-protocol.md`, "Configuration", is the source: the keys, the defaults
-and the five the fork refuses before they reach the driver are all stated there, and
+and the six the fork refuses before they reach the driver are all stated there, and
 a disagreement between this table and that document is fixed in the document first.
 What is here and not there is the one line of `what` each key does, which is for a
 window that offers the setting to put beside it.
@@ -243,14 +246,16 @@ not carry the key, which is why a key can be absent from a file and still be in
 force; the values actually in force on this instrument are the lab record's, not this
 table's.
 
-**The last six exist only on the fork.** A stock build ignores every one of them
-without a word, which is what `ConsoleInfo.is_fork` is for.
+**The last seven exist only on the fork**, `MarkerDiagnostics` only from 1.3.0. A
+stock build ignores every one of them without a word, which is what
+`ConsoleInfo.is_fork` is for.
 """
 
 KEYS_BY_NAME = {key.name: key for key in KEYS}
 
 FORK_ONLY = ("TriggerLevel", "TriggerSlope", "FullScaleRange",
-             "ZeroSuppressThreshold", "ZeroSuppressHysteresis", "ControlIoPort")
+             "ZeroSuppressThreshold", "ZeroSuppressHysteresis", "ControlIoPort",
+             "MarkerDiagnostics")
 """The keys a stock console reads nothing from. `config.txt` may state them; only the
 fork acts on them (`docs/console-protocol.md`, "Settings the fork moves out of the
 source")."""
@@ -859,8 +864,8 @@ class ConsoleProcess(ConsoleSupervisor):
                 f"{self.info.text}")
         if not self.info.is_fork:
             decided("this is a stock console: it ignores TriggerLevel, TriggerSlope, "
-                    "FullScaleRange, ZeroSuppressThreshold, ZeroSuppressHysteresis and "
-                    "ControlIoPort without saying so")
+                    "FullScaleRange, ZeroSuppressThreshold, ZeroSuppressHysteresis, "
+                    "ControlIoPort and MarkerDiagnostics without saying so")
         return self.started_seconds
 
     def stop(self) -> None:
