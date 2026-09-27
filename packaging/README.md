@@ -20,7 +20,10 @@ powershell -ExecutionPolicy Bypass -File tools/build_exe.ps1
 `uv`'s own before invoking PyInstaller (a wider `PATH` risks a foreign DLL substitution the way
 mainspring's task 07 found once, and `clockwork.spec`'s provenance guard fails the build rather
 than ship one), then copies `packaging/console_payload/` beside the built `clockwork.exe` (below),
-runs `clockwork.exe --self-check` and times a cold and a warm launch. It needs Windows
+runs `clockwork.exe --self-check` and times a cold and a warm launch. The self-check writes its
+report to `build\self-check-1.log` and the script prints it, one timed row per stage, so a failure
+names the stage that failed. A failed first run is run once more: if the second passes, the script
+says so in yellow and carries on, and both reports stay in `build\`. It needs Windows
 PowerShell's script execution allowed for that one invocation (`-ExecutionPolicy Bypass`, or
 `Set-ExecutionPolicy` once per machine) -- unset on a fresh clone.
 
@@ -118,7 +121,9 @@ wording -- carries no promise.
   installed build sees the Qt window and nothing else -- no second, closeable console window whose
   close box kills the run. `--self-check` still reports: `clockwork.app.main` attaches to the
   console it was started from (`AttachConsole`) when there is one, and falls back to a per-user log
-  file (`%LOCALAPPDATA%\clockwork\self-check.log`) when there is not.
+  file (`%LOCALAPPDATA%\clockwork\self-check.log`) when there is not. Which of the two happens is
+  not predictable from how the exe was started, so `--self-check-report PATH` also writes the
+  report to a file the caller chooses, attached or not, and replaces the per-user log.
 - **`pyserial`'s non-Windows `list_ports` backends are excluded** (`list_ports_linux`,
   `list_ports_osx`) -- dead code on the only OS this ships for.
 - **The icon is placeholder art** (`packaging/icon/clockwork.svg`, one plain clock face, one

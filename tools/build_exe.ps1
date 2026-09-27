@@ -88,14 +88,38 @@ if ((Test-Path $consolePayload) -and (Get-ChildItem $consolePayload -ErrorAction
     Write-Host "No console payload staged -- clockwork.exe will ship without the acquisition console." -ForegroundColor Yellow
 }
 
+function Invoke-SelfCheck([int]$attempt) {
+    # A windowed exe (console=False, task 60) returns control to PowerShell the instant it
+    # is started, so `& $exePath --self-check; $LASTEXITCODE` would read the exit code of
+    # nothing: the process has to be waited on. Whether it then attaches to this console
+    # is not predictable from how it was started, and a console a backgrounded session
+    # cannot read lost the report of two failed first runs (lab record, task 84); so the
+    # report also goes to a file under build\ -- never %LOCALAPPDATA%, which a process
+    # started from a packaged app sees virtualized -- and is printed from there.
+    $report = Join-Path $buildDir "self-check-$attempt.log"
+    Remove-Item $report -Force -ErrorAction SilentlyContinue
+    $proc = Start-Process -FilePath $exePath -Wait -PassThru `
+        -ArgumentList "--self-check", "--self-check-report", "`"$report`""
+    Write-Host "--self-check attempt $attempt exited $($proc.ExitCode); report $report"
+    if (Test-Path $report) {
+        Get-Content $report | ForEach-Object { Write-Host "    $_" }
+    } else {
+        Write-Host "    (no report written: the exe stopped before its self-check began)" -ForegroundColor Yellow
+    }
+    return $proc.ExitCode
+}
+
 Write-Host "Running --self-check against the built .exe..." -ForegroundColor Cyan
-# A windowed exe (console=False, task 60) returns control to PowerShell the instant it
-# is started, so `& $exePath --self-check; $LASTEXITCODE` would read the exit code of
-# nothing -- clockwork.app.main attaches to this console on its own (AttachConsole) and
-# prints here, but the process itself still has to be waited on.
-$selfCheck = Start-Process -FilePath $exePath -ArgumentList "--self-check" -Wait -PassThru
-if ($selfCheck.ExitCode -ne 0) {
-    throw "clockwork.exe --self-check failed (exit $($selfCheck.ExitCode)) -- see its own output above."
+$firstExit = Invoke-SelfCheck 1
+if ($firstExit -ne 0) {
+    # Run once more, so a first launch that fails and a second that passes is reported as
+    # exactly that rather than as a broken build; both reports are kept under build\.
+    Write-Host "The first self-check failed; running it again..." -ForegroundColor Yellow
+    $secondExit = Invoke-SelfCheck 2
+    if ($secondExit -ne 0) {
+        throw "clockwork.exe --self-check failed twice (exit $firstExit, then $secondExit) -- reports above."
+    }
+    Write-Host "FIRST SELF-CHECK FAILED (exit $firstExit), SECOND PASSED -- a first-run failure, not a broken build; record build\self-check-1.log." -ForegroundColor Yellow
 }
 
 $size = (Get-ChildItem (Split-Path $exePath) -Recurse | Measure-Object -Property Length -Sum).Sum

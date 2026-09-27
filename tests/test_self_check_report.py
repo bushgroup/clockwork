@@ -9,8 +9,11 @@ where `_attach_parent_console` (Windows-only, proven against the real build by
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
+
+import pytest
 
 from clockwork.app import _GuardedStream, _open_report_file, _report_log_path
 
@@ -67,3 +70,68 @@ def test_a_report_file_that_cannot_be_created_still_leaves_the_streams_silent(
     assert path is None
     sys.stdout.write("nothing raises even with nowhere to go")
     sys.stdout.flush()
+
+
+# The report file a caller names (task 84): `tools/build_exe.ps1` reads it back, since
+# whether a windowed exe attaches to a console is not predictable from how it started.
+
+ROWS = ("numba cache", "imports", "box: table sent and armed", "method",
+        "simulated console: connect", "simulated console: start chain",
+        "recording created",
+        *(f"repetition {n}: {what}" for n in (1, 2)
+          for what in ("frame opened", "acquired (60 s limit)", "frame written")),
+        "fold (numba decode)",
+        "recording closed", "simulated console: stop", "summed file read back")
+
+
+def _run_main(monkeypatch, *argv):
+    from clockwork.app import _numba_cache_dir, main
+
+    monkeypatch.setattr(sys, "stdout", sys.stdout)  # main replaces both; restored after
+    monkeypatch.setattr(sys, "stderr", sys.stderr)
+    # The value main would set itself, so the test leaves the environment as it was.
+    monkeypatch.setenv("NUMBA_CACHE_DIR", _numba_cache_dir())
+    monkeypatch.setattr("clockwork.app._attach_parent_console", lambda: False)
+    return main(list(argv))
+
+
+def test_a_named_report_file_carries_every_row_and_the_verdict(monkeypatch, tmp_path):
+    report = tmp_path / "nested" / "self-check.log"
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata"))
+
+    code = _run_main(monkeypatch, "--self-check", "--self-check-report", str(report))
+
+    text = report.read_bytes().decode("utf-8")
+    assert code == 0
+    assert "\r\n" not in text
+    for row in ROWS:
+        assert re.search(rf"^  {re.escape(row)} +ok +\d+\.\d\d s$", text, re.M), row
+    assert text.rstrip().splitlines()[-1].startswith("self-check OK:")
+    assert "FAILED" not in text
+    # The named file replaces the per-user fallback rather than adding to it.
+    assert not (tmp_path / "appdata" / "clockwork" / "self-check.log").exists()
+
+
+def test_a_failing_stage_is_named_with_its_traceback_and_exit_1(monkeypatch, tmp_path):
+    report = tmp_path / "self-check.log"
+
+    def refuse(*args, **kwargs):
+        raise TimeoutError("no stream within 10 s")
+
+    monkeypatch.setattr("clockwork.acq.start_chain", refuse)
+    code = _run_main(monkeypatch, "--self-check", "--self-check-report", str(report))
+
+    text = report.read_text(encoding="utf-8")
+    assert code == 1
+    assert "  simulated console: connect" in text
+    assert "  simulated console: start chain" in text and "FAILED after" in text
+    assert "self-check FAILED at 'simulated console: start chain'" in text
+    assert "TimeoutError('no stream within 10 s')" in text
+    assert "Traceback (most recent call last)" in text
+    assert "repetition 1" not in text and "self-check OK" not in text
+
+
+def test_a_report_path_without_the_self_check_is_refused(monkeypatch, tmp_path):
+    with pytest.raises(SystemExit) as raised:
+        _run_main(monkeypatch, "--self-check-report", str(tmp_path / "x.log"))
+    assert raised.value.code == 2

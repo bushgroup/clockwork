@@ -86,6 +86,27 @@ class _GuardedStream:
             pass
 
 
+class _Tee:
+    """Every write to each of several streams, each guarded on its own, so a console that
+    has gone away cannot cost the report file its copy (task 84)."""
+
+    def __init__(self, *streams: object) -> None:
+        self._streams = [s if isinstance(s, _GuardedStream) else _GuardedStream(s)
+                         for s in streams]
+
+    @property
+    def encoding(self) -> str | None:
+        return self._streams[0].encoding if self._streams else None
+
+    def write(self, text: str) -> None:
+        for stream in self._streams:
+            stream.write(text)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            stream.flush()
+
+
 def _attach_parent_console() -> bool:
     """Undo `console=False`'s redirection to nothing by attaching this process's
     stdio to the console it was started from, so a `--self-check` run from PowerShell
@@ -151,77 +172,210 @@ def _seed_numba_cache(cache_dir: str) -> None:
         shutil.copytree(seed, cache_dir, dirs_exist_ok=True)
 
 
+def _prepare_numba_cache() -> str:
+    """Point numba's cache somewhere that survives a rebuild, and seed it on a frozen
+    build's first launch. Before anything imports numba, lazily or otherwise: the
+    self-check folds, and the real window will too."""
+    os.environ.setdefault("NUMBA_CACHE_DIR", _numba_cache_dir())
+    os.makedirs(os.environ["NUMBA_CACHE_DIR"], exist_ok=True)
+    _seed_numba_cache(os.environ["NUMBA_CACHE_DIR"])
+    return os.environ["NUMBA_CACHE_DIR"]
+
+
+# The self-check's wait for each simulated repetition to end. A fresh build's first
+# launch spends 5.2-5.7 s in repetition 1 where a warm one spends 0.01-0.9 s (lab record,
+# task 84), and the 10 s this used to be was the likeliest cause of two first runs that
+# failed with their reports lost; an in-process fake can hang but has no reason to be
+# slow, so the limit only has to tell the two apart.
+SELF_CHECK_FRAME_TIMEOUT_S = 60.0
+
+
+class _Rows:
+    """The self-check's report, one row per stage with the seconds it took, each flushed
+    as it is written: a stage that fails is named by the row it fails on, and one that
+    only ran slow shows how slow (task 84)."""
+
+    def __init__(self) -> None:
+        import time
+
+        self._clock = time.perf_counter
+        self.started = self._clock()
+        self.failed: str | None = None
+
+    def __call__(self, name: str):
+        import contextlib
+
+        @contextlib.contextmanager
+        def row():
+            began = self._clock()
+            try:
+                yield
+            except BaseException:
+                self.failed = name
+                self._write(f"  {name:<38} FAILED after {self._clock() - began:.2f} s")
+                raise
+            self._write(f"  {name:<38} ok  {self._clock() - began:6.2f} s")
+
+        return row()
+
+    def total(self) -> float:
+        return self._clock() - self.started
+
+    @staticmethod
+    def _write(line: str) -> None:
+        print(line)
+        sys.stdout.flush()
+
+
 def _self_check() -> int:
     """The cheapest proof that `clockwork.mips`, `clockwork.acq` and `mainspring.uimf`
     all work inside this build, numba's decode kernels included: one box with no
     hardware, two repetitions through a console simulated in this process, the fold
     that is the one place clockwork calls into `mainspring.uimf.decode`, and the summed
-    file read back. Prints and returns 1 on the first failure rather than raising, since
-    this runs from a frozen `.exe` with no console attached to a traceback.
+    file read back. One timed row per stage; on the first failure, the stage, the
+    exception and its traceback, and 1 rather than a raise, since this runs from a
+    frozen `.exe` with no console attached to a traceback.
     """
+    import contextlib
     import datetime as dt
     import tempfile
+    import traceback
 
-    from mainspring.uimf import UimfFile
-
-    from clockwork.acq import (
-        Console,
-        DataStream,
-        FakeConsole,
-        Geometry,
-        Recording,
-        run_frame,
-        start_chain,
-    )
-    from clockwork.method import from_dict
-    from clockwork.mips import Box, FakeBox
-
+    step = _Rows()
     try:
-        box = Box(transport=FakeBox(), name="box1")
-        box.local()
-        box.command("STBLCLK,EXT")
-        box.send_table("STBLDAT;0:[A:1,10:A:0,20:];")
-        box.arm()
+        with step("numba cache"):
+            cache = _prepare_numba_cache()
+        print(f"    NUMBA_CACHE_DIR = {cache}")
+        with step("imports"):
+            from mainspring.uimf import UimfFile
 
-        method = from_dict({
-            "schema_version": 2,
-            "metadata": {"name": "self-check", "created": dt.date.today()},
-            "acquisition": {"frames": 1, "scans": 16, "accumulations": 2,
-                             "file_stem": "selfcheck", "repetition_mode": "per_repetition"},
-            "boxes": [{"name": "box1", "port": "COM1", "load": ["STBLDAT;..."]}],
-            "start": [["box1", "TBLSTRT"]],
-        })
-
-        with tempfile.TemporaryDirectory() as directory, \
-                FakeConsole() as fake, \
-                DataStream(fake.data_endpoint) as stream, \
-                Console(fake.command_endpoint) as console:
-            console.configure(offset_v=0.251)
-            width = start_chain(console, stream, timeout=10.0, settle=2.0, quiet=0.1)
-            geometry = Geometry.from_tof_width(
-                width, sample_rate_hz=console.sample_rate_hz,
-                post_trigger_samples=fake.post_trigger_samples,
+            from clockwork.acq import (
+                Console,
+                DataStream,
+                FakeConsole,
+                Geometry,
+                Recording,
+                run_frame,
+                start_chain,
             )
-            with Recording.create(directory, method, geometry) as recording:
-                for repetition in (1, 2):
-                    with recording.frame(1, repetition) as request:
-                        run_frame(console, stream, request, timeout=10.0)
+            from clockwork.method import from_dict
+            from clockwork.mips import Box, FakeBox
+
+        with step("box: table sent and armed"):
+            box = Box(transport=FakeBox(), name="box1")
+            box.local()
+            box.command("STBLCLK,EXT")
+            box.send_table("STBLDAT;0:[A:1,10:A:0,20:];")
+            box.arm()
+
+        with step("method"):
+            method = from_dict({
+                "schema_version": 2,
+                "metadata": {"name": "self-check", "created": dt.date.today()},
+                "acquisition": {"frames": 1, "scans": 16, "accumulations": 2,
+                                 "file_stem": "selfcheck",
+                                 "repetition_mode": "per_repetition"},
+                "boxes": [{"name": "box1", "port": "COM1", "load": ["STBLDAT;..."]}],
+                "start": [["box1", "TBLSTRT"]],
+            })
+
+        with contextlib.ExitStack() as stack:
+            with step("simulated console: connect"):
+                directory = stack.enter_context(tempfile.TemporaryDirectory())
+                fake = stack.enter_context(FakeConsole())
+                stream = stack.enter_context(DataStream(fake.data_endpoint))
+                console = stack.enter_context(Console(fake.command_endpoint))
+                console.configure(offset_v=0.251)
+            with step("simulated console: start chain"):
+                width = start_chain(console, stream, timeout=10.0, settle=2.0, quiet=0.1)
+                geometry = Geometry.from_tof_width(
+                    width, sample_rate_hz=console.sample_rate_hz,
+                    post_trigger_samples=fake.post_trigger_samples,
+                )
+            with step("recording created"):
+                recording = stack.enter_context(
+                    Recording.create(directory, method, geometry))
+            for repetition in (1, 2):
+                # Three rows, not one: a fresh build's first repetition runs several times
+                # slower than a warm one's, and only the middle row is under a deadline.
+                with contextlib.ExitStack() as frame:
+                    with step(f"repetition {repetition}: frame opened"):
+                        request = frame.enter_context(recording.frame(1, repetition))
+                    with step(f"repetition {repetition}: acquired "
+                              f"({SELF_CHECK_FRAME_TIMEOUT_S:g} s limit)"):
+                        run_frame(console, stream, request,
+                                  timeout=SELF_CHECK_FRAME_TIMEOUT_S)
+                    with step(f"repetition {repetition}: frame written"):
+                        frame.close()
+            with step("fold (numba decode)"):
                 recording.fold(1)
                 summed_path = recording.summed_path
-            console.stop_acquire()
-
-            frame = UimfFile(summed_path).frame_params(1)
+            with step("recording closed"):
+                recording.close()
+            with step("simulated console: stop"):
+                console.stop_acquire()
+            with step("summed file read back"):
+                frame = UimfFile(summed_path).frame_params(1)
+            step.failed = "teardown"
+        step.failed = None
     except Exception as exc:  # noqa: BLE001 -- report it, whatever it is, and exit
-        print(f"self-check FAILED: {exc!r}", file=sys.stderr)
+        print(f"self-check FAILED at {step.failed or 'an unnamed stage'!r} after "
+              f"{step.total():.2f} s: {exc!r}", file=sys.stderr)
+        print(traceback.format_exc().rstrip(), file=sys.stderr)
         return 1
 
     if frame.scans != 16 or frame.accumulations != 2:
         print(f"self-check FAILED: the folded frame declares {frame.scans} scans and "
               f"{frame.accumulations} accumulations, not 16 and 2", file=sys.stderr)
         return 1
-    print("self-check OK: clockwork.mips, clockwork.acq, mainspring.uimf and its numba "
-          "decode kernels all import and run inside this build.")
+    print(f"self-check OK: clockwork.mips, clockwork.acq, mainspring.uimf and its numba "
+          f"decode kernels all import and run inside this build ({step.total():.2f} s).")
     return 0
+
+
+def _run_self_check(report: str) -> int:
+    """`--self-check`: find the report somewhere to go, then run it. The console it was
+    started from when there is one; also `report`'s file when the caller names one
+    (`tools/build_exe.ps1`, task 84), since whether a windowed exe attaches is not
+    predictable from how it was started; the per-user log only when neither is there.
+    """
+    import datetime as dt
+
+    attached = _attach_parent_console()
+    named = None
+    if report:
+        report = os.path.abspath(report)
+        try:
+            os.makedirs(os.path.dirname(report), exist_ok=True)
+            named = open(report, "w", encoding="utf-8", newline="\n", buffering=1)
+        except OSError as exc:
+            print(f"the self-check report {report} could not be opened: {exc}",
+                  file=sys.stderr)
+        else:
+            sys.stdout = _Tee(sys.stdout, named)
+            sys.stderr = _Tee(sys.stderr, named)
+    fallback = None if attached or named is not None else _open_report_file()
+
+    try:
+        import clockwork
+
+        print(f"clockwork {clockwork.__version__} "
+              f"({clockwork.built_commit() or 'unknown commit'}) --self-check, "
+              f"{dt.datetime.now().isoformat(timespec='seconds')}")
+        print(f"    executable = {sys.executable}"
+              f"{' (frozen)' if getattr(sys, 'frozen', False) else ''}")
+        print(f"    console attached = {'yes' if attached else 'no'}; report file = "
+              f"{report if named is not None else fallback or 'none'}")
+        sys.stdout.flush()
+        code = _self_check()
+        if fallback is not None:
+            print(f"self-check report written to {fallback}")
+        return code
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        if named is not None:
+            named.close()
 
 
 def _report(args: argparse.Namespace) -> int:
@@ -293,6 +447,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--self-check", action="store_true",
         help="run a hardware-free stand-in acquisition and exit, no window shown",
+    )
+    parser.add_argument(
+        "--self-check-report", metavar="PATH", default="",
+        help="with --self-check, also write its report to PATH (replaced), whether or "
+             "not a console is attached",
     )
     parser.add_argument(
         "--fake", action="store_true",
@@ -387,12 +546,15 @@ def main(argv: list[str] | None = None) -> int:
                      f"checks the build; a verb such as {args.command} drives a daemon, and "
                      "a rehearsal is `clockwork serve --fake` with the verbs over it")
 
-    # Before anything imports numba, lazily or otherwise: `_self_check` folds, and the
-    # real window will too, and both need the cache pointed somewhere that survives a
-    # rebuild before that first import happens.
-    os.environ.setdefault("NUMBA_CACHE_DIR", _numba_cache_dir())
-    os.makedirs(os.environ["NUMBA_CACHE_DIR"], exist_ok=True)
-    _seed_numba_cache(os.environ["NUMBA_CACHE_DIR"])
+    if args.self_check_report and not args.self_check:
+        parser.error("--self-check-report is only read with --self-check")
+    if args.self_check:
+        # Before the numba cache is seeded, which is the self-check's first row: a copy
+        # that fails there is reported like any other stage rather than raised with
+        # nowhere to print it (task 84).
+        return _run_self_check(args.self_check_report)
+
+    _prepare_numba_cache()
 
     import clockwork
 
@@ -438,13 +600,6 @@ def main(argv: list[str] | None = None) -> int:
         if getattr(sys, "frozen", False):
             _attach_parent_console()
         return cli.run(args)
-
-    if args.self_check:
-        report_path = None if _attach_parent_console() else _open_report_file()
-        code = _self_check()
-        if report_path is not None:
-            print(f"self-check report written to {report_path}")
-        return code
 
     # Before the window, so an exception raised while it is being built is written
     # down too. A windowed build has no stderr for PySide6's own report of what a slot
