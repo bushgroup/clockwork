@@ -1528,8 +1528,10 @@ exists, rather than a one-off manual check:
   19, 37): `1.243t, Mar 5, 2024`; `1.211t, Nov 4, 2021`; `1.235t,
   August 7, 2023` — all below the v1.263 this document describes, so
   every number any of them supplies measures this firmware family
-  rather than confirming the document. All three are below the 1.262
-  window where `101`–`108` store as token − 1 (§6.5).
+  rather than confirming the document. BUFFLEHEAD's 1.243t is inside
+  the 1.242 to 1.261 window where `101`–`108` store as token − 1
+  (§6.5); AUKLET's 1.211t and CORMORANT's 1.235t predate 1.242, the
+  release that introduced it. None of the three is at 1.262 or later.
 - ARB module firmware version per module (`GARBVER,<mod>`; alternate
   waveform needs ≥ 2.1, `CUR` ≥ 2.21, §6.4). Same fixture.
   **Answered for one box, 2026-09-14** (lab record, task 10): all four
