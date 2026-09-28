@@ -199,8 +199,12 @@ the call takes several minutes; `progress` on the job it names follows it meanwh
 The report answers `verdict`, `reason`, `text` (the report in a few lines, for a person), `criteria`
 (each criterion's values, what it was compared with, whether it was met and why), `values` (every
 judged and shown number, per file), `files`, `request_id` and `record`. The same report is added to
-the request's run record under `routines`, which is where a later run finds its last pass. An audit
-adds `audit`, each entry's table of differences, and `read_back`, the boxes as they were read.
+the request's run record under `routines`. A verdict against the instrument, never one from
+`--fake`, is also appended to a log on the PC, `%LOCALAPPDATA%\clockwork\routines.log` (or the file
+`CLOCKWORK_ROUTINE_LOG` names), one JSON line per verdict. A later run finds its last pass as the
+newest pass in its own output directory's run records and in that log, so the first check written
+to a new day's folder is still compared with the day before. An audit adds `audit`, each entry's
+table of differences, and `read_back`, the boxes as they were read.
 
 ## What an audit compares
 

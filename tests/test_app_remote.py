@@ -88,11 +88,30 @@ def test_the_command_line_carries_the_window_settings(monkeypatch):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     command = serving.serve_command(output="D:/data", library="", console="C:/c.exe",
                                     kept="D:/kept", errors_log="C:/errors.log")
-    assert command == [sys.executable, "serve", "--output", "D:/data", "--console",
-                       "C:/c.exe", "--kept", "D:/kept", "--errors-log", "C:/errors.log"]
+    assert command == [sys.executable, "serve", "--detached", "--output", "D:/data",
+                       "--console", "C:/c.exe", "--kept", "D:/kept", "--errors-log",
+                       "C:/errors.log"]
     monkeypatch.delattr(sys, "frozen")
     checkout = serving.serve_command()
-    assert checkout[:2] == [sys.executable, "-c"] and checkout[-1] == "serve"
+    assert checkout[:2] == [sys.executable, "-c"] and checkout[-2:] == ["serve", "--detached"]
+
+
+def test_a_started_daemon_never_attaches_to_its_starters_console(monkeypatch):
+    """A daemon `clockwork-cli.exe` started from a shortcut's `cmd` window attached to
+    that console and printed `console: ready` after the verb's prompt (lab record, task
+    96). A detached `serve` must not attach; one typed at a terminal still does."""
+    import clockwork.app as app_module
+    from clockwork.owner import daemon
+
+    attached: list[bool] = []
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(app_module, "_attach_parent_console",
+                        lambda: attached.append(True) or True)
+    monkeypatch.setattr(daemon, "run", lambda **options: 0)
+    assert app_module.main(["serve", "--fake", "--detached"]) == 0
+    assert attached == []
+    assert app_module.main(["serve", "--fake"]) == 0
+    assert attached == [True]
 
 
 def test_a_daemon_that_would_not_start_says_why_from_its_log(tmp_path):
@@ -278,6 +297,43 @@ def test_claudes_acquisition_is_shown_and_survives_the_close(
     assert told and CLAUDE in told[0]
     assert claude.status().running == handle  # carried on
     claude.stop("the test is over")
+
+
+def test_a_window_joining_a_busy_daemon_can_send_setup_once_it_is_idle(
+        qtbot, scratch_settings, daemon, claude, tmp_path):
+    """A join that finds another client's job running names the panes without a scan,
+    and used to leave the ports to a Find boxes the trainee had to know to press before
+    Send setup (on the rack, 2026-09-28; lab record, task 96). The scan it put off is
+    made as soon as the daemon is idle."""
+    idle_daemon(qtbot, claude)
+    method = make_method(frames=4, accumulations=4)
+    path = str(tmp_path / "joined.toml")
+    method_module.save(method, path)
+    scratch_settings.setValue("method_path", path)
+    claude.submit(Discover(method=method))
+    claude.submit(Send(method=method))
+    # Long enough that the join certainly meets it running, however loaded the PC.
+    handle = claude.submit(Acquire(method=method, instrument=make_instrument(),
+                                   initials="ZZ", replicates=20))
+    qtbot.waitUntil(lambda: claude.status().running == handle, timeout=60_000)
+    made = remote_window(qtbot, daemon.endpoint)
+    # A failure below must not leave teardown closing over a run behind a real dialog.
+    made._ask_close = lambda: "cancel"
+    made._tell = lambda title, detail: None
+    made.worker.shutdown_daemon = lambda reason="": None
+    try:
+        # The status can arrive before the `connected` that sets the flag: wait for both.
+        qtbot.waitUntil(lambda: made._scan_when_idle, timeout=20_000)
+        assert made.worker.status.running == handle
+        assert not made.setup_button.isEnabled()
+    finally:
+        claude.stop("the test is over")
+    qtbot.waitUntil(lambda: made._job is None and made.worker.status is not None
+                    and made.worker.status.running is None
+                    and made.worker.status.issued > handle.id, timeout=120_000)
+    qtbot.waitUntil(lambda: made.setup_button.isEnabled(), timeout=20_000)
+    assert not made._scan_when_idle
+    assert made.ports == {entry.name: entry.port for entry in method.boxes}
 
 
 def test_closing_over_the_windows_own_run_asks(qtbot, scratch_settings, daemon, tmp_path):

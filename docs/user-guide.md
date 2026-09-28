@@ -78,7 +78,9 @@ default, each printed as it is sent, about fifteen seconds in all. The window it
 line saying whether every box holds the stack as declared, and lists any setting that does not.
 Warm up loads no table and arms nothing, so the first acquisition of the day still starts with
 **Send setup**. It also starts clockwork's background service when none is running, and the window
-opened afterwards uses that service and leaves it running when the window closes.
+opened afterwards uses that service and leaves it running when the window closes. That window asks
+the service for the boxes as it opens, or as soon as the service's current job ends, so **Send
+setup** needs no **Find boxes** first.
 
 The stack is whichever method the instrument document names under `[standing]`
 ([instrument file](instrument-file-format.md#standing)), and the method library, instrument
@@ -288,7 +290,9 @@ updated. The window is not affected, because the limits apply only to what Claud
 To run a series of samples or conditions unattended, open **Run > Run queue** and add a row
 for each method document. A row names a saved method, a conditions note and a replicate count,
 and the document is read when the row starts, not when it was added, so a typo fixed in the
-file before the row runs is the version that runs. Each row sends its method and then acquires
+file before the row runs is the version that runs. The table and the run log call a row by its
+document's file name, or by the document's folder when the file is `method.toml`, as every
+document in the method library is. Each row sends its method and then acquires
 its replicates back to back. **setup** sends the whole setup, readback included; unticked, the
 row loads and arms only, for a row whose method the boxes already have. A row that fails ends
 the series and leaves the rows after it **skipped**, unless its **go on if it fails** box is

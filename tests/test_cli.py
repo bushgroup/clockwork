@@ -299,6 +299,9 @@ def test_a_request_from_the_shell_one_verb_per_process(shell, library, tmp_path)
     report = json.loads(out)
     assert report["verdict"] == "pass" and report["text"].startswith("shell-check: pass")
     assert "arming line-b.toml" in err and err.rstrip().endswith("met")
+    # A --fake daemon's verdict is no reference for the instrument's next check.
+    from clockwork.routine import verdict_log_path
+    assert not os.path.exists(verdict_log_path())
     code, out, err = shell("run-routine", "--name", "no-such", "--initials", "zz")
     assert code == 1 and "the routines are shell-check" in err
 

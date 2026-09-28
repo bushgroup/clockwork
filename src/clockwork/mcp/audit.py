@@ -105,9 +105,17 @@ class AuditLog:
     def acquisitions(self, session: str) -> int:
         """How many acquisitions were accepted in daemon session `session`: one per
         `acquire` call, and a `series` call's `acquisitions`, one per point."""
+        return sum(self.acquisitions_by(session).values())
+
+    def acquisitions_by(self, session: str) -> dict[str, int]:
+        """`acquisitions`, by the surface that made them (`mcp`, `cli`, or `in process`).
+
+        The budget is the daemon session's, whichever surface spends it (Matt,
+        2026-09-24); a session reading 6 spent of its own 5 had no way to see that the
+        sixth was a `clockwork routine` at a terminal (lab record, task 96)."""
+        counts: dict[str, int] = {}
         if not session or not self.path or not os.path.isfile(self.path):
-            return 0
-        count = 0
+            return counts
         with open(self.path, encoding="utf-8") as handle:
             for text in handle:
                 try:
@@ -117,12 +125,14 @@ class AuditLog:
                 if (not isinstance(line, dict) or line.get("error") is not None
                         or line.get("session") != session):
                     continue
+                surface = line.get("via") or "in process"
                 if line.get("tool") == "acquire":
-                    count += 1
+                    counts[surface] = counts.get(surface, 0) + 1
                 elif line.get("tool") == "series":
                     spent = (line.get("result") or {}).get("acquisitions")
-                    count += spent if isinstance(spent, int) and spent > 0 else 1
-        return count
+                    counts[surface] = counts.get(surface, 0) + (
+                        spent if isinstance(spent, int) and spent > 0 else 1)
+        return counts
 
     def request_for(self, words: str, session: str) -> str | None:
         """The latest request id minted for exactly these words in daemon session

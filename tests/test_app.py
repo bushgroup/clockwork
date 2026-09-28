@@ -1873,6 +1873,15 @@ def test_a_row_reports_its_stems_its_stop_its_retries_and_the_console_errors():
     assert (row.retried_frames, row.console_errors, row.directory) == (0, 0, "")
 
 
+def test_a_library_document_is_named_by_its_folder_not_by_method_toml():
+    """Every library document is `method.toml`, so a queue of three named `method` three
+    times, and the run log said nothing about which ran when (lab record, task 96)."""
+    folder = os.path.join("library", "bradykinin-clock", "method.toml")
+    assert runqueue.QueueRow(method_path=folder).name == "bradykinin-clock"
+    assert runqueue.QueueRow(method_path="method.toml").name == "method"
+    assert runqueue.QueueRow(method_path="/methods/clock.toml").name == "clock"
+
+
 def test_a_stopped_run_is_neither_done_nor_failed_because_its_files_are_good():
     row = runqueue.QueueRow(method_path="clock.toml")
     state = runqueue.outcome_of(row, [a_run("260918_ZZ_001", stopped="by the operator")])
@@ -2281,6 +2290,21 @@ def test_the_queue_panel_puts_back_a_cell_the_queue_owns(qtbot):
     assert item.text(OUTCOME) == ""
     item.setText(REPS, "not a number")
     assert queue.rows[0].replicates == 3 and item.text(REPS) == "3"
+
+
+def test_start_stays_pressable_after_a_failed_row_because_it_runs_the_skipped_ones(qtbot):
+    """`begin` offers skipped rows again, as the user guide says, so a panel that counted
+    only waiting rows greyed Start after a failure until the trainee pressed Reset."""
+    queue = lettered("a", "b", "c")
+    panel = QueuePanel(queue)
+    qtbot.addWidget(panel)
+    queue.begin()
+    queue.finish(runqueue.FAILED, "TBLSTRT was refused")
+    queue.advance()
+    panel.refresh()
+    assert queue.waiting == 0 and queue.to_run == 2
+    assert panel.start_button.isEnabled()
+    assert "2 to run" in panel.caption.text()
 
 
 def test_stays_first_is_a_check_box_and_the_pass_column_appears_with_passes(qtbot):

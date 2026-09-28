@@ -14,6 +14,9 @@ console window a trainee could close would kill it without a shutdown. So it get
 window (`CREATE_NO_WINDOW`), a process group of its own, so that a Ctrl-C meant for
 whatever started the window does not reach it, and it breaks away from any job the
 window is in, so that closing the window cannot end it; its log is `serve.log` alone.
+`--detached` on its command line says so to the daemon, which would otherwise attach to
+its parent's console: a `clockwork-cli.exe` in a shortcut's `cmd` window has one, and a
+daemon it started printed into it after the verb had ended (lab record, task 96).
 
 **The command line starts one too, and stops one.** `clockwork warm-up` starts a daemon
 the same way when none answers and leaves it running for the day; `clockwork stand-down`
@@ -66,7 +69,7 @@ def window_origin() -> str:
 
 def serve_command(*, output: str = "", library: str = "", console: str = "",
                   kept: str = "", errors_log: str = "") -> list[str]:
-    """The command line that starts a daemon with the window's settings.
+    """The command line that starts a daemon with the window's settings, detached.
 
     Frozen, always the windowed `clockwork.exe`, even from the console-subsystem
     `clockwork-cli.exe` beside it that the desktop shortcuts run: numba stamps a frozen
@@ -80,6 +83,7 @@ def serve_command(*, output: str = "", library: str = "", console: str = "",
         command = [executable, "serve"]
     else:
         command = [sys.executable, "-c", _ENTRY, "serve"]
+    command.append("--detached")
     for flag, value in (("--output", output), ("--library", library),
                         ("--console", console), ("--kept", kept),
                         ("--errors-log", errors_log)):

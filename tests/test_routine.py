@@ -288,9 +288,40 @@ def test_last_passing_finds_the_newest_pass_in_the_run_records(tmp_path) -> None
     record("b", [{"routine": "fixture-check", "verdict": "fail", "time": "2026-09-24T12:00"}])
     record("c", [{"routine": "fixture-check", "verdict": "pass", "time": "2026-09-24T11:00",
                   "values": {"x": [2]}}])
-    found = routine.last_passing(str(tmp_path), "fixture-check")
+    found = routine.last_passing(str(tmp_path), "fixture-check", log="")
     assert found["values"] == {"x": [2]} and found["request_id"] == "c"
-    assert routine.last_passing(str(tmp_path), "fixture-check", before="c")["request_id"] == "a"
+    assert routine.last_passing(str(tmp_path), "fixture-check", before="c",
+                                log="")["request_id"] == "a"
+
+
+def test_the_last_pass_is_found_in_yesterdays_folder_through_the_verdict_log(tmp_path) -> None:
+    """One output folder a day, and the first beam-check of each met no last pass,
+    although the day before had passed twice (on the rack, 2026-09-28; lab record, task
+    96). Every verdict against real boxes goes to the per-PC log as well."""
+    log = str(tmp_path / "routines.log")
+    yesterday, today = tmp_path / "260927", tmp_path / "260928"
+    yesterday.mkdir()
+    today.mkdir()
+    assert routine.last_passing(str(today), "fixture-check", log=log) is None
+    routine.remember({"routine": "fixture-check", "verdict": "pass", "values": {"x": [1]}},
+                     request_id="y1", record=str(yesterday / "y1.request.json"), path=log)
+    routine.remember({"routine": "fixture-check", "verdict": "fail", "values": {"x": [9]}},
+                     request_id="y2", record=str(yesterday / "y2.request.json"), path=log)
+    routine.remember({"routine": "other-check", "verdict": "pass"}, request_id="y3",
+                     record="", path=log)
+    found = routine.last_passing(str(today), "fixture-check", log=log)
+    assert found["values"] == {"x": [1]} and found["request_id"] == "y1"
+    assert found["record"].endswith("y1.request.json")
+    assert routine.last_passing(str(today), "fixture-check", before="y1", log=log) is None
+    # A newer pass in the output directory itself still wins.
+    (today / f"t1{RECORD_SUFFIX}").write_text(json.dumps(
+        {"request": {"id": "t1"}, "routines": [{"routine": "fixture-check", "verdict": "pass",
+                                                "time": "2999-01-01T00:00:00",
+                                                "values": {"x": [3]}}]}), encoding="utf-8")
+    assert routine.last_passing(str(today), "fixture-check", log=log)["request_id"] == "t1"
+    # A log that cannot be written costs the comparison, never the verdict.
+    routine.remember({"routine": "fixture-check", "verdict": "pass"}, request_id="z",
+                     record="", path=str(tmp_path))
 
 
 # -- reading the boxes back ----------------------------------------------------------

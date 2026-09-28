@@ -309,7 +309,7 @@ class QueuePanel(QWidget):
             passes = (f" in {self.queue.passes} randomized passes"
                       if self.queue.passes else "")
             self.caption.setText(
-                f"{len(self.queue.rows)} row(s){passes}, {self.queue.waiting} waiting")
+                f"{len(self.queue.rows)} row(s){passes}, {self.queue.to_run} to run")
 
     def _refresh_buttons(self) -> None:
         running = self.queue.running
@@ -320,7 +320,7 @@ class QueuePanel(QWidget):
         self.up_button.setEnabled(len(editable) == 1)
         self.down_button.setEnabled(len(editable) == 1)
         self.start_button.setEnabled(
-            not running and not self._busy and self.queue.waiting > 0)
+            not running and not self._busy and self.queue.to_run > 0)
         self.stop_button.setEnabled(running)
         self.randomize_button.setEnabled(
             not running and not self._busy and bool(self.queue.template()))

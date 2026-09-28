@@ -378,6 +378,7 @@ def test_inside_the_standing_limits_a_request_proceeds_until_the_budget_ends_it(
             toolbox.call(name, asked)
     status = toolbox.call("status")
     assert status["budget"]["acquisitions_made"] == 1
+    assert sum(status["budget"]["acquisitions_by"].values()) == 1
     assert "made its 1 acquisitions" in status["sends_refused"]
 
     noted = toolbox.call("note", {"request_id": armed["request_id"],
@@ -512,6 +513,30 @@ def test_the_audit_log_hashes_long_text_and_records_every_error(fake_owner, libr
     assert "sha256" in loaded["result"]["text"]
     assert missing["error"] and wrong["error"].startswith("load_method was given")
     assert AuditLog("").requests() == {}
+
+
+def test_the_budget_is_the_daemon_sessions_and_says_which_surface_spent_it(tmp_path):
+    """A `clockwork routine` at the terminal during an agent's five-acquisition series
+    left the agent reading 6 spent (on the rack, 2026-09-28; lab record, task 96). Every
+    surface spends the one budget, by design, and the count says which spent what."""
+    path = str(tmp_path / "mcp-calls.log")
+    for via, tool, result in (("mcp", "series", {"acquisitions": 5}),
+                              ("cli", "acquire", {"job": 34}),
+                              ("cli", "arm", {"ok": True}),
+                              ("", "acquire", {"job": 35})):
+        log = AuditLog(path, via=via)
+        log.session = "one"
+        log.write(tool=tool, arguments={}, seconds=0.1, result=result)
+    other = AuditLog(path, via="mcp")
+    other.session = "another"
+    other.write(tool="acquire", arguments={}, seconds=0.1, result={"job": 1})
+    refused = AuditLog(path, via="cli")
+    refused.session = "one"
+    refused.write(tool="acquire", arguments={}, seconds=0.1, error="refused")
+    reader = AuditLog(path)
+    assert reader.acquisitions_by("one") == {"mcp": 5, "cli": 1, "in process": 1}
+    assert reader.acquisitions("one") == 7 and reader.acquisitions("another") == 1
+    assert reader.acquisitions_by("") == {}
 
 
 # --- over the daemon ----------------------------------------------------------------

@@ -537,6 +537,10 @@ def main(argv: list[str] | None = None) -> int:
                             "$CLOCKWORK_REPORTS, then the per-user folder)")
     serve.add_argument("--errors-log", metavar="PATH", default="",
                        help="a front end's error log, copied with a failed run's files")
+    serve.add_argument("--detached", action="store_true",
+                       help="log to serve.log alone, never to the console of whatever "
+                            "started it: what the window and the verbs that start a "
+                            "daemon pass")
     mcp = commands.add_parser(
         "mcp", help="serve the instrument's tools to an MCP client, such as Claude Code, "
                     "over stdio (docs/mcp-server.md)",
@@ -625,8 +629,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "serve":
         # A windowed build has no stdout of its own; the daemon's log belongs in the
         # terminal it was started from, as `--self-check`'s report does (task 60). A
-        # checkout already has one, and attaching would take it from pytest.
-        if getattr(sys, "frozen", False):
+        # checkout already has one, and attaching would take it from pytest. A daemon
+        # a verb started detached is not typed at that terminal: attached, it printed
+        # its later lines after the verb's prompt, which read as the verb still
+        # running (lab record, task 96).
+        if getattr(sys, "frozen", False) and not args.detached:
             _attach_parent_console()
         from clockwork.owner import daemon
 

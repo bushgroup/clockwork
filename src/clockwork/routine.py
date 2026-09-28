@@ -23,6 +23,14 @@ say pass; only then do the ordinary criteria decide between pass and fail. A cri
 against the last passing run is skipped, not failed, when there is none, and one marked
 `judge = false` is shown and never decides anything.
 
+**The last pass is the instrument's, not the folder's.** A run record lives in its run's
+output directory, and a lab that writes one folder a day met no last pass at the first
+check of every day (lab record, task 96). So every verdict against real boxes is also
+appended to a per-PC log (`verdict_log_path`: `$CLOCKWORK_ROUTINE_LOG`, then
+`%LOCALAPPDATA%\\clockwork\\routines.log`), and `last_passing` takes the newest pass from the
+output directory and that log together, whoever's folder it was written in. A `--fake`
+verdict is never logged: a stand-in's pass is no reference for the instrument.
+
 Qt-free, under the seam with the three lower layers.
 """
 
@@ -65,6 +73,8 @@ __all__ = [
     "is_routine",
     "judge",
     "last_passing",
+    "remember",
+    "verdict_log_path",
     "load",
     "loads",
     "measure",
@@ -674,12 +684,68 @@ def value_at(results: Mapping[str, object], path: str) -> float:
 # -- the judgement -------------------------------------------------------------------
 
 
-def last_passing(directory: str, name: str, *, before: str = "") -> dict | None:
-    """The latest passing run of routine `name` among the run records in `directory`.
+VERDICT_LOG_ENV = "CLOCKWORK_ROUTINE_LOG"
+"""Where the per-PC log of routine verdicts is, in place of the per-user default."""
+
+
+def verdict_log_path() -> str:
+    """`$CLOCKWORK_ROUTINE_LOG`, else `routines.log` beside the daemon's own `serve.log`."""
+    chosen = os.environ.get(VERDICT_LOG_ENV, "").strip()
+    if chosen:
+        return chosen
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/.cache")
+    return os.path.join(base, "clockwork", "routines.log")
+
+
+def remember(entry: Mapping[str, object], *, request_id: str, record: str,
+             path: str | None = None) -> None:
+    """Append one verdict to the per-PC log, one JSON line: the report entry as the run
+    record holds it, with the request and the record it is in. A log that cannot be
+    written costs the next day's comparison, never this verdict, so `OSError` is
+    swallowed."""
+    target = verdict_log_path() if path is None else path
+    if not target:
+        return
+    line = {"time": _dt.datetime.now().isoformat(timespec="seconds"), **entry,
+            "request_id": request_id, "record": record}
+    try:
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        with open(target, "a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(line, ensure_ascii=False, separators=(",", ":"),
+                                    default=str) + "\n")
+    except OSError:
+        pass
+
+
+def _logged(path: str) -> Iterable[dict]:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return
+    for text in lines:
+        try:
+            line = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(line, dict):
+            yield line
+
+
+def last_passing(directory: str, name: str, *, before: str = "",
+                 log: str | None = None) -> dict | None:
+    """The latest passing run of routine `name`, among the run records in `directory` and
+    the per-PC verdict log (`log`, by default `verdict_log_path()`; empty for none).
 
     `before`, a request id, is left out: the run being judged. Answers that run's report
-    entry as its record holds it, or None."""
+    entry as its record holds it, with `request_id`, or None."""
     best: dict | None = None
+    source = verdict_log_path() if log is None else log
+    for line in _logged(source) if source else ():
+        if (line.get("routine") == name and line.get("verdict") == "pass"
+                and not (before and line.get("request_id") == before)
+                and (best is None or str(line.get("time", "")) > str(best.get("time", "")))):
+            best = line
     for path in glob.glob(os.path.join(glob.escape(directory or "."), "*" + RECORD_SUFFIX)):
         try:
             with open(path, encoding="utf-8") as handle:

@@ -176,7 +176,9 @@ with its `--name` given bare, shortened for the command a trainee types by hand.
 standard error as it happens, and answers the report as JSON when the routine is judged, with
 its verdict under `verdict` and the report a person reads under `text`. A verdict of `fail` or
 `could not judge` is still exit status 0, since the routine answered; a routine that does not
-exist or does not load is 1.
+exist or does not load is 1. Given no `--instrument`, `routine` takes the instrument file from
+the window's saved settings, as `warm-up` does, so that the limits a routine is judged under are
+the ones the window acquires under. The library and the output directory stay the daemon's.
 
 ## The two ends of a day
 
@@ -213,7 +215,11 @@ the verb again ramps on from what the boxes read back, so a box already at its t
 nothing. Given no options, both take the method library, the instrument file and the output
 directory from the window's saved settings, and `warm-up` takes the acquisition console from them
 too (`--console` overrides it). The installer's "Warm up" and "Stand down" shortcuts run the two
-verbs this way, in a console window that stays open on the answer.
+verbs this way, in a console window that stays open on the answer. A saved instrument file that
+cannot be read is refused with its path and a sentence saying that the path came from the
+window's settings, since no option named it. A daemon that `warm-up` starts logs to `serve.log`
+alone and writes nothing to the shortcut's console window, so the prompt that follows the answer
+means the verb has finished.
 
 ## Reporting a problem or requesting a feature
 

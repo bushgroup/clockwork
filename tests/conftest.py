@@ -81,3 +81,26 @@ def no_real_daemon(monkeypatch):
 
     monkeypatch.setattr("clockwork.app.serving.start_serve", refused)
     monkeypatch.setattr("clockwork.app.window.start_serve", refused, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def isolated_routine_log(tmp_path_factory, monkeypatch):
+    """Point the per-PC log of routine verdicts at a file of this test's own (lab record,
+    task 96). A suite run on an instrument PC would otherwise add stand-in verdicts to the
+    log a real beam-check reads its last pass from."""
+    from clockwork.routine import VERDICT_LOG_ENV
+
+    monkeypatch.setenv(VERDICT_LOG_ENV,
+                       str(tmp_path_factory.mktemp("routines") / "routines.log"))
+
+
+@pytest.fixture(autouse=True)
+def no_saved_settings(monkeypatch):
+    """Answer no saved window settings to every verb (lab record, task 96).
+
+    `warm-up`, `stand-down` and `routine` fall back on the window's saved settings, which
+    on Windows are the registry of whoever runs the suite: on an instrument PC a test's
+    `routine` would load the lab's instrument document and its limits. A test that means
+    to exercise the fallback patches `saved_settings` itself.
+    """
+    monkeypatch.setattr("clockwork.app.saved.saved_settings", lambda keys=None: {})

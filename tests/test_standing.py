@@ -298,6 +298,48 @@ def test_warm_up_starts_a_daemon_when_none_answers(capsys, monkeypatch, tmp_path
             made.stop()
 
 
+def test_a_saved_instrument_document_that_will_not_load_says_where_it_came_from(
+        capsys, monkeypatch, tmp_path, library):
+    """The shortcut's warm-up is given no flags; a deleted document named in the
+    window's saved settings read as a flag nobody gave (lab record, task 96)."""
+    missing = str(tmp_path / "deleted" / "instrument.toml")
+    monkeypatch.setattr("clockwork.app.saved.saved_settings",
+                        lambda keys=None: {"instrument_path": missing})
+    (tmp_path / "runs").mkdir()
+    made = Daemon(tmp_path / "runs", library=library)
+    try:
+        code, answer, err = verb(capsys, "warm-up", "--endpoint", made.endpoint)
+        assert code == 1 and answer is None
+        assert missing in err and "window's saved instrument document" in err
+        code, answer, err = verb(capsys, "warm-up", "--endpoint", made.endpoint,
+                                 "--instrument", missing)
+        assert code == 1 and "window's saved" not in err, "a typed path is not saved"
+    finally:
+        made.stop()
+
+
+def test_a_routine_given_no_instrument_takes_the_saved_one_as_warm_up_does(
+        capsys, monkeypatch, tmp_path, library, instrument_path):
+    """With no document a routine had no limits and refused its first send, burning a
+    file number, where warm-up had found the document saved (lab record, task 96). The
+    saved library is not taken: the routine runs in the daemon's."""
+    missing = str(tmp_path / "deleted" / "instrument.toml")
+    monkeypatch.setattr("clockwork.app.saved.saved_settings", lambda keys=None: {
+        "instrument_path": missing, "library_dir": str(tmp_path / "not-the-daemons")})
+    (tmp_path / "runs").mkdir()
+    made = Daemon(tmp_path / "runs", library=library)
+    try:
+        code, answer, err = verb(capsys, "routine", "no-such", "--initials", "zz",
+                                 "--endpoint", made.endpoint)
+        assert code == 1 and missing in err and "window's saved instrument" in err
+        code, answer, err = verb(capsys, "routine", "no-such", "--initials", "zz",
+                                 "--endpoint", made.endpoint, "--instrument",
+                                 instrument_path)
+        assert code == 1 and "no-such" in err and "window's saved" not in err
+    finally:
+        made.stop()
+
+
 def test_a_daemon_started_from_the_console_twin_runs_as_the_windowed_exe(monkeypatch,
                                                                          tmp_path):
     from clockwork.app import serving

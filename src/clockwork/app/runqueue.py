@@ -163,9 +163,17 @@ class QueueRow:
 
     @property
     def name(self) -> str:
-        """What the table calls this row: the document's name, not its path."""
-        base = os.path.basename(self.method_path)
-        return os.path.splitext(base)[0] or self.method_path
+        """What the table and the run log call this row: the document's name, not its path.
+
+        A library document is `<folder>/method.toml`, so its basename names nothing; the
+        folder does. Read off the path rather than the document's `[metadata]`, because
+        the document is read when the row starts, not when it is named.
+        """
+        stem = os.path.splitext(os.path.basename(self.method_path))[0]
+        if stem.lower() == "method":
+            folder = os.path.basename(os.path.dirname(self.method_path))
+            return folder or stem
+        return stem or self.method_path
 
     @property
     def outcome(self) -> str:
@@ -273,6 +281,11 @@ class RunQueue:
     @property
     def waiting(self) -> int:
         return sum(1 for row in self.rows if row.state == WAITING)
+
+    @property
+    def to_run(self) -> int:
+        """The rows Start would run: the waiting ones and the skipped ones (`begin`)."""
+        return sum(1 for row in self.rows if row.state in UNSTARTED)
 
     # -- editing, including while a row runs ---------------------------------
 

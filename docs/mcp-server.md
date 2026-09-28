@@ -136,7 +136,8 @@ with a line of text, and the scan counter appears only at its latest value, as i
 window's run log. Every answer carries `position`: the files done, the files asked for, and the
 scans the frame in progress has published. When the job ends, `done` is true and the answer lists
 each file the run wrote under `runs`, with any failed frame and the reason, or says why the job
-failed under `failed`.
+failed under `failed`. Every later answer about that job says the same, whatever `after` is, so a
+session that asks about a job long after it ended is told it ended.
 
 ### Series
 

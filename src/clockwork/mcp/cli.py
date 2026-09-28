@@ -85,6 +85,13 @@ SAVED = ("warm_up", "stand_down")
 instrument document, the output directory and the console, flags first: they are run
 from desktop shortcuts that carry no flags (`clockwork.app.saved`)."""
 
+SAVED_INSTRUMENT = ("run_routine",)
+"""The tools whose verbs fall back on the window's saved instrument document alone,
+`--instrument` first: `clockwork routine` is typed by hand at the instrument PC, and with
+no document it had no limits and refused its first send, burning a file number, where
+warm-up an hour before had found the document saved (lab record, task 96). The library
+and the output directory stay the daemon's, which is what the routine runs in."""
+
 RECORD_WAIT_S = 60.0
 """How long a finished `acquire` waits for its run record's last file entry: the
 summary of a file is computed as the owner reports it, and takes a second or two."""
@@ -399,10 +406,13 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
     from .server import instrument_and_limits
 
     saved: dict[str, str] = {}
-    if verb.tool.name in SAVED:
+    if verb.tool.name in SAVED or verb.tool.name in SAVED_INSTRUMENT:
         from ..app.saved import saved_settings
 
         saved = saved_settings()
+        if verb.tool.name in SAVED_INSTRUMENT:
+            saved = {key: value for key, value in saved.items()
+                     if key == "instrument_path"}
     endpoint = args.endpoint or DEFAULT_COMMAND
     instrument_path = args.instrument or saved.get("instrument_path", "")
     if verb.tool.name in STARTS:
@@ -431,6 +441,12 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
                 fake=bool(hello.fake), instrument_path=instrument_path,
                 limits_path=args.limits)
         except ValueError as exc:
+            if instrument_path and not args.instrument:
+                # The path was never typed: a trainee reading "could not be read" looks
+                # for a flag they did not give (lab record, task 96).
+                exc = ValueError(f"{exc}. That path is the window's saved instrument "
+                                 "document: choose the right one under Instrument in "
+                                 "the window, or give --instrument")
             _say(err, f"{program}: {exc}")
             return 1
         output = os.path.abspath(args.output or hello.output or saved.get("output_dir", "")

@@ -816,8 +816,8 @@ class Toolbox:
         else happens or `wait_s` runs out (capped at 30 s; 0 answers at once), with the
         counter's latest value only. `position` says how many files are done of how many
         were asked for and how many scans the frame in progress has published. `done` is
-        true once the job has finished or failed; a finished acquisition lists its files
-        under `runs`, and a failed job says why under `failed`.
+        true once the job has finished or failed, whatever `after` is; a finished
+        acquisition lists its files under `runs`, and a failed job says why under `failed`.
         """
         handle = self._known(job)
         wait = max(0.0, min(float(wait_s), PROGRESS_WAIT_MAX_S))
@@ -864,7 +864,11 @@ class Toolbox:
         }
         if isinstance(started, SeriesJob):
             answer["series"] = _series_progress(started, history)
-        for entry in entries:
+        # Off the whole history, not the events after `after`: a job asked about past
+        # its end -- `after` its last number, or any number larger -- answered `done:
+        # false` for ever, with nothing running (on the rack, 2026-09-28; lab record,
+        # task 96).
+        for entry in history:
             if isinstance(entry.event, JobFinished):
                 answer["done"] = True
                 answer["result"] = _result(entry.event.result)
@@ -897,7 +901,8 @@ class Toolbox:
         boxes, the job running and those queued, the method the boxes were last armed
         with and the stem that arming named, whether sends through this server are refused and why,
         the standing limits in force, and how much of this daemon session's budget is
-        left."""
+        left. The budget is the daemon session's, not this server's: `acquisitions_by`
+        says how many each surface spent, `cli` being the command line's."""
         state = self.owner.status()  # type: ignore[attr-defined]
         armed = ({"method": state.armed.method, "stem": state.armed.stem}
                  if state.armed is not None else None)
@@ -914,6 +919,7 @@ class Toolbox:
             },
             "budget": None if limits is None else {
                 "acquisitions_made": ledger.runs,
+                "acquisitions_by": self.log.acquisitions_by(self._session_of()[0]),
                 "max_acquisitions": limits.budget.max_runs,
                 "hours_since_start": round(ledger.hours, 2),
                 "max_hours": limits.budget.max_hours,
@@ -1933,6 +1939,8 @@ class Toolbox:
                  "files": [item["stem"] for item in files], "job": job, "text": text,
                  **dict(extra or {})}
         record.append("routines", _plain(entry))
+        if not self.owner.status().fake:  # type: ignore[attr-defined]
+            routine_module.remember(_plain(entry), request_id=identity, record=record.path)
         for line in text.splitlines():
             self._say(line)
         return {"routine": loaded.name, "verdict": judged["verdict"],

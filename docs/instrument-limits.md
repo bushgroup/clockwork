@@ -107,9 +107,12 @@ value into range, so an agent learns why a choice would be refused before it tri
 The budget is counted from the audit log in the output directory: the `acquire` calls it accepted
 under the daemon's session identifier, and the points of each `series` call it accepted. A series
 is counted whole before its first send, so a series that would not fit is refused rather than
-stopped part way. Every server and every restart of a server over the same
-daemon therefore spends one budget. Note that two servers writing to different output directories
-keep separate logs, and so separate counts.
+stopped part way. Every server and every restart of a server over the same daemon therefore spends
+one budget, and so does the [command line](command-line.md): a `clockwork routine` typed at the
+instrument PC in the middle of an agent's series takes one acquisition from the same count.
+`status` reports the count by surface under `acquisitions_by`, `mcp` for the MCP server and `cli`
+for the command line. Note that two servers writing to different output directories keep separate
+logs, and so separate counts.
 
 ## The cold-start check
 

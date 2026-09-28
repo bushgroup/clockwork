@@ -189,6 +189,9 @@ class MainWindow(QMainWindow):
                 mailbox=self.mailbox, launch=lambda: start_serve(command),
                 console_path=self.settings.console_path)
         self._close_when_idle = False
+        self._scan_when_idle = False
+        """Set by a join that found the daemon busy: the scan it put off, made by the
+        first status that shows the daemon idle (lab record, task 96)."""
         """Set by a close that chose to stop this window's run: the window closes itself
         when the job comes back, having shown the frame end in the run log."""
 
@@ -1676,6 +1679,7 @@ class MainWindow(QMainWindow):
         # would offer a button that the very next statement takes away again.
         if job is self._queue_job:
             self._queue_step(job, result)
+        self._scan_if_put_off()
         self._refresh_actions()
         self._close_if_asked()
 
@@ -1697,6 +1701,7 @@ class MainWindow(QMainWindow):
             self._armed = ()
         if job is self._queue_job:
             self._row_finished(FAILED, message)
+        self._scan_if_put_off()
         self._refresh_actions()
         self._close_if_asked()
 
@@ -1713,7 +1718,9 @@ class MainWindow(QMainWindow):
         the other jobs do. One that was already running scanned long ago, so an idle one
         is asked again -- a rescan keeps the ports it holds open (task 62), so it costs
         seconds and resets nothing -- and a busy one is not held up by a scan: the panes
-        are named from the boxes it reports and the ports follow at the next Find boxes.
+        are named from the boxes it reports, and the scan that gives them their ports is
+        made as soon as the daemon is idle, not left to a Find boxes the trainee has to
+        know to press before Send setup (lab record, task 96).
         """
         pid = getattr(hello, "pid", "?")
         if started:
@@ -1732,6 +1739,7 @@ class MainWindow(QMainWindow):
         if status.running is None and not status.queued:
             self.find_boxes()
         else:
+            self._scan_when_idle = True
             self._ensure_panes(list(status.boxes) + [name for name in self.ports
                                                      if name not in status.boxes])
             self._pane_changed()
@@ -1744,7 +1752,19 @@ class MainWindow(QMainWindow):
             lines = [f"{state}: {handle.label} (from {handle.origin or 'clockwork serve'})"
                      for state, handle in worker.others()]
         self.queue_panel.show_others(lines)
+        self._scan_if_put_off()
         self._refresh_actions()
+
+    def _scan_if_put_off(self) -> None:
+        """The scan a join put off, once the daemon is idle: its last status shows no
+        job and the window has seen the last one end, in whichever order they arrived."""
+        status = getattr(self.worker, "status", None)
+        if (not self._scan_when_idle or self._job is not None or self.queue.running
+                or self._close_when_idle
+                or status is None or status.running is not None or status.queued):
+            return
+        self._scan_when_idle = False
+        self.find_boxes()
 
     def _state_read(self, name: str, state: object) -> None:
         """A whole-state reading off a `ReadState` job, for the panel that asked."""

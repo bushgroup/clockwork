@@ -12,7 +12,7 @@ owner the window uses, so a caller written against one runs against the other un
 
 ```
 clockwork serve [--fake] [--output DIR] [--library DIR] [--console PATH] [--kept DIR]
-                [--errors-log PATH]
+                [--errors-log PATH] [--detached]
 ```
 
 The window starts the daemon itself when it opens and none is answering (under The window as a
@@ -214,7 +214,10 @@ answers, the window follows it. If none does, the window starts `clockwork serve
 installed executable with the subcommand, passing its output directory, method library, console,
 kept-files folder and error log on the command line, and waits for `hello`. The daemon it starts
 has no console window, runs in a process group of its own, breaks away from any job the window is
-in, and logs to `serve.log` alone; it is stopped by `shutdown` and never by a console signal. If
+in, and logs to `serve.log` alone; it is stopped by `shutdown` and never by a console signal.
+`--detached` on its command line keeps its log out of the console of whatever started it, which
+matters when that is `clockwork warm-up` in a shortcut's console window: without it, the daemon's
+later lines printed after the verb's prompt. `warm-up` starts a daemon the same way. If
 the daemon ends before it answers, which is what happens when another program holds the
 instrument lock, the window shows the last line of `serve.log`, which names the holder.
 
@@ -246,9 +249,9 @@ the instrument lock no longer names it and nothing listens on the console's comm
 
 ## Logs
 
-The daemon writes one line per event worth a person's reading to its terminal and to
-`%LOCALAPPDATA%\clockwork\serve.log`, appended: its start and what it found, every request that
-changes something (`submit`, `stop`, `shutdown`) with the job it named, each job's start and end,
-the console's starts and restarts, and anything it stopped. The window's `errors.log` in the same
+The daemon writes one line per event worth a person's reading to its terminal, unless it was
+started `--detached`, and to `%LOCALAPPDATA%\clockwork\serve.log`, appended: its start and what
+it found, every request that changes something (`submit`, `stop`, `shutdown`) with the job it
+named, each job's start and end, the console's starts and restarts, and anything it stopped. The window's `errors.log` in the same
 directory is left to the window. Each send and each run also leaves its wire transcript and its
 send log beside its files in the output directory, exactly as a run started from the window does.

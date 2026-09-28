@@ -301,6 +301,12 @@ def test_a_point_the_boxes_already_hold_is_acquired_without_a_send(fake_owner, l
         last = answer["last"]
         if answer["done"]:
             break
+    # Asked again past its end, the job is still done: a session polling a finished
+    # series with a large `after` was told `done: false` for ever (lab record, task 96).
+    for after in (last, 999999):
+        again = toolbox.call("progress", {"job": started["job"], "after": after,
+                                          "wait_s": 0})
+        assert again["done"] and again["events"] == [] and len(again["runs"]) == 3
     assert [event["sends"] for event in events if event["kind"] == "PointStarted"] == [
         True, False, True]
     assert not any("ClockworkSeriesSeed" in stamps for stamps in summed_stamps(output))
