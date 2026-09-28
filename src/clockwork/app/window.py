@@ -1454,7 +1454,10 @@ class MainWindow(QMainWindow):
         row = self.queue.current
         if row is None:
             return
-        runs = list(result) if isinstance(result, list) else []
+        # A list in process and a tuple off the daemon's wire (`clockwork.owner.wire`):
+        # taking only the list failed every row a window ran through `clockwork serve`
+        # (on the rack, 2026-09-28; lab record, task 86).
+        runs = list(result) if isinstance(result, (list, tuple)) else []
         self._row_finished(outcome_of(row, runs))
 
     def _row_finished(self, state: str, problem: str = "") -> None:

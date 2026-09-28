@@ -20,7 +20,9 @@ pytest.importorskip("pytestqt")
 
 from PySide6.QtCore import QSettings  # noqa: E402
 
-from clockwork.app import serving  # noqa: E402
+from clockwork import instrument as instrument_module  # noqa: E402
+from clockwork import method as method_module  # noqa: E402
+from clockwork.app import runqueue, serving  # noqa: E402
 from clockwork.app.settings import Settings  # noqa: E402
 from clockwork.app.window import MainWindow  # noqa: E402
 from clockwork.app.worker import SERVE, Discover, RemoteWorker  # noqa: E402
@@ -300,6 +302,38 @@ def test_closing_over_the_windows_own_run_asks(qtbot, scratch_settings, daemon, 
     assert made.isVisible() and made.worker.stopping  # open until the frame ends
     qtbot.waitUntil(lambda: not made.isVisible(), timeout=120_000)
     assert len(stopped) == 1
+
+
+def test_a_queue_row_run_through_the_daemon_is_done(
+        qtbot, scratch_settings, daemon, claude, tmp_path):
+    """An Acquire's runs come back over the wire as a tuple, not the list they are in
+    process, and the queue took only a list: every row a window ran through a daemon was
+    marked failed after a complete run (on the rack, 2026-09-28; lab record, task 86)."""
+    idle_daemon(qtbot, claude)
+    made = remote_window(qtbot, daemon.endpoint)
+    made.output_dir.setText(str(tmp_path))
+    made.initials.setText("ZZ")
+    made._initials_changed()
+    instrument = str(tmp_path / "instrument.toml")
+    instrument_module.save(make_instrument(), instrument)
+    made._load_instrument(instrument)
+    path = str(tmp_path / "queued.toml")
+    method_module.save(make_method(), path)
+    # A `--fake` daemon builds its rack from the method a Discover carries.
+    qtbot.waitUntil(lambda: made._job is None and made.worker.status is not None
+                    and made.worker.status.issued == 2
+                    and made.worker.status.running is None, timeout=30_000)
+    made.worker.submit(Discover(method=make_method()))
+    qtbot.waitUntil(lambda: made._job is None and bool(made.worker.boxes)
+                    and made.worker.console_alive, timeout=60_000)
+    made.queue.add(runqueue.QueueRow(method_path=path))
+    made.queue_panel.refresh()
+
+    made.start_queue()
+    qtbot.waitUntil(lambda: not made.queue.running and made._job is None, timeout=120_000)
+    (row,) = made.queue.rows
+    assert row.state == runqueue.DONE, row.outcome
+    assert len(row.stems) == 1 and (tmp_path / f"{row.stems[0]}.uimf").is_file()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="the job object is Windows's")
