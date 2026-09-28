@@ -679,6 +679,21 @@ def test_ten_left_as_found_lines_collapse_to_one_row_per_box(qtbot):
     assert "auklet: 5 settings left as found" in panel.log.topLevelItem(0).text(1)
 
 
+def test_each_send_groups_its_own_left_as_found_lines(qtbot):
+    """Three sends showed each `left as found` line three times, all under the first
+    send's group (on the rack, 2026-09-28; lab record, task 96)."""
+    panel = RunPanel()
+    qtbot.addWidget(panel)
+    for _ in range(3):
+        panel.begin("sending setup, load and arm")
+        for index in range(2):
+            panel.show(Warned(f"cormorant SETTING{index} is left as found on module 1: x"))
+    groups = [panel.log.topLevelItem(index)
+              for index in range(panel.log.topLevelItemCount())]
+    assert [group.childCount() for group in groups] == [2, 2, 2]
+    assert all("cormorant: 2 settings left as found" in group.text(1) for group in groups)
+
+
 def test_copy_puts_the_whole_log_on_the_clipboard(qtbot):
     """Matt at the bench, 2026-09-19: "next to Clear, there needs to be a Copy button
     to copy the run log."

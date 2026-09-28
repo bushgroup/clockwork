@@ -251,7 +251,13 @@ class RunPanel(QWidget):
         self._reading_back = None
 
     def begin(self, what: str) -> None:
-        """A job has started: reset the bar and say what is happening."""
+        """A job has started: reset the bar and say what is happening.
+
+        The `left as found` groups start again too. Kept across jobs, every later send's
+        lines were added under the first send's group, at its time, so a window that sent
+        three times showed each line three times (on the rack, 2026-09-28; lab record,
+        task 96)."""
+        self._groups.clear()
         self._started = time.monotonic()
         self.progress = Progress()
         self.caption.setText(what)
