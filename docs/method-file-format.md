@@ -335,7 +335,7 @@ traces back to the exact strings sent to every box and the order they went in.
 | Field | Content |
 |---|---|
 | `method_name` | The method's `metadata.name` |
-| `method_hash` | SHA-256 of the method's canonical TOML text |
+| `method_hash` | SHA-256 of the method's canonical TOML text, its `file_stem` line left out |
 | `method_text` | The method's canonical TOML text, in full |
 | `clockwork_version` | The `clockwork` package version that ran the acquisition |
 | `console_version` | The acquisition console's reported version, or `None` if unavailable |
@@ -348,10 +348,17 @@ expected to run at, to compare with the `AverageTOFLength` it was measured at; a
 `ClockworkConditions`, which record what the boxes were holding and what the operator said about
 the rest of the instrument. A method rendered from a template adds the template, its knobs,
 labels and marks, and a run acquired in a series adds its place in the series; both sets are in
-[`template-file-format.md`](template-file-format.md#what-a-rendered-run-records). A method's hash changes if and only if some field in the document changes, which makes it
-a stable key for grouping acquisitions by the method that produced them. The file name is not one
-of the fields: a technical replicate is the same method written to a different file, so every
-replicate of one method stamps to the same hash.
+[`template-file-format.md`](template-file-format.md#what-a-rendered-run-records). A method's hash changes if and only if some field in the document other than
+`file_stem` changes, which makes it a stable key for grouping acquisitions by the method that
+produced them. `file_stem` names the file, and the window sets it to the next free name for every
+acquisition, so a hash that covered it would change with every send of one document. It is left
+out of the hash and kept in `method_text`, where it is required for the text to load back as a
+method. To check a hash, take `method_text`, delete its `file_stem` line, and hash what remains.
+A technical replicate is the same method written to a different file, so every replicate of one
+method stamps to the same hash, whether it was acquired in one run or in several.
+
+Files written before clockwork 1.1.0rc4 hash the whole text, `file_stem` included. In those files
+two acquisitions of one document share a hash only when they came from the same send.
 
 ## Where a rendered method came from
 

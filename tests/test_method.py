@@ -1,6 +1,8 @@
 """Load/save/validate for the flat TOML method document, and its provenance stamp."""
 
 import datetime
+import hashlib
+from dataclasses import replace
 
 import pytest
 
@@ -243,12 +245,30 @@ def test_stamp_hash_changes_with_content() -> None:
     ],
 )
 def test_stamp_hash_covers_every_new_field(field: str, replacement: str) -> None:
-    """A field the hash does not cover is a field a stamp silently forgets."""
+    """A field the hash does not cover is a field a stamp silently forgets.
+
+    The `file_stem` case changes the stem *and* adds an enable, and it is the enable the
+    hash sees: the stem alone is the next test's."""
     original = next(line for line in SAMPLE.splitlines() if line.startswith(field))
     changed = SAMPLE.replace(original, replacement, 1)
     assert changed != SAMPLE
     m, m2 = method.loads(SAMPLE), method.loads(changed)
     assert method.stamp(m)["method_hash"] != method.stamp(m2)["method_hash"]
+
+
+def test_stamp_hash_leaves_the_file_stem_out_and_the_text_keeps_it() -> None:
+    """The window gives every acquisition the next free stem, so a hash over the stem
+    moved with every send of one document (on the rack, 2026-09-28)."""
+    m = method.loads(SAMPLE)
+    renamed = replace(m, acquisition=replace(m.acquisition, file_stem="260928_MB_008"))
+    first, second = method.stamp(m), method.stamp(renamed)
+    assert first["method_hash"] == second["method_hash"]
+    assert first["method_text"] != second["method_text"]
+    assert 'file_stem = "260928_MB_008"' in second["method_text"]
+    # The check a reader of the file can make: the text less its stem line, hashed.
+    kept = "".join(line for line in second["method_text"].splitlines(keepends=True)
+                   if not line.startswith("file_stem = "))
+    assert hashlib.sha256(kept.encode("utf-8")).hexdigest() == second["method_hash"]
 
 
 def test_stamp_console_version_defaults_to_none() -> None:

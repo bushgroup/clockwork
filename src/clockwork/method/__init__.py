@@ -1033,11 +1033,18 @@ def stamp(method: Method, *, console_version: str | None = None) -> dict[str, ob
     console's version if known. Where this lands -- `Global_Params` fields or a
     sidecar file beside the UIMF -- is for the writer that consumes it (lab
     record, task 06) to decide; this function only produces the record.
+
+    The hash leaves `file_stem` out and the text keeps it (docs/method-file-format.md,
+    "Provenance stamp"). The window sets the stem to the next free name for every
+    acquisition, so a hash over it moved with every send of one document and grouped
+    nothing (on the rack, 2026-09-28); the text keeps it because it is a required field.
     """
     text = dumps(method)
+    hashed = to_dict(method)
+    del hashed["acquisition"]["file_stem"]
     return {
         "method_name": method.metadata.name,
-        "method_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "method_hash": hashlib.sha256(tomli_w.dumps(hashed).encode("utf-8")).hexdigest(),
         "method_text": text,
         "clockwork_version": clockwork.__version__,
         "console_version": console_version,
