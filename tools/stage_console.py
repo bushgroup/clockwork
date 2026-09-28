@@ -41,7 +41,7 @@ PAYLOAD_DIR = os.path.join(ROOT, "packaging", "console_payload")
 # "derived facts only, never vendor documents"). The lab repo's console notes carry the
 # copy of record; this is the copy `check_public.py` can actually check the staged
 # build against.
-EXPECTED_CONSOLE_COMMIT = "795fef6"
+EXPECTED_CONSOLE_COMMIT = "3daccee"
 
 # What travels into the installer: the executable, every DLL beside it, the config.txt
 # template and app.h (the version/commit record the check above reads). Not the .pdb
