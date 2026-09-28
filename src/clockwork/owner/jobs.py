@@ -29,7 +29,10 @@ __all__ = [
     "SendResult",
     "SeriesJob",
     "SeriesResult",
+    "StandDown",
+    "StandingResult",
     "StartConsole",
+    "WarmUp",
     "matches_wire",
     "wire_fingerprint",
 ]
@@ -229,6 +232,41 @@ class ReadState(Job):
     names: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class WarmUp(Job):
+    """The morning: `method`'s `setup` phase on every box it names, its DC bias, RF drive
+    and ARB range ramped in `steps` steps `dwell_s` apart, and nothing loaded or armed
+    (`clockwork.acq.standing.warm_up`, lab record, task 95).
+
+    `directory` and `stem` name the send log and the wire transcript the work goes into,
+    as a `Send`'s do; no data file is ever made under the stem.
+    """
+
+    label: str = "warming up"
+    method: Method | None = None
+    method_path: str = ""
+    steps: int = 5
+    dwell_s: float = 3.0
+    directory: str = ""
+    stem: str = ""
+    instrument: Instrument = UNCALIBRATED
+    instrument_path: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class StandDown(Job):
+    """The evening: every box the owner holds out of table mode, its DC bias, RF drive and
+    ARB range ramped to zero, its digital outputs lowered
+    (`clockwork.acq.standing.stand_down`). The daemon's shutdown is the client's to ask
+    for afterwards; this job leaves the owner running."""
+
+    label: str = "standing down"
+    steps: int = 5
+    dwell_s: float = 3.0
+    directory: str = ""
+    stem: str = ""
+
+
 # -- what comes back ---------------------------------------------------------------
 
 
@@ -294,6 +332,21 @@ class SeriesResult:
     armed: tuple = ()
     """What the series' last send put on the wire, as `SendResult.armed`, so that a
     window reads the boxes as holding that and not whatever it last sent itself."""
+
+
+@dataclass(frozen=True, slots=True)
+class StandingResult:
+    """What a `WarmUp` or a `StandDown` left behind: both readings and where the log went."""
+
+    snapshot: Snapshot
+    """`before` and `after` the work, every box the job touched."""
+    steps: int = 0
+    """How many ramp steps were sent, 0 where every box already read its target."""
+    lowered: tuple[str, ...] = ()
+    """A stand-down's digital outputs, per box, as `auklet A-P`."""
+    send_log: str = ""
+    transcript_path: str = ""
+    seconds: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

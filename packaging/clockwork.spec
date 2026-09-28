@@ -219,4 +219,12 @@ _exe_common = dict(
 )
 
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, **_exe_common)
-coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, upx_exclude=[], name="clockwork")
+# A console-subsystem twin over the same `_internal`, for the verbs a desktop shortcut
+# runs (`clockwork-cli.exe warm-up` under `cmd /k`, lab record, task 95): the windowed
+# exe prints to nothing when nothing started it from a console, and a stand-down that
+# says nothing is not one a person can trust. Same entry point, same bundle; only the
+# PE subsystem differs. A daemon is never run as this one (`clockwork.app.serving`).
+cli = EXE(pyz, a.scripts, [], exclude_binaries=True,
+          **{**_exe_common, "name": "clockwork-cli", "console": True})
+coll = COLLECT(exe, cli, a.binaries, a.datas, strip=False, upx=False, upx_exclude=[],
+               name="clockwork")

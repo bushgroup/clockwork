@@ -17,10 +17,9 @@ from __future__ import annotations
 
 from PySide6.QtCore import QByteArray, QSettings
 
-__all__ = ["ORGANISATION", "APPLICATION", "Settings"]
+from .saved import APPLICATION, ORGANISATION
 
-ORGANISATION = "BushLab"
-APPLICATION = "clockwork"
+__all__ = ["ORGANISATION", "APPLICATION", "Settings"]
 
 
 class Settings:

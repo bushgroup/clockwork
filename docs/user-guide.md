@@ -43,8 +43,9 @@ in the same folder, clockwork beside a `console` directory holding the console's
 and its `config.txt`, and clockwork finds the console there itself. Nothing further points one at
 the other.
 
-The wizard offers a desktop icon and, at the end, a chance to launch clockwork immediately. Both
-are optional.
+The wizard offers desktop icons and, at the end, a chance to launch clockwork immediately. Both
+are optional. The Start menu gets three entries whether or not the desktop icons are chosen:
+clockwork itself, and **Warm up** and **Stand down**, which the next section but one describes.
 
 ## First launch
 
@@ -65,6 +66,37 @@ Three fields matter before anything can be sent to a box:
 Everything else about a run, the boxes' strings and the acquisition settings, comes from a method,
 loaded through **File > Open method…** or the method library (**File > Method library…**), not
 typed by hand here.
+
+## Beginning and end of a day
+
+**Warm up**, on the desktop or in the Start menu, is the first thing to run in the morning. It puts
+the instrument's standing DC bias setpoints, RF drive levels and traveling-wave ranges on the boxes
+and leaves them there, so that the RF heads and the supplies have settled by the time anything is
+acquired. Stepping an RF head from cold to 50% drive and acquiring at once is the habit it
+replaces. The voltages are ramped rather than stepped: five equal steps three seconds apart by
+default, each printed as it is sent, about fifteen seconds in all. The window it opens ends with a
+line saying whether every box holds the stack as declared, and lists any setting that does not.
+Warm up loads no table and arms nothing, so the first acquisition of the day still starts with
+**Send setup**. It also starts clockwork's background service when none is running, and the window
+opened afterwards uses that service and leaves it running when the window closes.
+
+The stack is whichever method the instrument document names under `[standing]`
+([instrument file](instrument-file-format.md#standing)), and the method library, instrument
+document and output directory are the ones this window last saved, so set those in the window once
+before the first morning.
+
+**Stand down** is the last thing to run in the evening. It takes every box out of table mode, ramps
+every DC bias channel, RF drive level and traveling-wave range down to zero in the same steps,
+lowers every digital output, and then stops clockwork's background service and the acquisition
+console with it. Its window ends by saying whether every setting reached zero and whether the
+service and the console have stopped; after that, Task Manager shows neither, and the front panels
+read zero. Stand down refuses to start while an acquisition is running, and names it: wait for the
+run to finish, or stop it from the window. A window left open sees the service go and says so in
+its status bar; it has nothing to reconnect to until the next Warm up, or until **Find boxes**
+starts the service again.
+
+Either can be interrupted with Ctrl-C in its window. The ramp stops after the step it is on, and
+running the same shortcut again carries on from what the boxes then read back.
 
 ## The panes and what the tags mean
 

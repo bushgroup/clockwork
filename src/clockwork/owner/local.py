@@ -75,6 +75,7 @@ from ..acq import (
     start_chain,
 )
 from ..acq.fake import INSTRUMENT_PERIOD_SAMPLES
+from ..acq.standing import stand_down, warm_up
 from ..envelope import cold_start, judge
 from ..instrument import Instrument
 from ..method import Method
@@ -118,7 +119,10 @@ from .jobs import (
     SendResult,
     SeriesJob,
     SeriesResult,
+    StandDown,
+    StandingResult,
     StartConsole,
+    WarmUp,
     matches_wire,
     wire_fingerprint,
 )
@@ -479,6 +483,10 @@ class LocalOwner:
             return self._series(job)
         if isinstance(job, ReadState):
             return self._read_state(job)
+        if isinstance(job, WarmUp):
+            return self._warm_up(job)
+        if isinstance(job, StandDown):
+            return self._stand_down(job)
         raise TypeError(f"no owner handler for {type(job).__name__}")
 
     def _report(self, event: Event, handle: Handle | None = None) -> None:
@@ -707,6 +715,48 @@ class LocalOwner:
                           transcript_path=paths[0],
                           seconds=time.perf_counter() - started,
                           armed=fingerprint)
+
+    # -- the two ends of the day -----------------------------------------------
+
+    def _warm_up(self, job: WarmUp) -> StandingResult:
+        method = _needs_method(job.method)
+        self._require_boxes(method)
+        header = self._header(method, job.method_path, job.instrument,
+                              job.instrument_path, "")
+        return self._standing(job.directory, job.stem, header, lambda: warm_up(
+            method, self.boxes, steps=job.steps, dwell_s=job.dwell_s,
+            progress=self._report, listings=self.listings, stop=self._stop_check) + ((),))
+
+    def _stand_down(self, job: StandDown) -> StandingResult:
+        if not self.boxes:
+            raise MipsError("no boxes are open to stand down: find them first, or check "
+                            "they are powered on")
+        header = transcript.run_header(
+            console=getattr(self.console, "info", None),
+            boxes=[(name, row[0], row[1], row[2]) for name, row in self._identities()])
+        return self._standing(job.directory, job.stem, header, lambda: stand_down(
+            self.boxes, steps=job.steps, dwell_s=job.dwell_s, progress=self._report,
+            listings=self.listings, stop=self._stop_check))
+
+    def _standing(self, directory: str, stem: str, header: str,
+                  work: Callable[[], tuple[Snapshot, int, tuple[str, ...]]]
+                  ) -> StandingResult:
+        """A warm-up or a stand-down inside its own send log and transcript.
+
+        What the boxes hold afterwards is neither the last method's arming nor the
+        snapshot it read, so both are forgotten before the first string goes: an
+        `acquire` after a warm-up is refused until something is armed again."""
+        directory = directory or os.getcwd()
+        self._stop.clear()
+        started = time.perf_counter()
+        self._armed = None
+        self._snapshot = None
+        self._send_log = (directory, stem)
+        with self._logs(directory, stem, header, append=False) as paths:
+            snapshot, steps, lowered = work()
+        return StandingResult(snapshot=snapshot, steps=steps, lowered=lowered,
+                              send_log=paths[1], transcript_path=paths[0],
+                              seconds=time.perf_counter() - started)
 
     # -- acquiring -----------------------------------------------------------
 

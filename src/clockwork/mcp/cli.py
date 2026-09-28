@@ -76,6 +76,15 @@ WAITS = ("acquire", "series")
 """The tools that start a run and answer at once, whose verbs wait for it to end unless
 given `--no-wait`: the run record's thread dies with the verb's process."""
 
+STARTS = ("warm_up",)
+"""The tools whose verbs start a daemon when none answers, and leave it running: the
+morning's is the one verb run before anything else is (lab record, task 95)."""
+
+SAVED = ("warm_up", "stand_down")
+"""The tools whose verbs fall back on the window's saved settings for the library, the
+instrument document, the output directory and the console, flags first: they are run
+from desktop shortcuts that carry no flags (`clockwork.app.saved`)."""
+
 RECORD_WAIT_S = 60.0
 """How long a finished `acquire` waits for its run record's last file entry: the
 summary of a file is computed as the owner reports it, and takes a second or two."""
@@ -175,6 +184,12 @@ def add_verbs(commands: argparse._SubParsersAction) -> None:
                 "--follow", action="store_true",
                 help="keep asking until the job ends, printing one JSON line per event "
                      "and a last line with the answer")
+        if verb.tool.name in STARTS:
+            parser.add_argument(
+                "--console", metavar="PATH", default="",
+                help="the acquisition console a daemon this starts is given (default: the "
+                     "window's saved setting, then $CLOCKWORK_CONSOLE, then the "
+                     "installer's)")
         if verb.tool.name in WAITS:
             parser.add_argument(
                 "--no-wait", action="store_true",
@@ -383,8 +398,28 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
     from .audit import AuditLog
     from .server import instrument_and_limits
 
-    owner = RemoteOwner(args.endpoint or DEFAULT_COMMAND,
-                        origin=f"{program} at the command line")
+    saved: dict[str, str] = {}
+    if verb.tool.name in SAVED:
+        from ..app.saved import saved_settings
+
+        saved = saved_settings()
+    endpoint = args.endpoint or DEFAULT_COMMAND
+    instrument_path = args.instrument or saved.get("instrument_path", "")
+    if verb.tool.name in STARTS:
+        from ..app.serving import connect_or_start, serve_command
+
+        try:
+            _, started = connect_or_start(endpoint, serve_command(
+                output=args.output or saved.get("output_dir", ""),
+                library=args.library or saved.get("library_dir", ""),
+                console=args.console or saved.get("console_path", "")),
+                say=lambda line: _say(err, line))
+        except DaemonError as exc:
+            _say(err, f"{program}: {exc}")
+            return 1
+        if started:
+            _say(err, "clockwork serve started; it stays running until stand-down")
+    owner = RemoteOwner(endpoint, origin=f"{program} at the command line")
     try:
         try:
             hello = owner.hello()
@@ -393,17 +428,19 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
             return 1
         try:
             instrument, limits = instrument_and_limits(
-                fake=bool(hello.fake), instrument_path=args.instrument,
+                fake=bool(hello.fake), instrument_path=instrument_path,
                 limits_path=args.limits)
         except ValueError as exc:
             _say(err, f"{program}: {exc}")
             return 1
-        output = os.path.abspath(args.output or hello.output or os.getcwd())
-        toolbox = Toolbox(owner, library=args.library or hello.library, output=output,
-                          instrument=instrument, instrument_path=args.instrument,
+        output = os.path.abspath(args.output or hello.output or saved.get("output_dir", "")
+                                 or os.getcwd())
+        toolbox = Toolbox(owner, library=args.library or hello.library
+                          or saved.get("library_dir", ""), output=output,
+                          instrument=instrument, instrument_path=instrument_path,
                           log=AuditLog.beside(output, via="cli"), limits=limits,
                           routines=args.routines)
-        if verb.tool.name == "run_routine":
+        if verb.tool.name in ("run_routine", *SAVED):
             toolbox.narrate = lambda line: _say(err, line)
         if verb.tool.name == "progress" and args.follow:
             return _follow(toolbox, arguments, out, err, program)
@@ -424,6 +461,16 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
             return _wait(toolbox, int(answer["job"]), err, program)
         return 0
     except KeyboardInterrupt:
+        if verb.tool.name in SAVED:
+            # A ramp is not a run: it ends after the step it is on, and the next
+            # warm-up or stand-down ramps on from what the boxes read back.
+            try:
+                owner.stop(f"{program} interrupted")
+            except DaemonError:
+                pass
+            _say(err, f"{program}: interrupted; the ramp ends after its current step, "
+                      "and running it again carries on from what the boxes read back")
+            return 130
         _say(err, f"{program}: interrupted; a job it started carries on, and "
                   "`clockwork stop` ends it")
         return 130

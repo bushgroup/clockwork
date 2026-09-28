@@ -26,6 +26,11 @@ measured = 2026-09-09
 full_scale_v = 0.5
 offset_v = 0.251
 inverted = false
+
+[standing]
+method = "detection-response/method.toml"
+steps = 5
+dwell_s = 3
 ```
 
 - `schema_version` pins the document to the shape this section describes. Clockwork rejects a
@@ -46,6 +51,8 @@ inverted = false
   has checked, which is why the date is part of the document.
 - `vertical` is the full scale and the channel offset the acquisition ran at, in volts, plus
   whether channel 1's data was inverted.
+- `standing` is what the instrument holds between experiments and how it is brought there each
+  morning and each evening ([below](#standing)).
 
 Every table is optional, and so is the whole document. An acquisition given no instrument file
 writes `CalibrationDone = 0` and stamps no vertical settings, which is what clockwork wrote before
@@ -119,13 +126,32 @@ Inversion happens in the digitizer's own channel path, ahead of the zero-suppres
 excursion, positive-going after inversion — whichever way this is set. What changes is which side
 of zero the acquisition was looking at, and `inverted` is the only place a file says which.
 
+## Standing
+
+`standing.method` names the method whose `setup` phase is the instrument's standard stack: the DC
+bias setpoints, the RF heads and the traveling-wave ranges the instrument runs on. It is a path in
+the method library or an absolute path. `clockwork warm-up` sends that phase, and only that phase,
+each morning, and `clockwork stand-down` brings the same settings to zero each evening
+([command line](command-line.md#the-two-ends-of-a-day)). Naming an existing method rather than
+restating its numbers keeps one document for the stack, so the morning cannot disagree with the
+method a stack audit ([routines](routines.md)) judges the boxes against.
+
+Both verbs ramp every DC bias channel, RF drive level and ARB range rather than stepping it. Each
+of `steps` equal steps moves every setting a fraction `1/steps` of the way from what its box read
+back to its target, and is followed by a wait of `dwell_s` seconds, so the defaults of 5 steps and
+3 s take about 15 s in each direction. A step is under a second of serial commands, which makes
+the dwell the ramp. Both numbers are the document's so that the lab can change them without a new
+build. Without a `standing` table, or with one that names no method, `warm-up` is refused and
+`stand-down` still works: it zeroes whatever the boxes report having.
+
 ## Validation
 
 `clockwork.instrument.load()` and `.loads()` collect every problem in a document before raising
 `InstrumentError`, so a document with several mistakes reports all of them in one pass. Rejected:
 an unrecognized `schema_version`, a key the schema does not define, a value of the wrong type, a
 number that is not finite, a negative `slope`, a `full_scale_v` or `pusher_period_us` that is not
-positive, and a `measured` that is not a date. A negative `offset_v` is accepted, because the offset is a position
+positive, a `measured` that is not a date, a `steps` that is not a whole number of at least 1,
+and a negative `dwell_s`. A negative `offset_v` is accepted, because the offset is a position
 within the window rather than a size.
 
 What the SA220P itself accepts for full scale is a property of the card and of the console that

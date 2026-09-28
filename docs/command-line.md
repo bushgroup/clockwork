@@ -3,7 +3,7 @@
 Every tool the [MCP server](mcp-server.md) offers an agent is also a subcommand of `clockwork`,
 so a person at a terminal, a script or a continuous-integration job can drive the instrument with
 no MCP client at all. `clockwork status` answers what the `status` tool answers, `clockwork arm`
-sends what the `arm` tool sends, and so on for all 21 tools. Each verb calls the same function as
+sends what the `arm` tool sends, and so on for every tool. Each verb calls the same function as
 its tool, through the same owner of the hardware, so it is refused in exactly the places the tool
 is refused: the interlock, the [standing limits](instrument-limits.md) and the cold-start check
 all live inside the tools, and a verb cannot reach a box around them.
@@ -178,6 +178,43 @@ its verdict under `verdict` and the report a person reads under `text`. A verdic
 `could not judge` is still exit status 0, since the routine answered; a routine that does not
 exist or does not load is 1.
 
+## The two ends of a day
+
+```
+clockwork warm-up
+clockwork stand-down
+```
+
+`warm-up` puts the instrument's standing stack on the boxes in the morning, so that the RF heads
+and the DC bias supplies settle before anyone acquires. It sends the `setup` phase of the method
+the [instrument file](instrument-file-format.md#standing) names under `[standing]`, and nothing
+after it: no table is loaded and no box is armed, so an `arm` is still needed before the first
+`acquire`. The DC bias setpoints, the RF drive levels and the ARB ranges that phase declares are
+ramped from what each box reads back, in the instrument file's `steps`, `dwell_s` seconds apart,
+and each step is written to standard error as it is sent. The boxes are then read back and
+compared with the method as a stack audit compares them, and the answer's `ok` is true when every
+declared setting reads back as declared. When no daemon answers, `warm-up` starts one, which stays
+running for the day; the window opened later joins it and leaves it running when it closes.
+
+`stand-down` puts the instrument to rest in the evening. It takes every box out of table mode,
+ramps every DC bias channel, RF drive level and ARB range the boxes report to zero in the same
+steps, leaves RF frequency and mode as they were, lowers every digital output, and reads the
+boxes back, listing under `not_zero` anything that did not reach zero. Then it shuts the daemon
+down, which stops the acquisition console with it, and waits until the daemon's process has
+ended, the instrument lock is free and nothing listens on the console's command port, which the
+answer's `daemon` entry reports. A digital output cannot be confirmed low, since the box's getter
+reads its output register rather than the pin, so the answer lists the outputs that were sent low
+instead. Every later verb finds no daemon until one is started again.
+
+Both are refused while a send or an acquisition is running or queued, and name the job.
+`stand-down --stop` ends such a run after its current repetition and then stands down; `--reason`
+goes in that run's log. Ctrl-C during either ends the ramp after the step it is on, and running
+the verb again ramps on from what the boxes read back, so a box already at its target is sent
+nothing. Given no options, both take the method library, the instrument file and the output
+directory from the window's saved settings, and `warm-up` takes the acquisition console from them
+too (`--console` overrides it). The installer's "Warm up" and "Stand down" shortcuts run the two
+verbs this way, in a console window that stays open on the answer.
+
 ## Reporting a problem or requesting a feature
 
 Three commands sit beside the verbs and need no daemon. `clockwork --version` prints the version
@@ -227,6 +264,8 @@ Each verb is its tool, described in full by `clockwork <verb> --help` and in the
 - `discover-boxes`: which MIPS boxes answer, on which port.
 - `read-box-state`: every box's persistent settings, read back with getters only.
 - `arm`: send a method to every box and leave them armed for `acquire`.
+- `warm-up`: the standing method's `setup` phase on every box, ramped, starting a daemon if none is running.
+- `stand-down`: every box local and zeroed, ramped, its outputs lowered, and the daemon stopped.
 
 **Acquisition**
 

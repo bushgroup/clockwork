@@ -10,6 +10,7 @@ import sys
 LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method",
                 "clockwork.method.template", "clockwork.instrument", "clockwork.transcript",
                 "clockwork.naming", "clockwork.owner", "clockwork.owner.wire",
+                "clockwork.acq.standing", "clockwork.app.saved", "clockwork.app.serving",
                 "clockwork.owner.remote", "clockwork.owner.daemon", "clockwork.summary",
                 "clockwork.mcp", "clockwork.mcp.server", "clockwork.mcp.cli",
                 "clockwork.envelope", "clockwork.record", "clockwork.routine",

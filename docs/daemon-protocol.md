@@ -237,6 +237,13 @@ The window's run queue belongs to the window and does not outlive it: rows still
 skipped whichever way it closes. Under `--fake` the window runs its simulated instrument in its
 own process and starts no daemon.
 
+Two verbs of the [command line](command-line.md#the-two-ends-of-a-day) start and stop a daemon
+the same way. `clockwork warm-up` starts one as the window does when none answers, with the
+window's saved output directory, library and console, and leaves it running, so a window opened
+later finds it and leaves it running when it closes. `clockwork stand-down` sends `shutdown` once
+it has zeroed the boxes, then waits until `hello` goes unanswered, the daemon's process has ended,
+the instrument lock no longer names it and nothing listens on the console's command port.
+
 ## Logs
 
 The daemon writes one line per event worth a person's reading to its terminal and to

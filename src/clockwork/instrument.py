@@ -61,6 +61,12 @@ from one chain to another:
   latency in starting on it -- so a pair carried across a change of digitizer is a starting
   value, not a calibration (lab record, task 45).
 
+**`[standing]` is what the instrument holds between experiments**: the method whose `setup`
+phase `clockwork warm-up` sends each morning, and the steps and dwell both it and
+`clockwork stand-down` ramp in (`Standing`, `clockwork.acq.standing`). A property of the
+instrument for the same reason again: the standing DC bias and RF stack belongs to the
+machine, and every experiment starts from it.
+
 No Qt here, and nothing in this module talks to hardware or reads a UIMF file. It parses one
 document and hands back what is in it.
 """
@@ -173,6 +179,37 @@ class Vertical:
                 or self.inverted is not None)
 
 
+STANDING_STEPS = 5
+"""How many equal steps `warm-up` and `stand-down` ramp in when the document names none."""
+
+STANDING_DWELL_S = 3.0
+"""How long each of those steps waits before the next when the document names none."""
+
+
+@dataclass(frozen=True, slots=True)
+class Standing:
+    """What the instrument stands at between experiments, and how it gets there.
+
+    `method` is the method whose `setup` phase `warm-up` sends in the morning, a path in
+    the method library or an absolute one: the instrument's standard DC bias and RF stack
+    lives in one method document, the one `stack-audit` judges, so the morning and the
+    audit cannot disagree (lab record, task 95). Empty means no warm-up is configured.
+
+    `steps` and `dwell_s` shape the ramp both ways: every DC bias channel, RF head and
+    ARB module's range moves 1/`steps` of the way from what the box read back to its
+    target, then waits `dwell_s` (`clockwork.acq.standing`).
+    """
+
+    method: str = ""
+    steps: int = STANDING_STEPS
+    dwell_s: float = STANDING_DWELL_S
+
+    @property
+    def stated(self) -> bool:
+        return (bool(self.method) or self.steps != STANDING_STEPS
+                or self.dwell_s != STANDING_DWELL_S)
+
+
 @dataclass(frozen=True, slots=True)
 class Instrument:
     """One instrument's settings, as loaded from its document.
@@ -186,6 +223,7 @@ class Instrument:
     pusher_period_us: float | None = None
     calibration: Calibration = field(default_factory=Calibration)
     vertical: Vertical = field(default_factory=Vertical)
+    standing: Standing = field(default_factory=Standing)
     schema_version: int = SCHEMA_VERSION
 
 
@@ -282,7 +320,8 @@ def from_dict(data: dict) -> Instrument:
             "this version of clockwork reads"
         )
     _no_unknown_keys(data, "document",
-                     ("schema_version", "instrument", "calibration", "vertical"), problems)
+                     ("schema_version", "instrument", "calibration", "vertical", "standing"),
+                     problems)
 
     identity = _table(data, "instrument", problems)
     _no_unknown_keys(identity, "instrument", ("name", "description", "pusher_period_us"),
@@ -318,6 +357,18 @@ def from_dict(data: dict) -> Instrument:
     offset = _number(raw_vertical, "offset_v", "vertical", problems)
     inverted = _bool(raw_vertical, "inverted", "vertical", problems)
 
+    raw_standing = _table(data, "standing", problems)
+    _no_unknown_keys(raw_standing, "standing", ("method", "steps", "dwell_s"), problems)
+    standing_method = _text(raw_standing, "method", "standing", problems)
+    steps = raw_standing.get("steps", STANDING_STEPS)
+    if isinstance(steps, bool) or not isinstance(steps, int) or steps < 1:
+        problems.append(f"standing.steps: expected a whole number from 1, not {steps!r}")
+        steps = STANDING_STEPS
+    dwell = _number(raw_standing, "dwell_s", "standing", problems)
+    if dwell is not None and dwell < 0:
+        problems.append(f"standing.dwell_s: expected 0 or more seconds, not {dwell}")
+        dwell = None
+
     if problems:
         raise InstrumentError(problems)
     return Instrument(
@@ -327,6 +378,8 @@ def from_dict(data: dict) -> Instrument:
         calibration=Calibration(slope=slope or 0.0, intercept=intercept or 0.0,
                                 measured=measured),
         vertical=Vertical(full_scale_v=full_scale, offset_v=offset, inverted=inverted),
+        standing=Standing(method=standing_method, steps=steps,
+                          dwell_s=STANDING_DWELL_S if dwell is None else dwell),
         schema_version=SCHEMA_VERSION,
     )
 
@@ -366,6 +419,13 @@ def to_dict(instrument: Instrument) -> dict:
         if vertical.inverted is not None:
             table["inverted"] = vertical.inverted
         data["vertical"] = table
+
+    standing = instrument.standing
+    if standing.stated:
+        table = {"steps": standing.steps, "dwell_s": standing.dwell_s}
+        if standing.method:
+            table = {"method": standing.method, **table}
+        data["standing"] = table
     return data
 
 
@@ -401,11 +461,14 @@ def save(instrument: Instrument, path: str) -> None:
 
 __all__ = [
     "SCHEMA_VERSION",
+    "STANDING_DWELL_S",
+    "STANDING_STEPS",
     "TENTHS_OF_NS",
     "UNCALIBRATED",
     "Calibration",
     "Instrument",
     "InstrumentError",
+    "Standing",
     "Vertical",
     "dumps",
     "from_dict",

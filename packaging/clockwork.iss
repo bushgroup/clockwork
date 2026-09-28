@@ -23,6 +23,7 @@
 #define MyAppPublisher "University of Washington"
 #define MyAppURL "https://github.com/bushgroup/clockwork"
 #define MyAppExeName "clockwork.exe"
+#define MyAppCliName "clockwork-cli.exe"
 
 [Setup]
 AppId={{46222F1A-B0FE-4CC3-9672-DD9BDDD3C750}
@@ -67,6 +68,14 @@ Source: "..\dist\clockwork\*"; DestDir: "{app}"; Flags: ignoreversion recursesub
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+; The two ends of the day (lab record, task 95): `warm-up` puts the standing stack on the
+; boxes and leaves clockwork serve running, `stand-down` zeroes them and stops it. Run as
+; the console twin under `cmd /k`, so the window stays open on what was done; the library,
+; instrument document and output folder come from the window's saved settings.
+Name: "{group}\Warm up"; Filename: "{cmd}"; Parameters: "/k """"{app}\{#MyAppCliName}"" warm-up"""; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; Comment: "Put the standing DC bias, RF and ARB range on the boxes, ramped"
+Name: "{group}\Stand down"; Filename: "{cmd}"; Parameters: "/k """"{app}\{#MyAppCliName}"" stand-down"""; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; Comment: "Zero the boxes, lower every output, and stop clockwork serve"
+Name: "{autodesktop}\Warm up"; Filename: "{cmd}"; Parameters: "/k """"{app}\{#MyAppCliName}"" warm-up"""; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; Comment: "Put the standing DC bias, RF and ARB range on the boxes, ramped"; Tasks: desktopicon
+Name: "{autodesktop}\Stand down"; Filename: "{cmd}"; Parameters: "/k """"{app}\{#MyAppCliName}"" stand-down"""; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; Comment: "Zero the boxes, lower every output, and stop clockwork serve"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent

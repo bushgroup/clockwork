@@ -55,6 +55,10 @@ inverted = false
 slope = 0.738123
 intercept = 0.07690495
 measured = 2026-09-09
+
+[standing]
+steps = 1
+dwell_s = 0
 """
 
 # A routine for the `routine` verb: the template above once, judged on the stand-in's
@@ -310,6 +314,17 @@ def test_a_request_from_the_shell_one_verb_per_process(shell, library, tmp_path)
     assert "point 2 of 2 (planned 2): b_ticks 400" in err
     with open(ran["record"], encoding="utf-8") as handle:
         assert len(json.load(handle)["files"]) == 2, "the verb waited for its record"
+
+    # The two ends of the day, last, since the second shuts the daemon down: this
+    # instrument file names no standing method, so there is nothing to warm up to, and
+    # the stand-down zeroes what the stand-in reports having.
+    code, out, err = shell("warm-up")
+    assert code == 1 and out == "" and "names no standing method" in err
+    down = shell.json("stand-down")
+    assert down["not_zero"] == [] and down["daemon"]["stopped"]
+    assert down["outputs_lowered"] == ["box1 A-P"]
+    code, out, err = shell("status")
+    assert code == 1 and "no clockwork serve answered" in err
 
     with open(os.path.join(output, "mcp-calls.log"), encoding="utf-8") as handle:
         logged = [json.loads(line) for line in handle]

@@ -807,6 +807,81 @@ arm = ["SMOD,TBL"]
             owner.join(30)
 
 
+def check_standing() -> None:
+    """Warm-up and stand-down over the stand-ins (lab record, task 95).
+
+    A standing method with a DC bias bank, two RF heads and one ARB box's range, named by
+    an instrument document; `warm_up` through the toolbox over a `--fake` owner must send
+    its setup phase and nothing after it, ramped, and read the declaration back; then
+    `stand_down` must leave every box local and at zero and the owner shut down.
+    """
+    import tempfile
+
+    from clockwork import instrument, method
+    from clockwork.mcp import Toolbox
+    from clockwork.owner import LocalOwner
+
+    document = """\
+schema_version = 2
+start = [["seq", "TBLSTRT"]]
+reset = []
+[metadata]
+name = "standing"
+created = 2026-09-27
+[acquisition]
+frames = 1
+scans = 16
+accumulations = 1
+repetition_mode = "per_repetition"
+keep_raw = true
+file_stem = "standing"
+[[boxes]]
+name = "seq"
+port = "COM3"
+setup = ["STBLCLK,EXT"]
+load = ["STBLDAT;0:A:1[A:1,16:];"]
+arm = ["SMOD,TBL"]
+[boxes.dc_bias]
+1 = 99.0
+2 = -70.0
+[boxes.rf.1]
+drive_pct = 50.0
+[[boxes]]
+name = "arb"
+port = "COM4"
+setup = ["SWFREQ,1,15000", "SWFVRNG,1,15"]
+load = []
+arm = []
+"""
+    with tempfile.TemporaryDirectory() as scratch:
+        with open(os.path.join(scratch, "standing.toml"), "w", encoding="utf-8") as handle:
+            handle.write(document)
+        method.load(os.path.join(scratch, "standing.toml"))
+        machine = instrument.Instrument(standing=instrument.Standing(
+            method="standing.toml", steps=3, dwell_s=0.0))
+        owner = LocalOwner(fake=True, program="check_public standing").start()
+        try:
+            toolbox = Toolbox(owner, library=scratch, output=scratch, instrument=machine)
+            warmed = toolbox.call("warm_up", {})
+            with open(warmed["send_log"], encoding="utf-8") as handle:
+                sent = handle.read()
+            check_true("warm-up reads every declared setting back as declared, ramped in the "
+                       "document's steps",
+                       warmed["ok"] and warmed["steps"] == 3 and sent.count("SDCBALL") == 3)
+            check_true("warm-up sends the setup phase and nothing after it: no table, no "
+                       "arming", "STBLDAT" not in sent and "SMOD,TBL" not in sent
+                       and owner.status().armed is None)
+            down = toolbox.call("stand_down", {})
+            check_true("stand-down leaves every box at zero with its outputs lowered, and "
+                       "the owner shut down",
+                       down["not_zero"] == [] and down["daemon"]["stopped"]
+                       and down["outputs_lowered"] == ["seq A-P", "arb A-P"]
+                       and owner.closing)
+        finally:
+            owner.shutdown()
+            owner.join(30)
+
+
 def check_routines() -> None:
     """Instrument routines over the stand-ins (lab record, task 76).
 
@@ -1023,6 +1098,7 @@ def declared_versions() -> dict[str, str]:
 LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method",
                 "clockwork.method.template", "clockwork.instrument", "clockwork.transcript",
                 "clockwork.naming", "clockwork.owner", "clockwork.owner.wire",
+                "clockwork.acq.standing", "clockwork.app.saved", "clockwork.app.serving",
                 "clockwork.owner.remote", "clockwork.owner.daemon", "clockwork.summary",
                 "clockwork.mcp", "clockwork.mcp.server", "clockwork.mcp.cli",
                 "clockwork.envelope", "clockwork.record", "clockwork.routine",
@@ -3123,6 +3199,9 @@ def main() -> int:
 
     section("instrument routines")
     check_routines()
+
+    section("warm-up and stand-down")
+    check_standing()
 
     section("the window")
     # Task 50. Nothing here opens a window: what a clone can establish without a

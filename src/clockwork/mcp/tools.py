@@ -67,7 +67,8 @@ from .. import manifest as manifest_module
 from .. import method as method_module
 from .. import routine as routine_module
 from .. import series as series_module
-from ..acq import BatchSeen, Event, Run, Snapshot, cautions, refusals
+from ..acq import BatchSeen, Event, Run, Snapshot, Warned, cautions, refusals
+from ..acq.standing import RampStepped, StandDownDone
 from ..acq.uimf import RAW_SUFFIX, SUMMED_SUFFIX
 from ..app import methodlib
 from ..envelope import Ledger, Limits
@@ -95,6 +96,9 @@ from ..owner import (
     SeriesJob,
     SeriesResult,
     StaleHandle,
+    StandDown,
+    StandingResult,
+    WarmUp,
     matches_wire,
     sentence,
     wire_fingerprint,
@@ -130,6 +134,24 @@ ROUTINE_WAIT_S = 3600.0
 A routine's run is seconds to minutes; an hour is a run that is stuck."""
 
 HASH_DIGITS = methodlib.HASH_DIGITS
+
+STANDING_SETTINGS = ("dc_bias", "rf", "arb")
+"""What `warm_up` compares its read-back with: every family the standing method's
+`setup` can declare, as `clockwork.routine.audit` compares them."""
+
+STARTUP_KINDS = ("Discover", "StartConsole", "RestartConsole")
+"""The jobs a daemon queues for itself, which `warm_up` and `stand_down` wait out."""
+
+BUSY_KINDS = ("Send", "Acquire", "SeriesJob", "WarmUp", "StandDown")
+"""The jobs `warm_up` and `stand_down` refuse to overlap."""
+
+STOP_WAIT_S = 120.0
+"""How long `stand_down` with `stop` waits for the run it stopped: a repetition and its
+fold are seconds, and a series ends after its current repetition too."""
+
+AT_REST = 0.005
+"""Within this of zero a DC bias setpoint, RF drive or ARB range counts as zero: each is
+read back to two decimals."""
 
 
 class ToolFailure(ValueError):
@@ -1195,6 +1217,135 @@ class Toolbox:
             return self._run_audit(loaded, who, words)
         return self._run_acquiring(loaded, who, words, conditions)
 
+    # -- the two ends of the day -------------------------------------------------
+
+    @tool("hardware", read_only=False)
+    def warm_up(self) -> dict:
+        """Put the instrument's standing stack on the boxes in the morning, ramped.
+
+        Sends the `setup` phase of the method the instrument document names under
+        `[standing]`, and nothing after it: no table is loaded and no box is armed.
+        Every DC bias channel, RF drive and ARB range that method declares is ramped
+        from what the box reads back, in the document's `steps` equal steps `dwell_s`
+        apart. The boxes are then read back and compared with the declaration as the
+        stack audit compares them: `ok` is true when nothing differs, and `differences`
+        lists what does. Refused while an acquisition, a send, a warm-up or a
+        stand-down is running or queued. The daemon is left running; an `arm` is still
+        needed before `acquire`. From the command line, `clockwork warm-up` starts a
+        daemon first when none is running.
+        """
+        standing = self.instrument.standing
+        if not standing.method:
+            raise ToolFailure(
+                "the instrument document names no standing method, so there is nothing "
+                "to warm up to: add a [standing] table with method = the library path of "
+                "the method whose setup is the instrument's stack")
+        self._settle()
+        self._refuse_if_busy("warm up")
+        path = self._in_library(standing.method)
+        try:
+            loaded = method_module.load(path)
+        except (OSError, tomllib.TOMLDecodeError, MethodError) as exc:
+            raise ToolFailure(f"the standing method {standing.method} does not load: "
+                              f"{exc}") from exc
+        self._discover_for(loaded)
+        event, handle = self._run_narrated(WarmUp(
+            method=loaded, method_path=path, steps=standing.steps,
+            dwell_s=standing.dwell_s, directory=self.output,
+            stem=_standing_stem("warm-up"), instrument=self.instrument,
+            instrument_path=self.instrument_path), self._standing_wait())
+        result = event.result if isinstance(event, JobFinished) else None
+        if not isinstance(result, StandingResult):
+            return self._unfinished(handle, event)
+        audited = routine_module.audit(loaded, result.snapshot.after, STANDING_SETTINGS)
+        ok = audited["differences"] == 0
+        return {
+            "ok": ok,
+            "method": standing.method,
+            "hash": method_module.stamp(loaded)["method_hash"][:HASH_DIGITS],
+            "boxes": [entry.name for entry in loaded.boxes],
+            "steps": result.steps, "dwell_s": standing.dwell_s,
+            "seconds": round(result.seconds, 1),
+            "differences": audited["rows"], "unread": audited["unread"],
+            "compared": audited["compared"],
+            "send_log": result.send_log, "transcript": result.transcript_path,
+            "read_back": "\n".join(state.render() for state in result.snapshot.after),
+            "text": (f"warmed up to {standing.method}: every box holds its "
+                     f"{audited['compared']} declared settings" if ok else
+                     f"warmed up to {standing.method}, and {audited['differences']} "
+                     "declared setting(s) do not read back as declared"),
+        }
+
+    @tool("hardware", read_only=False)
+    def stand_down(self, stop: bool = False,
+                   reason: str = "stopped for the instrument's stand-down") -> dict:
+        """Put the instrument to rest for the night, and stop the daemon.
+
+        Every box is taken out of table mode (`SMOD,LOC`); every DC bias channel, RF
+        drive and ARB range is ramped to zero from what it reads back, in the instrument
+        document's `[standing]` steps and dwell (RF frequency and mode are left alone);
+        every digital output is lowered; the boxes are read back and anything not at zero
+        is listed under `not_zero`. Then the daemon is shut down, which stops the
+        acquisition console with it, and the answer says whether its process ended, the
+        instrument lock came free and the console's port closed. Refused while an
+        acquisition or a send is running or queued, naming it, unless `stop` is true:
+        then the run ends after its current repetition (`reason` goes in its log) and the
+        stand-down follows. This ends the session's daemon: every later tool call finds
+        none until one is started again.
+        """
+        self._settle()
+        busy = self._busy()
+        if busy and not stop:
+            raise ToolFailure(
+                f"job {busy.id} ({busy.label}) is "
+                f"{'running' if self._is_running(busy) else 'queued'}: stand-down ends no "
+                "acquisition by surprise. Wait for it, or pass stop to end it after its "
+                "current repetition")
+        if busy:
+            self.owner.stop(reason)  # type: ignore[attr-defined]
+            self._say(f"stopping job {busy.id} ({busy.label}) first")
+            deadline = time.monotonic() + STOP_WAIT_S
+            while self._busy() is not None:
+                if time.monotonic() >= deadline:
+                    raise ToolFailure(f"job {busy.id} did not end within {STOP_WAIT_S:.0f} "
+                                      "s of being stopped; nothing was stood down")
+                time.sleep(0.25)
+        standing = self.instrument.standing
+        if not self.owner.status().boxes and standing.method:  # type: ignore[attr-defined]
+            try:
+                self._discover_for(method_module.load(self._in_library(standing.method)))
+            except (OSError, tomllib.TOMLDecodeError, MethodError) as exc:
+                raise ToolFailure(f"no boxes are open, and the standing method "
+                                  f"{standing.method} does not load to find them: "
+                                  f"{exc}") from exc
+        event, handle = self._run_narrated(StandDown(
+            steps=standing.steps, dwell_s=standing.dwell_s, directory=self.output,
+            stem=_standing_stem("stand-down")), self._standing_wait())
+        result = event.result if isinstance(event, JobFinished) else None
+        if not isinstance(result, StandingResult):
+            return self._unfinished(handle, event)
+        not_zero = _not_at_rest(result.snapshot.after)
+        gone = self._shut_down_daemon("the instrument's stand-down")
+        stopped = not any(gone.values())
+        return {
+            "ok": not not_zero and stopped,
+            "boxes": [state.name for state in result.snapshot.after],
+            "steps": result.steps, "dwell_s": standing.dwell_s,
+            "seconds": round(result.seconds, 1),
+            "not_zero": not_zero,
+            "outputs_lowered": list(result.lowered),
+            "daemon": {"stopped": stopped, **{f"{key}_still": value
+                                              for key, value in gone.items()}},
+            "send_log": result.send_log, "transcript": result.transcript_path,
+            "read_back": "\n".join(state.render() for state in result.snapshot.after),
+            "text": ("stood down: " + ("every box at zero" if not not_zero else
+                                       f"{len(not_zero)} setting(s) not at zero")
+                     + ("; the daemon and the console are stopped" if stopped else
+                        "; the daemon has not finished stopping: "
+                        + ", ".join(key for key, value in gone.items() if value)
+                        + " still")),
+        }
+
     # -- helpers -----------------------------------------------------------------
 
     def _library_files(self) -> list[str]:
@@ -1543,6 +1694,82 @@ class Toolbox:
         raise ToolFailure(f"there is no routine called {name!r} in {self.routines}; the "
                           f"routines are {', '.join(names) or 'none'}")
 
+    # -- the two ends of the day's helpers ---------------------------------------
+
+    def _settle(self) -> None:
+        """Wait for the jobs a daemon queues for itself as it starts -- the scan and the
+        console -- so that a warm-up run straight after one finds the boxes it found."""
+        deadline = time.monotonic() + JOB_WAIT_S
+        while time.monotonic() < deadline:
+            state = self.owner.status()  # type: ignore[attr-defined]
+            pending = ([state.running] if state.running is not None else []) \
+                + list(state.queued)
+            if not any(handle.kind in STARTUP_KINDS for handle in pending):
+                return
+            time.sleep(0.2)
+
+    def _busy(self) -> Handle | None:
+        """The first job running or queued that a warm-up or stand-down must not
+        overlap: anything that sends to the boxes or acquires."""
+        state = self.owner.status()  # type: ignore[attr-defined]
+        pending = ([state.running] if state.running is not None else []) + list(state.queued)
+        return next((handle for handle in pending if handle.kind in BUSY_KINDS), None)
+
+    def _is_running(self, handle: Handle) -> bool:
+        running = self.owner.status().running  # type: ignore[attr-defined]
+        return running is not None and running.id == handle.id
+
+    def _refuse_if_busy(self, what: str) -> None:
+        busy = self._busy()
+        if busy is not None:
+            raise ToolFailure(
+                f"job {busy.id} ({busy.label}) is "
+                f"{'running' if self._is_running(busy) else 'queued'}, so this will not "
+                f"{what} now: a warm-up in the middle of a run is a mistake")
+
+    def _standing_wait(self) -> float:
+        """How long a warm-up or stand-down may take: its dwells, plus a margin for the
+        readbacks and the strings, which are a few seconds a box."""
+        standing = self.instrument.standing
+        return JOB_WAIT_S + standing.steps * (standing.dwell_s + 5.0)
+
+    def _run_narrated(self, job: object, timeout: float) -> tuple[Event | None, Handle]:
+        """`_run`, telling `narrate` each ramp step and warning as it happens, for the
+        person watching a command line through a minute of dwells."""
+        handle = self._submit(job)
+        deadline = time.monotonic() + timeout
+        seen = 0
+        while True:
+            for entry in self._wait(handle, seen, max(0.0, deadline - time.monotonic())):
+                seen = entry.seq
+                event = entry.event
+                if isinstance(event, JobFailed):
+                    raise ToolFailure(event.message)
+                if isinstance(event, JobFinished):
+                    return event, handle
+                if isinstance(event, (RampStepped, StandDownDone, Warned)):
+                    self._say(event.text)
+            if time.monotonic() >= deadline:
+                return None, handle
+
+    def _shut_down_daemon(self, reason: str) -> dict[str, bool]:
+        """Shut the owner down and wait until it is gone; what is still there, if
+        anything (`clockwork.app.serving.wait_gone`)."""
+        owner = self.owner
+        if not hasattr(owner, "hello"):
+            # An owner in this process, `clockwork mcp --fake`'s: nothing to wait on
+            # but its thread.
+            owner.shutdown(reason)  # type: ignore[attr-defined]
+            joined = owner.join(60) if hasattr(owner, "join") else True
+            return {"answering": not joined}
+        from ..app.serving import wait_gone
+
+        said = owner.hello()  # type: ignore[attr-defined]
+        self._say("shutting clockwork serve down")
+        owner.shutdown(reason)  # type: ignore[attr-defined]
+        return wait_gone(owner.endpoint, pid=int(said.pid),  # type: ignore[attr-defined]
+                         fake=bool(said.fake))
+
     def _discover_for(self, loaded: Method) -> None:
         """Find the boxes if the owner knows none yet: from the ports on the instrument,
         and under --fake as the stand-ins `loaded` names."""
@@ -1866,8 +2093,46 @@ def _snapshot_text(snapshot: Snapshot | None) -> str:
     return "\n".join(state.render() for state in states)
 
 
+def _standing_stem(what: str) -> str:
+    """The stem a warm-up's or stand-down's send log and transcript are named for:
+    `warm-up-20260927-081502`, which no acquisition's stem can be."""
+    return f"{what}-{_dt.datetime.now():%Y%m%d-%H%M%S}"
+
+
+def _not_at_rest(states: tuple[BoxState, ...]) -> list[dict]:
+    """Every setting a stand-down should have left at zero or idle and did not, one row
+    each: DC bias setpoints, RF drive, ARB range, and a table still owning the box."""
+    rows: list[dict] = []
+    for state in states:
+        for index, volts in enumerate(state.dc_bias_setpoints):
+            if volts is None or abs(volts) > AT_REST:
+                rows.append({"box": state.name, "setting": "dc_bias", "index": index + 1,
+                             "held": volts})
+        for reading in state.rf:
+            if reading.drive_pct is None or abs(reading.drive_pct) > AT_REST:
+                rows.append({"box": state.name, "setting": "rf drive_pct",
+                             "index": reading.channel, "held": reading.drive_pct})
+        for module in state.modules:
+            held = state.module(module).get("GWFVRNG")
+            try:
+                volts = float(held) if held is not None else None
+            except ValueError:
+                volts = None
+            if held is not None and (volts is None or abs(volts) > AT_REST):
+                rows.append({"box": state.name, "setting": "GWFVRNG", "index": module,
+                             "held": held})
+        if not state.monitors_converting:
+            rows.append({"box": state.name, "setting": "table", "index": 0,
+                         "held": state.table_status})
+    return rows
+
+
 def _result(result: object) -> Any:
     """A finished job's result, cut to what a caller reads: never a method's text."""
+    if isinstance(result, StandingResult):
+        return {"steps": result.steps, "lowered": list(result.lowered),
+                "seconds": round(result.seconds, 2), "send_log": result.send_log,
+                "transcript": result.transcript_path}
     if isinstance(result, SeriesResult):
         return {"runs": [_run_summary(run) for run in result.runs],
                 "points": result.points, "points_done": result.points_done,

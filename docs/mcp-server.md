@@ -90,6 +90,8 @@ relative to the output directory, unless it is absolute.
 | Hardware | `discover_boxes` | a method or template under `--fake` | Which boxes answered, on which port, with which firmware |
 | | `read_box_state` | `boxes` (optional) | Every box's persistent settings read back, as the window's state panel shows them |
 | | `arm` | `request`, `initials`, a method or template, `setup`, `conditions`, `request_id`, `plan` | The request id, the stem the first file takes, what the boxes read back, the cold-start cautions, and the run record's path |
+| | `warm_up` | none | The instrument file's standing method's `setup` phase sent, its DC bias, RF drive and ARB range ramped; whether every declared setting reads back as declared (`ok`, `differences`), the read-back, and the send log |
+| | `stand_down` | `stop`, `reason` | Every box local, its DC bias, RF drive and ARB range ramped to zero and its outputs lowered; what is not at zero, the outputs lowered, the read-back, and whether the daemon, the lock and the console are gone once it has been shut down |
 | Acquisition | `acquire` | as `arm` without `setup` and `conditions`, plus `replicates` | A job number, at once; the run proceeds on the owner |
 | | `series` | `request`, `initials`, `plan`, `conditions`, `setup`, `request_id` | A job number, at once, with the seed, the order drawn and the counts; the daemon arms and acquires every point of the [series plan](series-file-format.md) |
 | | `progress` | `job`, `after`, `wait_s` | The job's events since number `after`, how many files are done of how many were asked for, and whether it is done |
@@ -155,6 +157,19 @@ the references are then shuffled under the plan's seed, or one drawn for it, and
 the job number, the seed and the planned indices in the order they will be acquired. `progress`
 follows the job as it follows an `acquire`, and adds under `series` the point in flight and the
 order.
+
+### Warm-up and stand-down
+
+`warm_up` and `stand_down` are the two ends of an instrument day
+([command line](command-line.md#the-two-ends-of-a-day)). `warm_up` sends the `setup` phase of the
+method the instrument file names under `[standing]`, ramped, and arms nothing, so `arm` is still
+needed before `acquire`. `stand_down` zeroes the boxes, ramped, lowers their outputs and then
+shuts the daemon down, which ends the session's hardware: every tool that needs the daemon fails
+until one is started again, from the window, a shortcut or `clockwork serve`. Neither carries a
+request or passes through the interlock below, since neither acquires and the method `warm_up`
+sends is the one the instrument file names rather than one a session chose. Both are refused while
+a send or an acquisition is running or queued; `stand_down` with `stop` ends that run after its
+current repetition first.
 
 ## Requests
 

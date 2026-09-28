@@ -41,7 +41,7 @@ import zmq
 from .. import __version__
 from ..acq import BatchSeen, Snapshot
 from .interface import Handle, JobFinished, OwnerStatus, Progress, Said, StaleHandle
-from .jobs import Acquire, Job, Send, SeriesJob
+from .jobs import Acquire, Job, Send, SeriesJob, StandDown, WarmUp
 from .local import sentence
 from .wire import from_wire, to_wire
 
@@ -317,7 +317,8 @@ class DaemonServer:
         if self.shutting_down or self.owner.closing:  # type: ignore[attr-defined]
             raise _Refusal("refused", "clockwork serve is shutting down and takes no "
                                       "more jobs")
-        if isinstance(job, (Send, Acquire, SeriesJob)) and not job.directory and self._directory:
+        if (isinstance(job, (Send, Acquire, SeriesJob, WarmUp, StandDown))
+                and not job.directory and self._directory):
             job = replace(job, directory=self._directory)
         origin = str(origin or "")
         handle = self.owner.submit(job, origin=origin)  # type: ignore[attr-defined]
