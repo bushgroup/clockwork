@@ -95,6 +95,8 @@ from ..owner import (
     SendResult,
     SeriesJob,
     SeriesResult,
+    SnapshotBoxes,
+    SnapshotResult,
     StaleHandle,
     StandDown,
     StandingResult,
@@ -1350,6 +1352,67 @@ class Toolbox:
                         "; the daemon has not finished stopping: "
                         + ", ".join(key for key, value in gone.items() if value)
                         + " still")),
+        }
+
+    @tool("hardware", read_only=False)
+    def snapshot_boxes(self, note: str = "", directory: str = "") -> dict:
+        """Read every box back, its state and its controller's health, into files.
+
+        For the moment something has gone wrong, before anyone touches a box: getters
+        only, no mode change, so a box that was armed is still armed afterwards. Each
+        box is asked everything `read_box_state` asks, then `UPTIME`, `STATUS` (the
+        last reset's cause and the TWI failure count), `THREADS`, `GDCPWR` and `GERR`.
+        Written beside one another under the stem `snapshot-YYYYmmdd-HHMMSS`: a send
+        log, a wire transcript and `<stem>.snapshot.json`, in `directory` if one is
+        given and the server's output directory otherwise. `note` is the operator's
+        words (what was seen, which run, their initials) and heads the send log.
+        Refused while a send or acquisition is running or queued, naming it.
+        """
+        self._settle()
+        busy = self._busy()
+        if busy:
+            raise ToolFailure(
+                f"job {busy.id} ({busy.label}) is "
+                f"{'running' if self._is_running(busy) else 'queued'}: a snapshot reads "
+                "the boxes between jobs, never during one. Stop it or wait for it first")
+        standing = self.instrument.standing
+        if not self.owner.status().boxes and standing.method:  # type: ignore[attr-defined]
+            try:
+                self._discover_for(method_module.load(self._in_library(standing.method)))
+            except (OSError, tomllib.TOMLDecodeError, MethodError) as exc:
+                raise ToolFailure(f"no boxes are open, and the standing method "
+                                  f"{standing.method} does not load to find them: "
+                                  f"{exc}") from exc
+        stem = _standing_stem("snapshot")
+        where = os.path.abspath(directory) if directory else self.output
+        event, handle = self._run(SnapshotBoxes(directory=where, stem=stem,
+                                                note=note.strip()), JOB_WAIT_S)
+        result = event.result if isinstance(event, JobFinished) else None
+        if not isinstance(result, SnapshotResult):
+            return self._unfinished(handle, event)
+        boxes = {}
+        for name, health in result.health.items():
+            boxes[name] = {
+                "uptime_min": health.uptime_min, "reset_cause": health.reset_cause,
+                "twi_fails": health.twi_fails, "dc_power": health.dc_power,
+                "last_error": health.last_error,
+                "threads_disabled": [row.name for row in health.threads if not row.enabled],
+                "not_asked": list(health.skipped), "refused": dict(health.refused),
+            }
+        read = len(result.states)
+        return {
+            "ok": not result.failed,
+            "stem": stem, "taken_at": result.taken_at, "note": result.note,
+            "boxes": boxes, "failed": dict(result.failed),
+            "send_log": result.send_log, "transcript": result.transcript_path,
+            "json": result.json_path, "seconds": round(result.seconds, 1),
+            "read_back": "\n".join(
+                [result.states[name].render() for name in result.states]
+                + [health.render() for health in result.health.values()]),
+            "text": (f"snapshot {stem}: {read} box(es) read"
+                     + (f", {len(result.failed)} failed ("
+                        + ", ".join(result.failed) + ")" if result.failed else "")
+                     + f"; written to {result.json_path}"),
         }
 
     # -- helpers -----------------------------------------------------------------

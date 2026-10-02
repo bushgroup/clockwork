@@ -221,6 +221,31 @@ window's settings, since no option named it. A daemon that `warm-up` starts logs
 alone and writes nothing to the shortcut's console window, so the prompt that follows the answer
 means the verb has finished.
 
+## A snapshot of the boxes
+
+```
+clockwork snapshot --note "low intensity from run 095, BF"
+```
+
+To record what the boxes hold at the moment something has gone wrong, take a snapshot before
+anything is sent, stood down or switched off. `snapshot` (in full, `snapshot-boxes`) reads every
+box back with getters only and changes no mode, so a box that was armed is still armed
+afterwards. It asks each box everything `read-box-state` asks, then the controller's own health:
+`UPTIME`, `STATUS` (the last reset's cause and the TWI bus failure count), `THREADS`, `GDCPWR` and
+`GERR`, which the [wire format](mips-wire-format.md#85-box-health-getters-uptime-status-threads)
+describes. The readings go into three files under one stem, `snapshot-YYYYmmdd-HHMMSS`: a send
+log with the readings as `#` blocks and the note at its head, the wire transcript, and
+`<stem>.snapshot.json`, which loads back as the objects that were read. They are written to
+`--directory` when it is given and to the output directory otherwise. A box whose firmware does
+not list a health getter is reported with that getter under `not_asked`, and a box that cannot be
+read is listed under `failed` while the others are still read, so `ok` is true only when every
+box was read.
+
+The snapshot is refused while a send or an acquisition is running or queued, and names the job:
+stop the queue first. Given no options it takes the output directory and the instrument file
+from the window's saved settings, and when no daemon answers it starts one, as `warm-up` does.
+Two snapshots, one before a box is power-cycled and one after, record what the cycle changed.
+
 ## Reporting a problem or requesting a feature
 
 Three commands sit beside the verbs and need no daemon. `clockwork --version` prints the version
@@ -269,6 +294,7 @@ Each verb is its tool, described in full by `clockwork <verb> --help` and in the
 
 - `discover-boxes`: which MIPS boxes answer, on which port.
 - `read-box-state`: every box's persistent settings, read back with getters only.
+- `snapshot-boxes`: every box's settings and controller health, read with getters only, into a send log, a transcript and a JSON file; `clockwork snapshot` for short.
 - `arm`: send a method to every box and leave them armed for `acquire`.
 - `warm-up`: the standing method's `setup` phase on every box, ramped, starting a daemon if none is running.
 - `stand-down`: every box local and zeroed, ramped, its outputs lowered, and the daemon stopped.

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from ..acq import Run, Snapshot
 from ..instrument import UNCALIBRATED, Instrument
 from ..method import Method
+from ..mips import BoxHealth, BoxState
 
 __all__ = [
     "Acquire",
@@ -29,6 +30,8 @@ __all__ = [
     "SendResult",
     "SeriesJob",
     "SeriesResult",
+    "SnapshotBoxes",
+    "SnapshotResult",
     "StandDown",
     "StandingResult",
     "StartConsole",
@@ -267,6 +270,25 @@ class StandDown(Job):
     stem: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class SnapshotBoxes(Job):
+    """Read every held box back, state and controller health, into files of their own.
+
+    Getters only and no mode change, so a box read while armed is still armed after
+    it: what a box holds while something has gone wrong is the evidence, and this
+    is the reading taken before anyone touches it (lab record, task 97).
+    `directory` and `stem` name the send log, the wire transcript and the
+    `<stem>.snapshot.json` the readings go into; `note` is the operator's words,
+    written at the head of the send log and into the JSON.
+    """
+
+    label: str = "taking a box snapshot"
+    names: tuple[str, ...] = ()
+    directory: str = ""
+    stem: str = ""
+    note: str = ""
+
+
 # -- what comes back ---------------------------------------------------------------
 
 
@@ -346,6 +368,23 @@ class StandingResult:
     """A stand-down's digital outputs, per box, as `auklet A-P`."""
     send_log: str = ""
     transcript_path: str = ""
+    seconds: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotResult:
+    """What a `SnapshotBoxes` read, and where it was written."""
+
+    states: Mapping[str, BoxState] = field(default_factory=dict)
+    health: Mapping[str, BoxHealth] = field(default_factory=dict)
+    failed: Mapping[str, str] = field(default_factory=dict)
+    """Boxes whose reading raised, and why: a snapshot records every box it can."""
+    note: str = ""
+    taken_at: str = ""
+    """Local time, ISO 8601 to the second, when the first box was read."""
+    send_log: str = ""
+    transcript_path: str = ""
+    json_path: str = ""
     seconds: float = 0.0
 
 

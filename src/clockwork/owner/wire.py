@@ -52,7 +52,7 @@ from ..acq import Event, FoldRecord, FrameRecord, Run, Snapshot
 from ..acq.wire import Batch
 from ..instrument import Instrument
 from ..method import Method, RfChannel
-from ..mips import BoxState, Discovery, Found, Silent
+from ..mips import BoxHealth, BoxState, Discovery, Found, Silent
 from ..mips.discovery import PortInfo
 from .interface import Handle, OwnerStatus, Progress, Said
 from .jobs import (
@@ -63,6 +63,7 @@ from .jobs import (
     PlannedPoint,
     SendResult,
     SeriesResult,
+    SnapshotResult,
     StandingResult,
 )
 from .lock import Holder
@@ -76,7 +77,8 @@ names never begin with `@`."""
 
 _PLAIN = (Snapshot, BoxState, Run, FrameRecord, FoldRecord, SendResult, Armed,
           ConsoleStatus, Discovery, Found, Silent, PortInfo, Handle, Progress, OwnerStatus,
-          Holder, RfChannel, PlannedPoint, SeriesResult, StandingResult)
+          Holder, RfChannel, PlannedPoint, SeriesResult, StandingResult, BoxHealth,
+          SnapshotResult)
 """The dataclasses that cross the interface other than jobs and events, which are
 collected by walking their subclasses so a new one is included without a list.
 `RfChannel` is here for `wire_fingerprint`, which carries a method's RF declarations

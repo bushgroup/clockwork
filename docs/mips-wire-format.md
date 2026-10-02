@@ -1817,3 +1817,49 @@ module of both ARB boxes (2026-09-15) — a getter refused for a mode
 reason, whose message names the mode the box is already in. And
 `SARBCCLK` has no getter at all on 1.243t, so a module's common-clock
 assignment is not readable and rests on the strings that set it (§7).
+
+### 8.5 Box health getters: `UPTIME`, `STATUS`, `THREADS`
+
+Three getters report on the controller rather than on a channel, and
+they are what tells a box that has kept answering apart from a box that
+has kept working. Each one answers a bare ACK and then prints text with
+no framing, so each is read the way `GCMDS` is (§8.4): write the
+command, take what arrives until the box has been quiet. All three are
+listed in the `GCMDS` answers of AUKLET, BUFFLEHEAD and CORMORANT taken
+2026-09-15, and every shape below is from the firmware source at
+`bd32aae`, which is newer than all three boxes (§7). A host keeps the
+raw text and parses only what it recognises.
+
+| Command | Source (`bd32aae`) | What follows the ACK |
+|---|---|---|
+| `UPTIME` | `Serial.cpp`, `UpTime` | One line, `System has been up for at least: <minutes> minutes`, the minutes as a float from `millis()` |
+| `STATUS` | `Hardware.cpp`, `RebootStatus` | The last reset's cause and the `millis()` count, on one line (for example `First power-up Reset, 81234`), then `TWI failure / reset count: <n>` |
+| `THREADS` | `Serial.cpp`, `ListThreads` | A header, `Thread name,ID,Interval,Enabled,Run time`, then one line per scheduler thread |
+
+The reset cause is the processor's reset status register, bits 8 to 10:
+first power-up, return from backup mode, watchdog fault, software
+reset, or the NRST pin held low. A box that has reset on its own since
+it was last switched on reports something other than first power-up, or
+an uptime shorter than the time since it was switched on.
+
+The TWI count is the number of times a read on the board's TWI (I2C)
+bus failed and the bus was released (`Hardware.cpp`, every
+`TWIfails++`). The DC bias ADCs and DACs and the ARB modules all sit on
+that bus, so a nonzero count that grows between two readings is a
+controller that has been failing to reach its own hardware while still
+ACKing every command. Firmware as old as 1.211t may predate the line,
+and a host that finds no such line records the count as absent, never
+as zero.
+
+`THREADS` names the threads that exist and whether each is enabled. Its
+last field is how long the thread's most recent run took, in
+milliseconds (`Thread::run`, `runTime = millis() - startTime`), and not
+when that run happened. A thread that has stopped running keeps its
+last duration, so this listing does not show a stalled thread directly.
+A stall shows instead as a setter that is ACKed and a monitor that does
+not follow it. Firmware before 1.255 stores each thread's last run time
+as a signed `long` of `millis()` (`lib/ArduinoThread/Thread.h`), and
+the 1.255 change history records the DC bias system stopping its
+updates after weeks to months of uptime; on such a box, `UPTIME` is the
+number to compare against 24.8 days, where a signed `millis()` turns
+negative.

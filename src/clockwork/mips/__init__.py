@@ -11,6 +11,7 @@ in it may run on the UI thread.
     table.py       the compiled table layout, predicted and read back
     compressor.py  an ARB compression table, read as far as its loop counts
     state.py       what a box is holding, read back with getters only
+    health.py      whether its controller has kept working: uptime, resets, TWI
     discovery.py   which ports have a box behind them, asked with `GNAME`
     transport.py   a COM port, or a box simulated in this process
     wire.py        framing, error codes, the asynchronous status lines
@@ -66,6 +67,7 @@ from .discovery import (
     discover,
     mips_ports,
 )
+from .health import HEALTH_GETTERS, HEALTH_REPORTS, BoxHealth, ThreadRow, read_health
 from .state import (
     ARB_MODULE_GETTERS,
     ARB_MODULE_MCK_HZ,
@@ -118,6 +120,11 @@ from .wire import (
 
 __all__ = [
     "ACK",
+    "BoxHealth",
+    "HEALTH_GETTERS",
+    "HEALTH_REPORTS",
+    "ThreadRow",
+    "read_health",
     "ARB_MODULE_GETTERS",
     "ARB_MODULE_MCK_HZ",
     "ARB_POINTS_PER_PERIOD",

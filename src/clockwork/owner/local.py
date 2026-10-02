@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import contextlib
 import itertools
+import json
 import logging
 import os
 import queue
@@ -86,8 +87,10 @@ from ..mips import (
     Discovery,
     FakeBox,
     Found,
+    BoxHealth,
     MipsError,
     discover,
+    read_health,
     read_state,
 )
 from ..naming import files_of, next_stem, parse_stem
@@ -119,6 +122,8 @@ from .jobs import (
     SendResult,
     SeriesJob,
     SeriesResult,
+    SnapshotBoxes,
+    SnapshotResult,
     StandDown,
     StandingResult,
     StartConsole,
@@ -127,6 +132,7 @@ from .jobs import (
     wire_fingerprint,
 )
 from .lock import Holder, InstrumentLock, LockError
+from .wire import to_wire
 
 __all__ = ["FAKE_FRAME_HOLD_S", "LocalOwner", "fake_rack", "sentence"]
 
@@ -487,6 +493,8 @@ class LocalOwner:
             return self._warm_up(job)
         if isinstance(job, StandDown):
             return self._stand_down(job)
+        if isinstance(job, SnapshotBoxes):
+            return self._snapshot_boxes(job)
         raise TypeError(f"no owner handler for {type(job).__name__}")
 
     def _report(self, event: Event, handle: Handle | None = None) -> None:
@@ -737,6 +745,63 @@ class LocalOwner:
         return self._standing(job.directory, job.stem, header, lambda: stand_down(
             self.boxes, steps=job.steps, dwell_s=job.dwell_s, progress=self._report,
             listings=self.listings, stop=self._stop_check))
+
+    def _snapshot_boxes(self, job: SnapshotBoxes) -> SnapshotResult:
+        """Every held box's state and health, getters only, into the stem's own files.
+
+        Unlike `_standing`, nothing the owner remembers is touched: the arming, the
+        snapshot an acquisition compares against and the send log a later `Send`
+        appends to all stay as they were, because nothing on any box changed. A box
+        whose reading raises is recorded under `failed` and the rest are still read,
+        since a snapshot taken while something is wrong must not stop at the first
+        box that is part of it.
+        """
+        if not self.boxes:
+            raise MipsError("no boxes are open to read: find them first, or check "
+                            "they are powered on")
+        names = job.names or tuple(self.boxes)
+        directory = job.directory or os.getcwd()
+        header = transcript.run_header(
+            console=getattr(self.console, "info", None),
+            boxes=[(name, row[0], row[1], row[2]) for name, row in self._identities()])
+        started = time.perf_counter()
+        taken_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        states: dict[str, BoxState] = {}
+        health: dict[str, BoxHealth] = {}
+        failed: dict[str, str] = {}
+        with self._logs(directory, job.stem, header, append=False) as paths:
+            if job.note:
+                transcript.note_block("snapshot note\n" + job.note, source="run")
+            for name in names:
+                box = self.boxes.get(name)
+                if box is None:
+                    failed[name] = "not held: find the boxes first"
+                    continue
+                try:
+                    listing = self.listings.get(name)
+                    if listing is None:
+                        with box.summarised():
+                            listing = self.listings[name] = box.command_listing()
+                    states[name] = read_state(box, listing=listing)
+                    health[name] = read_health(box, listing=listing)
+                # `OSError` for an unplugged port, as `_read_state` would meet it.
+                except (MipsError, ValueError, OSError) as exc:
+                    failed[name] = str(exc)
+                    self._say(f"{name}: snapshot reading failed ({exc})")
+                    continue
+                transcript.note_block("state at snapshot\n" + states[name].render(),
+                                      source=name)
+                transcript.note_block(health[name].render(), source=name)
+                self._report(BoxStateRead(box=name, state=states[name]))
+        json_path = os.path.join(directory, f"{job.stem}.snapshot.json")
+        result = SnapshotResult(states=states, health=health, failed=failed,
+                                note=job.note, taken_at=taken_at, send_log=paths[1],
+                                transcript_path=paths[0], json_path=json_path,
+                                seconds=time.perf_counter() - started)
+        with open(json_path, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(to_wire(result), handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        return result
 
     def _standing(self, directory: str, stem: str, header: str,
                   work: Callable[[], tuple[Snapshot, int, tuple[str, ...]]]

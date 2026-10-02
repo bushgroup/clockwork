@@ -64,9 +64,10 @@ COMMON = ("endpoint", "library", "output", "instrument", "limits", "routines")
 """The options every verb takes, which say where the tools are pointed rather than what
 a tool is asked; no tool may take an argument of one of these names."""
 
-ALIASES = {"run-routine": ("routine",)}
+ALIASES = {"run-routine": ("routine",), "snapshot-boxes": ("snapshot",)}
 """Shorter names a verb also answers to: `clockwork routine beam-check` for
-`clockwork run-routine --name beam-check`, the one verb a trainee types by hand."""
+`clockwork run-routine --name beam-check`, and `clockwork snapshot` for
+`clockwork snapshot-boxes`, the verbs a trainee types by hand."""
 
 POSITIONAL = {"run-routine": "name", "manifest": "paths", "series": "plan"}
 """A verb's argument that may also be given bare, after the verb: any number of them
@@ -76,11 +77,13 @@ WAITS = ("acquire", "series")
 """The tools that start a run and answer at once, whose verbs wait for it to end unless
 given `--no-wait`: the run record's thread dies with the verb's process."""
 
-STARTS = ("warm_up",)
+STARTS = ("warm_up", "snapshot_boxes")
 """The tools whose verbs start a daemon when none answers, and leave it running: the
-morning's is the one verb run before anything else is (lab record, task 95)."""
+morning's is the one verb run before anything else is (lab record, task 95), and a
+snapshot is the one an operator reaches for when the window may already be closed
+(task 97)."""
 
-SAVED = ("warm_up", "stand_down")
+SAVED = ("warm_up", "stand_down", "snapshot_boxes")
 """The tools whose verbs fall back on the window's saved settings for the library, the
 instrument document, the output directory and the console, flags first: they are run
 from desktop shortcuts that carry no flags (`clockwork.app.saved`)."""
@@ -477,7 +480,7 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
             return _wait(toolbox, int(answer["job"]), err, program)
         return 0
     except KeyboardInterrupt:
-        if verb.tool.name in SAVED:
+        if verb.tool.name in ("warm_up", "stand_down"):
             # A ramp is not a run: it ends after the step it is on, and the next
             # warm-up or stand-down ramps on from what the boxes read back.
             try:

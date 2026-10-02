@@ -233,7 +233,10 @@ def test_a_request_from_the_shell_one_verb_per_process(shell, library, tmp_path)
 
     assert shell.json("discover-boxes", *chosen)["boxes"] == ["box1"]
     assert "box1" in shell.json("read-box-state")["boxes"]
-    asked = (*chosen, "--knobs", "b_ticks=400", "--request", REQUEST, "--initials", "zz")
+    snapped = shell.json("snapshot", "--note", "from a shell")
+    assert snapped["ok"] and list(snapped["boxes"]) == ["box1"]
+    assert os.path.dirname(snapped["json"]) == output
+    asked =(*chosen, "--knobs", "b_ticks=400", "--request", REQUEST, "--initials", "zz")
     armed = shell.json("arm", *asked, "--plan", "one run at 400 ticks")
     assert armed["stem"] == "260924_ZZ_001" or armed["stem"].endswith("_ZZ_001")
     assert shell.json("status")["last_armed"] == {"method": "mcp-test",

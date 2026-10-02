@@ -465,6 +465,24 @@ class FakeBox:
 
         self.ext_freq = 0
         """The declared external clock frequency, 0 until `SEXTFREQ` says otherwise."""
+        self.dc_power = "ON"
+        """`GDCPWR`, the DC bias supply's state (§8.2). Stored, never acted on."""
+        self.started = time.monotonic()
+        """When this stand-in was "switched on", for `UPTIME` and `STATUS` (§8.5)."""
+        self.reset_cause = "First power-up Reset"
+        """What `STATUS` names as the last reset (§8.5)."""
+        self.twi_fails = 0
+        """`STATUS`'s TWI failure / reset count (§8.5). Nothing here has a TWI bus, so
+        this moves only when a test sets it."""
+        self.threads: list[tuple[str, int, int, bool, int]] = [
+            ("DCbias", 1, 100, True, 2), ("RFdriver", 2, 100, True, 1),
+            ("Serial", 3, 10, True, 0),
+        ]
+        """What `THREADS` lists: name, ID, interval in ms, enabled, last run's duration
+        in ms (§8.5). Three plausible rows, not a copy of any box's."""
+        self.withheld: set[str] = set()
+        """Commands this stand-in's firmware is to lack, upper case: left out of
+        `GCMDS` and rejected with error 1, for a test of an older box than this."""
         self.replies_enabled = True
         self.loaded: _table.Compiled | None = None
         self.dropped_bytes = 0
@@ -585,6 +603,9 @@ class FakeBox:
         name = name.strip().upper()
         argument = argument.strip()
         handler = getattr(self, "_do_" + name.lower(), None)
+        if name in self.withheld:
+            self._nak(1)  # invalid command, as on a firmware without it
+            return
         if handler is None:
             if self._arb(name, argument) or self._rf(name, argument):
                 return
@@ -605,6 +626,29 @@ class FakeBox:
 
     def _do_gerr(self, _: str) -> None:
         self._value(str(self.error))
+
+    def _do_gdcpwr(self, _: str) -> None:
+        self._value(self.dc_power)
+
+    # The three health getters answer a bare ACK and then unframed text (§8.5),
+    # in the shapes the firmware at bd32aae prints.
+
+    def _do_uptime(self, _: str) -> None:
+        minutes = (time.monotonic() - self.started) / 60
+        self._emit(_ACK_ONLY + f"System has been up for at least: {minutes:.2f} minutes\r\n"
+                   .encode("ascii"))
+
+    def _do_status(self, _: str) -> None:
+        millis = int((time.monotonic() - self.started) * 1000)
+        self._emit(_ACK_ONLY + f"{self.reset_cause}, {millis}\r\n"
+                   f"TWI failure / reset count: {self.twi_fails}\r\n".encode("ascii"))
+
+    def _do_threads(self, _: str) -> None:
+        rows = "".join(f"{name}, {ident}, {interval}, "
+                       f"{'Enabled' if enabled else 'Disabled'},{run_ms}\r\n"
+                       for name, ident, interval, enabled, run_ms in self.threads)
+        self._emit(_ACK_ONLY + ("Thread name,ID,Interval,Enabled,Run time\r\n" + rows)
+                   .encode("ascii"))
 
     def _do_gtblsta(self, _: str) -> None:
         self._value(self.status)
@@ -774,6 +818,7 @@ class FakeBox:
         names.update(_RF_GETTABLE)
         names.update(_RF_GETTABLE.values())
         names.update(_RF_READINGS)
+        names -= self.withheld
         self._emit(_ACK_ONLY + "".join(f"{name}\r\r\n" for name in sorted(names))
                    .encode("ascii"))
 
