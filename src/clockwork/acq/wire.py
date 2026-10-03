@@ -78,6 +78,15 @@ is told apart from `ERROR_PREFIX` (`docs/console-protocol.md`, "Two status
 messages the fork adds"; lab record, task 83).
 """
 
+MISALIGNED_PREFIX = DATA_ERROR_PREFIX + " samples misaligned"
+"""The `error data:` line a fork from 1.4.0 publishes for a batch whose gates open
+below the zero-suppress threshold, i.e. whose samples were read out of step with their
+markers. The lag outlives the frame and the run, and only a new console process has
+been seen to clear it, so retrying the frame on the same console acquires it misaligned
+again (`docs/console-protocol.md`, "Trigger timestamps run on across frames" and "Two
+status messages the fork adds"; lab record, task 99).
+"""
+
 SILENT_COMMANDS = frozenset(
     {
         "trig class",
@@ -378,6 +387,12 @@ class Status:
         """Whether this is the data subscriber refusing a batch, which damages a frame
         without failing its acquisition (`DATA_ERROR_PREFIX`)."""
         return self.text.startswith(DATA_ERROR_PREFIX)
+
+    @property
+    def is_misaligned(self) -> bool:
+        """Whether this says the samples stream lags the markers (`MISALIGNED_PREFIX`), the
+        one data error a retry on the same console does not cure."""
+        return self.text.startswith(MISALIGNED_PREFIX)
 
     @property
     def error_text(self) -> str:

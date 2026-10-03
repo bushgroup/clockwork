@@ -68,6 +68,7 @@ from ..acq import (
     Run,
     Series,
     Snapshot,
+    TofWidth,
     Warned,
     prepare_console,
     refusals,
@@ -629,11 +630,16 @@ class LocalOwner:
                 "executable the installer put beside clockwork, or set "
                 "$CLOCKWORK_CONSOLE.")
         self.console.start()
-        if self.fake and getattr(self.console, "fake", None) is not None:
-            self.console.fake.frame_hold_s = FAKE_FRAME_HOLD_S  # type: ignore[attr-defined]
+        self._hold_fake_frames()
         seconds = self.console.wait_ready()
         self._set_status(self._status_now(seconds))
         return self.console_status
+
+    def _hold_fake_frames(self) -> None:
+        """Give a stand-in console the instrument's frame hold, on every start: a restart
+        makes a new stand-in, which would otherwise run its frames with no hold at all."""
+        if self.fake and getattr(self.console, "fake", None) is not None:
+            self.console.fake.frame_hold_s = FAKE_FRAME_HOLD_S  # type: ignore[attr-defined]
 
     def _restart_console(self, job: RestartConsole) -> ConsoleStatus:
         if self.console is None:
@@ -647,8 +653,35 @@ class LocalOwner:
             self._say(f"wrote {', '.join(sorted(job.values))} to config.txt")
         self._set_status(ConsoleStatus(state="starting"))
         seconds = self.console.restart()
+        self._hold_fake_frames()
         self._set_status(self._status_now(seconds))
         return self.console_status
+
+    def _recover(self, console: Console, stream: DataStream, job: Acquire) -> TofWidth:
+        """`run_acquisition`'s `recover`: a new console process under a running run.
+
+        For a console whose samples stream has fallen out of step with its markers, which
+        only a new process has been seen to clear (lab record, task 99). The run's two
+        clients are pointed at the new process, which for the stand-in may be listening
+        on new ports, and the card is prepared and the chain opened exactly as the run's
+        prologue did. The chain is the run's from here on, and `_acquire`'s `finally`
+        stops it like the one it replaced.
+        """
+        if self.console is None:
+            raise AcqError("there is no console to restart")
+        self._set_status(ConsoleStatus(state="starting"))
+        seconds = self.console.restart()
+        self._hold_fake_frames()
+        self._set_status(self._status_now(seconds))
+        console.reconnect(self.console.command_endpoint)
+        stream.reconnect(self.console.data_endpoint)
+        prepared = prepare_console(console, job.instrument, info=console.info(),
+                                   config=self._console_config())
+        for message in prepared.warnings:
+            self._report(Warned(message))
+        self._say(f"console restarted in {seconds:.1f} s; offset {prepared.offset_v} V, "
+                  f"{'inverted' if prepared.inverted else 'not inverted'}")
+        return start_chain(console, stream)
 
     def _status_now(self, seconds: float | None = None) -> ConsoleStatus:
         console = self.console
@@ -1133,6 +1166,7 @@ class LocalOwner:
                     snapshot=self._snapshot,
                     provenance=provenance,
                     stop=self._stop_check,
+                    recover=lambda: self._recover(console, stream, job),
                 )
             except Exception as exc:
                 # Written while the transcript is still open: the run log is not the

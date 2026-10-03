@@ -939,6 +939,160 @@ def test_a_refused_batch_damages_a_frame_that_counted_out():
     assert not dataclasses.replace(record, outcome="ConsoleAcquisitionError").damaged
 
 
+class Restarter:
+    """`run_acquisition`'s `recover` against a `Rig`'s stand-in, which has no process to
+    restart: the old chain is stopped, the lag cleared unless `cures` is false, and a new
+    chain opened, which is what a restart leaves a run holding (lab record, task 99)."""
+
+    def __init__(self, rig, *, cures=True, width=None):
+        self.rig = rig
+        self.cures = cures
+        self.width = width
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        self.rig.console.stop_acquire()
+        if self.cures:
+            self.rig.fake.lagging = False
+        width = acq.start_chain(self.rig.console, self.rig.stream, timeout=5.0, settle=2.0,
+                                quiet=0.1)
+        return self.width or width
+
+
+def test_a_misaligned_repetition_is_acquired_again_after_a_restart_not_before(batched):
+    """From 1.4.0 the fork says `error data: samples misaligned` for a batch whose gates
+    open at or below the threshold. The lag behind it outlives the frame, so the
+    repetition is acquired again only once `recover` has restarted the console, and the
+    repetitions after it are clean (Matt, 2026-10-03; lab record, task 99)."""
+    batched.fake.misaligned_frames = [False, True]
+    restart = Restarter(batched)
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    events = []
+    run = batched.acquire(method, boxes, progress=events.append, recover=restart)
+
+    assert run.complete, run.text
+    assert restart.calls == 1
+    (misaligned,) = run.retried
+    assert (misaligned.repetition, misaligned.misaligned) == (2, 2)
+    assert misaligned.data_errors == 2 and misaligned.damaged and not misaligned.short
+    assert "samples out of step with the markers in 2 batches" in misaligned.text
+    assert "refused by the console" not in misaligned.text
+    assert [(record.repetition, record.retry, record.misaligned) for record in run.frames] \
+        == [(1, False, 0), (2, True, 0), (3, False, 0)]
+    assert any(isinstance(event, Warned) and "restarting the console" in event.message
+               for event in events)
+    raw = UimfFile(run.raw_path)
+    assert raw.frame_numbers() == [1, 2, 3]
+    assert not any(raw.is_provisional(number) for number in (1, 2, 3))
+    assert_companion_sums_the_raw_file(run)
+
+
+def test_a_replay_retried_into_misalignment_gets_its_restart_as_well(batched):
+    """The order the instrument showed it in: a replayed frame, retried on the same
+    console, comes back misaligned because the replay left the lag. The plain retry is
+    spent, and the restart is a second chance of its own."""
+    batched.fake.replayed_frames = [False, True]
+    batched.fake.misaligned_frames = [False, False, True]
+    restart = Restarter(batched)
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = batched.acquire(method, boxes, recover=restart)
+
+    assert run.complete, run.text
+    assert restart.calls == 1
+    replayed, misaligned = run.retried
+    assert replayed.replayed and not replayed.misaligned
+    assert misaligned.misaligned and misaligned.retry
+    assert [(record.repetition, record.retry) for record in run.frames] \
+        == [(1, False), (2, True), (3, False)]
+    assert not any(record.damaged for record in run.frames)
+    assert_companion_sums_the_raw_file(run)
+
+
+def test_a_repetition_still_misaligned_after_the_restart_stops_the_run(batched):
+    batched.fake.misaligned_frames = [False, True]
+    restart = Restarter(batched, cures=False)
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = batched.acquire(method, boxes, recover=restart)
+
+    assert not run.complete
+    assert restart.calls == 1
+    assert "frame 1.2 read its samples out of step with its markers again after the " \
+        "console was restarted" in run.stopped_early
+    assert [(record.repetition, record.retry) for record in run.frames] \
+        == [(1, False), (2, True)]
+    (fold,) = run.folds
+    assert fold.frames_folded == (1,)
+    raw = UimfFile(run.raw_path)
+    assert raw.is_provisional(2) and not raw.is_provisional(1)
+    assert_companion_sums_the_raw_file(run)
+
+
+def test_a_misaligned_repetition_with_nothing_to_restart_the_console_stops_at_once(batched):
+    """A caller with no `recover` (a script driving the loop by hand) gets no retry on the
+    same console, which would read the samples the same way, but a sentence saying what
+    to do."""
+    batched.fake.misaligned_frames = [False, True]
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = batched.acquire(method, boxes)
+
+    assert not run.complete
+    assert not run.retried
+    assert "restart the console before acquiring again" in run.stopped_early
+    assert [record.misaligned for record in run.frames] == [0, 2]
+    raw = UimfFile(run.raw_path)
+    assert raw.is_provisional(2)
+
+
+def test_a_restarted_console_whose_scans_are_another_length_stops_the_run(batched):
+    batched.fake.misaligned_frames = [False, True]
+    restart = Restarter(batched, width=acq.TofWidth(pusher_pulse_width=1, num_samples=7))
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = batched.acquire(method, boxes, recover=restart)
+
+    assert not run.complete
+    assert "sized its scans at 7 samples" in run.stopped_early
+
+
+def test_a_restart_that_fails_stops_the_run_with_its_reason(batched):
+    batched.fake.misaligned_frames = [False, True]
+
+    def broken():
+        raise acq.AcqError("the card did not open")
+
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = batched.acquire(method, boxes, recover=broken)
+
+    assert not run.complete
+    assert "the console restart failed (AcqError: the card did not open)" \
+        in run.stopped_early
+
+
+def test_a_misaligned_batch_is_a_data_error_of_its_own_kind():
+    misaligned = acq.Status(text=f"{acq.MISALIGNED_PREFIX} (3 of 4 gates) in frame 2")
+    refused = acq.Status(text=f"{acq.DATA_ERROR_PREFIX} index oob error -> index: 5")
+    assert misaligned.is_data_error and misaligned.is_misaligned
+    assert refused.is_data_error and not refused.is_misaligned
+    record = loop_module.FrameRecord(method_frame=1, repetition=1, frame_number=1,
+                                     outcome="acquired", ended_by="counted",
+                                     data_errors=3, misaligned=2)
+    assert record.damaged
+    assert record.text.endswith(
+        "samples out of step with the markers in 2 batches, 1 batch refused by the console")
+
+
 def test_a_replay_in_a_runs_first_frame_is_caught_against_the_run_before_on_its_chain(
     batched,
 ):

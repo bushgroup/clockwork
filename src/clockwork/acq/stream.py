@@ -140,15 +140,35 @@ class DataStream:
         (`docs/console-protocol.md`, "Trigger timestamps run on across frames")."""
 
         self._pushed_back: deque[Batch | Status] = deque()
+        self._queue = queue
         self._context = context if context is not None else zmq.Context.instance()
+        self._socket = self._open_socket()
+
+    def _open_socket(self) -> zmq.Socket:
         socket = self._context.socket(zmq.SUB)
         socket.setsockopt(zmq.LINGER, 0)
-        socket.setsockopt(zmq.RCVHWM, queue)
+        socket.setsockopt(zmq.RCVHWM, self._queue)
         # The empty prefix. ZeroMQ matches a subscription by prefix, so this
         # is both topics and anything a later console adds.
         socket.setsockopt_string(zmq.SUBSCRIBE, "")
-        socket.connect(endpoint)
-        self._socket = socket
+        socket.connect(self.endpoint)
+        return socket
+
+    def reconnect(self, endpoint: str | None = None) -> None:
+        """Drop whatever the old console left queued and subscribe afresh, to `endpoint`
+        if given, for a console that was restarted under this stream.
+
+        The counts and the session's statuses are kept: they are the record of the run.
+        `last_stamp` is not, because a new process opens a new chain and the card's
+        clock may start again under it (lab record, task 99).
+        """
+        if endpoint is not None:
+            self.endpoint = endpoint
+        if not self._socket.closed:
+            self._socket.close(linger=0)
+        self._pushed_back.clear()
+        self.last_stamp = None
+        self._socket = self._open_socket()
 
     def close(self) -> None:
         if not self._socket.closed:

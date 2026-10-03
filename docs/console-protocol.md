@@ -209,9 +209,40 @@ the previous frame, a few scan numbers later, filled with samples that belong to
 one seen so far also corrupted one trigger at each of the frame's first few markers fetches, whose
 gates carry run lengths hundreds of millions of bins long. The data subscriber refuses those
 batches (`index oob error` in the console's log, the batch never published) and the file writer
-stores them as rows at impossible m/z. Nothing is published on `status`. The cause lies below the
-console and is not yet known. A client can recognise such a frame from its first published batch
-alone, and should treat it as lost however many scans it counts (lab record, task 83).
+stores them as rows at impossible m/z. Before 1.4.0 nothing is published on `status`. The cause
+lies below the console and is not yet known. A client can recognise such a frame from its first
+published batch alone, and should treat it as lost however many scans it counts (lab record,
+task 83).
+
+**A replayed frame can leave the samples stream lagging the markers stream for the rest of the
+console process.** In ZS1 the console sizes each gate from the markers stream alone and hands gate
+*j* the samples-stream elements that follow the earlier gates' share; nothing ties the two streams
+together again, and the record descriptor that could is discarded. After a replayed frame,
+`StreamCh1` has been seen to lag the markers by 4, 8 or 12 int32 elements, so every later gate
+was filled from the samples 8, 16 or 24 before its own. Gate positions and lengths were
+unaffected, which is why such a file looks normal until its intensities are compared. A gate
+longer than the lag stores its pulse late and truncated, and a gate no longer than the lag stores
+none of its own samples. The lag survived frames, runs, `acquire` and its period measurement,
+and pauses of nearly an hour, and was gone in a new console process. The console only ever
+fetches whole 16-element blocks, so the residue is held in the driver session or the card rather
+than in the console (lab record, task 99).
+
+To establish how often this happens, every raw file the instrument acquired from 2026-09-17 to
+2026-10-01 (1645 files, 30 console processes) was scored for the lag. Of ten replayed frames on
+a stream that was still in step, seven left a lag that lasted for the rest of their console
+process and three left none. No lag appeared anywhere without a replayed frame before it on the
+same process, and every console process started in step, including each one that followed a
+lagged one. Every replayed frame that stored any gates, eleven of fourteen, itself read out of
+step, whatever followed it.
+
+The lag is detected exactly from the data. A ZS1 gate opens on a sample at or above the
+zero-suppress threshold, so with the two streams in step no gate's first stored value is below
+the threshold's stored code (the threshold plus 32 768, i.e., 101 at the fork's default of
+−32 667). With the streams out of step the first value is the sample from before the gate,
+almost always baseline. Over the same 1645 files, no gate on a stream in step opened below that
+code, whereas at least half the gates of every frame read out of step did, and a median 98%
+over 13 397 such frames. From 1.4.0 the
+console checks every batch this way and says so on `status` (below).
 
 **`finished` says a frame ended and not that it succeeded.** The acquisition loop catches an
 error, logs it, stops, and publishes the same `finished` it would have published on success, so
@@ -341,8 +372,9 @@ line per batch (its first and last trigger's index and timestamp, its gate count
 are written whatever it says, because they fire only on a fault: `markers replay`, when a frame's
 first trigger timestamp is not past the previous frame's last, and `gate past the record`, when a
 gate marker places either end of its gate beyond the record, with the hunk it came from, at most
-32 a frame and a count at the frame's end. All of it is at `info` and `warn` in the log and none
-of it reaches the ZeroMQ protocol.
+32 a frame and a count at the frame's end. All of it is at `info` and `warn` in the log. None of
+it reaches the ZeroMQ protocol except, from 1.4.0, the replay, which also ends the frame and
+publishes `error data: markers replayed` (below).
 
 ### Two status messages the fork adds
 
@@ -378,6 +410,25 @@ acquisition but a damaged frame. The one cause seen is a run length past the end
 the `index oob error` of the previous-frame replay above, whose rows then reach the file at
 impossible m/z. A client that matches `error ` for a failed acquisition should test for
 `error data:` first. Before 1.3.0 the same fault reached only the console's log.
+
+From 1.4.0 two more causes share that prefix. A batch in which any gate opens below the
+zero-suppress threshold's stored code publishes
+
+    error data: samples misaligned (<n> of <m> gates) in frame <frame>
+
+once per such batch, the batch itself still published on `data` and written to the file. It
+means the samples stream is lagging the markers (above). The lag outlives the frame, so a client
+that retries the frame on the same console process acquires it misaligned again; restarting the
+console is the one cure seen. A frame whose first trigger is not past the previous frame's last
+is ended at that trigger, before a single element of the samples stream is fetched against the
+replayed markers, and publishes
+
+    error data: markers replayed in frame <frame>
+
+followed by its `finished`. Such a frame carries few or no scans and is a damaged frame to
+acquire again, like any other `error data:` frame. Note that whether ending a replayed frame this
+way keeps the samples stream in step is not yet established. A later frame that reads out of
+step publishes the misalignment line, and clockwork restarts the console on it.
 
 The ZeroMQ protocol is unchanged in every command and in both replies. A client works against
 either build.

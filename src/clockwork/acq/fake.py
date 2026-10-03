@@ -78,6 +78,7 @@ from .wire import (
     ERROR_PREFIX,
     FINISHED,
     FINISHED_ACQUIRE,
+    MISALIGNED_PREFIX,
     SILENT_COMMANDS,
     TOPIC_DATA,
     TOPIC_STATUS,
@@ -322,6 +323,19 @@ class FakeConsole:
         (lab record, task 83). The frame after one carries on from the real end of the
         counter. Combine with `short_frames` for the shape the instrument has shown; on
         its own it is the replay that counts out."""
+
+        self.misaligned_frames: list[bool] = []
+        """Faults for the frames to come, one taken off the front per frame: whether the
+        samples stream falls out of step with the markers at that frame. Once it has, it
+        stays that way for the life of this stand-in, `lagging`, as it did for the life of
+        the console process on the instrument (lab record, task 99). A restart under
+        `FakeConsoleProcess` makes a new stand-in, which is the cure the real one has."""
+
+        self.lagging = False
+        """Whether the samples stream is out of step. While it is, every batch published
+        before a frame's `finished` is followed by the 1.4.0 fork's `error data: samples
+        misaligned` line (`docs/console-protocol.md`, "Two status messages the fork
+        adds"); set it directly for a stand-in that starts that way."""
 
         self.data_error_status = False
         """Whether a batch `short_frames` withholds is also reported on `status`, as
@@ -664,6 +678,8 @@ class FakeConsole:
         if lost:
             self.logged_errors += self.short_frame_errors
         replay = self.replayed_frames.pop(0) if self.replayed_frames else False
+        if self.misaligned_frames and self.misaligned_frames.pop(0):
+            self.lagging = True
         clock_ran_to = self._timestamp
         if replay:
             self._timestamp = self._frame_began_at
@@ -696,6 +712,10 @@ class FakeConsole:
                     # marker, not by this.
                     write_error = self._write_scans(request, first_scan, scans)
                 self._publish(TOPIC_DATA, encode_batch(self._batch(scans)))
+                if self.lagging:
+                    self._publish(TOPIC_STATUS, (
+                        f"{MISALIGNED_PREFIX} (3 of 4 gates) in frame "
+                        f"{request.frame_number}").encode())
             first_scan += scans
         if replay:
             # The card's clock ran on under the replay; only the markers read were old.

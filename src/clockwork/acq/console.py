@@ -208,6 +208,20 @@ class Console:
             self._socket = None
         self._open_socket()
 
+    def reconnect(self, endpoint: str | None = None) -> None:
+        """Start again against a console that was restarted, at `endpoint` if given.
+
+        A new process holds no acquisition, so `acquiring` and `running` are cleared,
+        and the settings this client sent went with the old one: `offset_v`, `inverted`
+        and `sample_rate_hz` stay as the record of what was asked for, and are sent
+        again by whoever prepares the new console (lab record, task 99).
+        """
+        if endpoint is not None:
+            self.endpoint = endpoint
+        self.acquiring = False
+        self.running = False
+        self._reset_socket()
+
     def close(self) -> None:
         if self._socket is not None:
             self._socket.close(linger=0)

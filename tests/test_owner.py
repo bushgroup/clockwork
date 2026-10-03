@@ -367,6 +367,46 @@ def test_a_used_box_unplugged_mid_run_fails_the_job_in_a_sentence_and_is_dropped
         assert owner.join(30)
 
 
+def test_a_misaligned_repetition_restarts_the_console_mid_run_and_the_run_goes_on(tmp_path):
+    """Task 99's cure, end to end under `--fake`: the stand-in's samples stream falls out
+    of step at the second repetition, the owner kills that console mid-run and starts a
+    new one, reconnects the run's two clients to it (the stand-in binds new ports, as a
+    real console would not), prepares the card, opens a chain, and the repetition is
+    acquired again on it. The replicate after it runs on the new console from its first
+    frame, and the chain the restart opened is the one the job stops."""
+    from test_daemon import make_instrument, make_method
+
+    owner = _acquiring_owner(tmp_path)
+    try:
+        first = owner.console.fake
+        first.misaligned_frames = [False, True]
+        method = make_method(accumulations=3)
+        assert isinstance(ended(owner, owner.submit(
+            Send(method=method, directory=str(tmp_path), stem="260925_ZZ_001"))), JobFinished)
+        handle = owner.submit(Acquire(method=method, instrument=make_instrument(),
+                                      directory=str(tmp_path), stem="260925_ZZ_001",
+                                      replicates=2))
+        finished = ended(owner, handle, timeout=120)
+        assert isinstance(finished, JobFinished), finished
+        runs = finished.result
+        assert [run.complete for run in runs] == [True, True], [run.text for run in runs]
+        (misaligned,) = runs[0].retried
+        assert (misaligned.repetition, misaligned.misaligned > 0) == (2, True)
+        assert not runs[1].retried
+
+        second = owner.console.fake
+        assert second is not first and second is not None
+        assert first.lagging and not second.lagging
+        assert not second.chain, "the job stopped the chain the restart opened"
+        said = [entry.event.line for entry in owner.events(handle)
+                if isinstance(entry.event, Said)]
+        assert any(line.startswith("console restarted in ") for line in said), said
+        assert owner.status().console.state == "ready"
+    finally:
+        owner.shutdown()
+        assert owner.join(30)
+
+
 def test_a_failed_run_is_kept_with_its_method_and_error_log_and_a_finished_one_is_not(
         tmp_path):
     """Task 81: the files behind a failure survive the trainee tidying the directory,
