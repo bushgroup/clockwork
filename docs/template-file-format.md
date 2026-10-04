@@ -122,9 +122,18 @@ description states which convention it assumed, as the example above does.
 ## Holes
 
 A hole is a bare name in braces, `{duration_ms}`, standing for a knob, a constant or a
-derivation. Holes are filled only in the boxes' `setup`, `load` and `arm` strings and in the
-`start` and `reset` commands. A hole anywhere else is refused, and so is arithmetic inside the
-braces, which belongs in `[derive]`.
+derivation. Holes are filled only in the boxes' `setup`, `load` and `arm` strings, in the
+`start` and `reset` commands, and in one acquisition setting, the scan count. A hole anywhere
+else is refused, and so is arithmetic inside the braces, which belongs in `[derive]`.
+
+The scan count may be written as a hole, `scans = "{frame_scans}"`, and nothing else in the
+`[acquisition]` table may. It is counted in the same pusher ticks as the table that lowers the
+digitizer's gate, so an experiment whose record must outlast a hold of ten seconds, and need not
+outlast one of ten milliseconds, derives its frame from the same knob that sets the hold, and
+each rendered method asks the console for the frame it needs. The string is the whole hole: a
+name with arithmetic around it is refused. The value must come out a whole number of at least
+1, and the rendered method is then checked as any other, which is where a gate lowered on the
+wrong tick for that frame is caught.
 
 How a number is written into a string is the wire format's decision, not the template's. Every
 number is written in its shortest form with at most four decimals, so a wait of `208.0000` is

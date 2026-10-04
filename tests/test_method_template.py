@@ -303,6 +303,52 @@ def test_a_hole_outside_a_command_string_or_with_arithmetic_inside_is_refused():
     assert "a brace that is not part of a hole" in problems_of(exc_info)
 
 
+# --- a derived scan count -------------------------------------------------------------------
+
+
+FOLLOWING = {
+    "scans = 100": 'scans = "{frame_scans}"',
+    'off_tick = "on_tick + round(pulse_ms * 1000 / tick_us)"':
+        'off_tick = "on_tick + round(pulse_ms * 1000 / tick_us)"\n'
+        'frame_scans = "off_tick + 75"',
+    "{off_tick}:A:0,100:];": "{off_tick}:A:0,{frame_scans}:];",
+}
+
+
+def test_the_scan_count_may_be_a_hole_and_then_follows_the_knob():
+    t = loads(**FOLLOWING)
+    at_default = template.render(t, labels=LABELS)
+    assert at_default.method.acquisition.scans == 100
+    assert at_default.method == method.loads(SAMPLE)
+    longer = template.render(t, {"pulse_ms": 4.0}, LABELS)
+    assert longer.method.acquisition.scans == 125
+    assert longer.derived["frame_scans"] == 125
+    assert "{frame_scans}:]" not in longer.method.boxes[0].load[0]
+    assert longer.method.boxes[0].load[0].endswith(",125:];")
+
+
+def test_a_scan_count_that_is_not_a_whole_positive_number_is_refused():
+    with pytest.raises(template.TemplateError) as exc_info:
+        loads(**{**FOLLOWING, 'frame_scans = "off_tick + 75"': 'frame_scans = "off_tick / 2"'})
+    assert "acquisition.scans: {frame_scans} is the frame's scan count" in problems_of(exc_info)
+    assert "round() its derivation" in problems_of(exc_info)
+    with pytest.raises(template.TemplateError) as exc_info:
+        loads(**{**FOLLOWING, 'frame_scans = "off_tick + 75"': 'frame_scans = "off_tick - 25"'})
+    assert "but comes to 0" in problems_of(exc_info)
+
+
+def test_the_scan_count_hole_is_the_whole_string_and_a_known_name():
+    with pytest.raises(template.TemplateError) as exc_info:
+        loads(**{**FOLLOWING, 'scans = "{frame_scans}"': 'scans = "{frame_scans} + 1"'})
+    assert "acquisition.scans: '{frame_scans} + 1' is not a hole" in problems_of(exc_info)
+    with pytest.raises(template.TemplateError) as exc_info:
+        loads(**{**FOLLOWING, 'scans = "{frame_scans}"': 'scans = "{frame_pushes}"'})
+    assert "frame_pushes" in problems_of(exc_info)
+    with pytest.raises(template.TemplateError) as exc_info:
+        loads(**{"accumulations = 10": 'accumulations = "{cycles}"'})
+    assert "acquisition.accumulations: holes are filled only" in problems_of(exc_info)
+
+
 # --- the document -----------------------------------------------------------------------
 
 

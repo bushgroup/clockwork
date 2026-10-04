@@ -604,6 +604,18 @@ arm = ["SMOD,TBL"]
     check_true("a limits document loads and applies to the template it names",
                limits.against([loaded]) == [])
 
+    following = template_module.loads_template(
+        full_text.replace("scans = 32", 'scans = "{frame_scans}"')
+        .replace("532:A:0,533:];", "{gate_tick}:A:0,{end_tick}:];")
+        .replace("[metadata]", '[derive]\nframe_scans = "b_ticks + 32"\n'
+                 'gate_tick = "frame_scans + 500"\nend_tick = "frame_scans + 501"\n'
+                 "[metadata]"))
+    short, long = (template_module.render(following, {"b_ticks": ticks}, {}).method
+                   for ticks in (100, 500))
+    check_true("a template may derive its scan count, and the frame then follows the knob",
+               (short.acquisition.scans, long.acquisition.scans) == (132, 532)
+               and short.boxes[0].load[0].endswith(",632:A:0,633:];"))
+
     def refused(**knobs: float) -> list[str]:
         rendered = template_module.render(loaded, knobs, {})
         return check(rendered.method, rendered, limits, Ledger(), real=True)
