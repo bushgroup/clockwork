@@ -889,7 +889,7 @@ class FrameEnded(Event):
 
 @dataclass(frozen=True, slots=True)
 class Retried(Event):
-    """A repetition came up short or replayed, and is being acquired again, in place.
+    """A repetition came up damaged, and is being acquired again, in place.
 
     `record` is the attempt that is thrown away: its rows are deleted and the same frame
     number is asked for again, so this line in the transcript is the only record of it
@@ -902,7 +902,11 @@ class Retried(Event):
     @property
     def text(self) -> str:
         record = self.record
-        replayed = ", the previous frame's triggers read again" if record.replayed else ""
+        replayed = ""
+        if record.replay_stopped:
+            replayed = ", stopped by the console on a replay of the previous frame's triggers"
+        elif record.replayed:
+            replayed = ", the previous frame's triggers read again"
         return (f"frame {record.method_frame}.{record.repetition}: "
                 f"{record.scans_published} of {self.frame_length} scans{replayed}, "
                 "acquired again")
@@ -1045,6 +1049,19 @@ class FrameRecord:
     task 99).
     """
 
+    replay_stopped: bool = False
+    """Whether the console ended this frame at its first trigger, that trigger being no
+    later than the previous frame's last (`wire.REPLAYED_PREFIX`, counted in
+    `data_errors`).
+
+    A fork from 1.4.0 does this before fetching a sample against the replayed markers,
+    so the frame carries few or no scans and is `acquired` rather than an
+    `EmptyFrameError`: its emptiness is explained. The process it ran on fails every
+    `acquire frame` after it and is out of step besides, so, like `misaligned`, the
+    repetition is acquired again only after a restart (`_Loop._one_frame`; lab record,
+    task 105).
+    """
+
     retry: bool = False
     """Whether this is a repetition's second attempt, the first having been `damaged`.
 
@@ -1086,6 +1103,13 @@ class FrameRecord:
         return self.short or (self.acquired and (self.replayed or self.data_errors > 0))
 
     @property
+    def needs_restart(self) -> bool:
+        """Whether this frame left its console unfit to acquire the repetition again:
+        `misaligned` or `replay_stopped`. A retry on the same process would read the
+        samples out of step, or fail outright (lab record, tasks 99 and 105)."""
+        return self.acquired and (self.misaligned > 0 or self.replay_stopped)
+
+    @property
     def writer_lag_rows(self) -> int | None:
         """Rows the console's writer had not yet inserted when it said `finished`.
 
@@ -1103,14 +1127,20 @@ class FrameRecord:
             late = f", {self.scans_after_finished} of them after its own finished"
         lag = self.writer_lag_rows
         rows = f", {lag} rows written after it" if lag else ""
-        fell_back = ", ended on the silence" if self.ended_by == "silence" else ""
-        if self.replayed:
+        fell_back = ""
+        if self.replay_stopped:
+            # Said instead of the silence it also ended on, which is a consequence.
+            fell_back = (", stopped by the console at its first trigger, a replay of "
+                         "the previous frame's")
+        elif self.ended_by == "silence":
+            fell_back = ", ended on the silence"
+        if self.replayed and not self.replay_stopped:
             fell_back += ", the previous frame's triggers read again"
         if self.misaligned:
             fell_back += (f", samples out of step with the markers in {self.misaligned} "
                           f"batch{'es' if self.misaligned != 1 else ''}")
-        if self.data_errors > self.misaligned:
-            others = self.data_errors - self.misaligned
+        if self.data_errors > self.misaligned + self.replay_stopped:
+            others = self.data_errors - self.misaligned - self.replay_stopped
             fell_back += (f", {others} batch{'es' if others != 1 else ''} "
                           "refused by the console")
         if self.retry:
@@ -2270,8 +2300,11 @@ def run_acquisition(
     as the run's own caller did, and returns the chain's `TofWidth`. The loop calls it
     when a repetition comes back `misaligned`, which a fork from 1.4.0 reports and which
     only a new console process has been seen to clear, and then acquires that repetition
-    again (lab record, task 99). Without one such a repetition stops the run, since a
-    retry on the same console would read its samples the same way. The chain a restart
+    again (lab record, task 99). It does the same when the console stopped a repetition
+    on a replay of the previous frame's triggers (`replay_stopped`), after which that
+    process acquires nothing (lab record, task 105). Without one such a repetition stops
+    the run, since a retry on the same console would fail or read its samples the same
+    way. The chain a restart
     opens replaces the caller's, which still owes it its `stop_acquire`.
 
     `stop` is asked, between one repetition and the next, whether to end the run; a
@@ -2855,6 +2888,15 @@ class _Loop:
         gets its restart too. A repetition still misaligned after the restart stops the
         run, as does one with no `recover` to call or a restart that fails, the frame set
         aside like any other damaged one that stops it.
+
+        **A `replay_stopped` repetition takes the same path** (Matt, 2026-10-08; lab
+        record, task 105). A fork from 1.4.0 ends a replayed frame at its first trigger,
+        and the process it ran on then fails every `acquire frame` and reads out of step
+        besides, so the plain retry would spend itself on a console that cannot acquire.
+        The replay clockwork finds itself on an acquired frame (`replayed`) keeps its
+        plain retry: on 1.4.0 the fork's stop pre-empts it, so it fires only against an
+        older console, where a retry on the same process is what task 83 settled and a
+        lag it leaves behind is still caught as `misaligned` on a 1.4.0 one.
         """
         record = self._attempt(method_frame, repetition, retry=False)
         retried = restarted = False
@@ -2863,7 +2905,7 @@ class _Loop:
             if stopping is None:
                 self.retried.append(record)
                 self.report(Retried(record, self.method.acquisition.frame_length))
-                if record.misaligned:
+                if record.needs_restart:
                     stopping = self._restart(record)
                     restarted = True
                 else:
@@ -2892,6 +2934,15 @@ class _Loop:
     def _why_not_again(self, record: FrameRecord, *, retried: bool,
                        restarted: bool) -> str | None:
         """Why a damaged repetition may not be acquired again, or None if it may."""
+        if record.replay_stopped:
+            if restarted:
+                return ("was stopped by the console on a replay of the previous frame's "
+                        "triggers again after the console was restarted")
+            if self.recover is None:
+                return ("was stopped by the console on a replay of the previous frame's "
+                        "triggers, and that console acquires nothing more; restart the "
+                        "console before acquiring again")
+            return None
         if record.misaligned:
             if restarted:
                 return ("read its samples out of step with its markers again after the "
@@ -2923,21 +2974,24 @@ class _Loop:
         (`_check_first_gate`).
         """
         assert self.recover is not None
+        if record.replay_stopped:
+            cause = "stopped by the console on a replay of the previous frame's triggers"
+            done = "was stopped by the console on a replay"
+        else:
+            cause = (f"samples out of step with the markers in {record.misaligned} batch"
+                     f"{'es' if record.misaligned != 1 else ''}")
+            done = "read its samples out of step with its markers"
         self.report(Warned(
-            f"frame {record.method_frame}.{record.repetition}: samples out of step with "
-            f"the markers in {record.misaligned} batch"
-            f"{'es' if record.misaligned != 1 else ''}; restarting the console and "
-            "acquiring it again"))
+            f"frame {record.method_frame}.{record.repetition}: {cause}; restarting the "
+            "console and acquiring it again"))
         try:
             width = self.recover()
         except Exception as exc:  # noqa: BLE001 -- the run's own end comes first
-            return (f"read its samples out of step with its markers and the console "
-                    f"restart failed ({type(exc).__name__}: {exc})")
+            return f"{done} and the console restart failed ({type(exc).__name__}: {exc})"
         bins = self.recording.geometry.bins
         if int(width.num_samples) != bins:
-            return (f"read its samples out of step with its markers, and the restarted "
-                    f"console sized its scans at {width.num_samples} samples where this "
-                    f"file's are {bins}")
+            return (f"{done}, and the restarted console sized its scans at "
+                    f"{width.num_samples} samples where this file's are {bins}")
         self._gate_checked = False
         return None
 
@@ -2963,7 +3017,7 @@ class _Loop:
         # repetition and would otherwise be counted twice.
         self._witnessed_at = None
         outcome, detail, ended_by = "", "", ""
-        replayed = False
+        replayed = replay_stopped = False
         data_errors = misaligned = 0
         timings: dict[str, float] = {}
         """What `release` measured, which only it can: it runs inside `run_frame`."""
@@ -3024,6 +3078,8 @@ class _Loop:
             data_errors = len(self.stream.data_errors) - data_errors_before
             misaligned = sum(status.is_misaligned
                              for status in self.stream.data_errors[data_errors_before:])
+            replay_stopped = any(status.is_replay_stop
+                                 for status in self.stream.data_errors[data_errors_before:])
         finally:
             # The completion marker last, after the console has stopped writing to this
             # frame: it is the only thing in the file that tells a frame that finished
@@ -3056,6 +3112,7 @@ class _Loop:
             replayed=replayed,
             data_errors=data_errors,
             misaligned=misaligned,
+            replay_stopped=replay_stopped,
             settle_seconds=settle_seconds,
             start_list_seconds=timings.get("start_list", 0.0),
             table_completed_s=(None if self._witnessed_at is None
@@ -3096,7 +3153,10 @@ class _Loop:
         already stopping for another reason keeps that reason, since the first thing that
         went wrong is the one worth reading.
         """
-        if self.witness_box is None or not record.acquired:
+        if self.witness_box is None or not record.acquired or record.replay_stopped:
+            # A frame the console stopped at its first trigger is not a gate question:
+            # the table runs on behind it, and the rack is made ready again before the
+            # repetition is acquired again (lab record, task 105).
             return
         where = f"frame {record.method_frame}.{record.repetition}"
         if record.table_completed_s is not None:

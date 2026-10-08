@@ -189,9 +189,15 @@ def run_frame(
     both are failures. What it does not mean is a frame with no ions in it:
     the console publishes a batch per `NotifyOnScansCount` scans whether or
     not anything crossed the threshold (lab record, task 20).
+
+    Not raised for a frame a fork from 1.4.0 ended on a replay of the previous
+    frame's markers: that frame says so (`wire.REPLAYED_PREFIX`) before its
+    `finished`, so its emptiness is explained, waiting cannot change it, and the
+    caller reads why from `stream.data_errors` (lab record, task 105).
     """
     console.acquire_frame(request)
     scans_before = stream.scans
+    errors_before = len(stream.data_errors)
     try:
         if release is not None:
             release()
@@ -199,7 +205,9 @@ def run_frame(
                                         on_idle=tick)
     finally:
         console.stop_frame()
-    if stream.scans == scans_before and not allow_empty:
+    replay_stopped = any(status.is_replay_stop
+                         for status in stream.data_errors[errors_before:])
+    if stream.scans == scans_before and not allow_empty and not replay_stopped:
         # Give the batches that `finished` may have overtaken their chance to
         # arrive before calling the frame empty.
         for event in stream.drain(settle):

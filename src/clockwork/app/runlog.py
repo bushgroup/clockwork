@@ -46,8 +46,10 @@ out, which is the one per-repetition outcome worth interrupting a trainee for. A
 that counted out is not logged at all; the bar already said so, unless its triggers were
 the previous frame's read again (`FrameRecord.replayed`) or the console refused some of its
 batches (`FrameRecord.data_errors`; lab record, task 83), which are surfaced the same
-way. One that was acquired again because of any of them (`Retried`, lab record, task 82)
-says so on the next line.
+way, as is a frame the console stopped on a replay (`FrameRecord.replay_stopped`, lab
+record, task 105), whose line names the stop rather than the silence it ended on. One
+that was acquired again because of any of them (`Retried`, lab record, task 82) says so
+on the next line.
 """
 
 from __future__ import annotations
@@ -347,7 +349,10 @@ class RunPanel(QWidget):
             return
         if isinstance(event, FrameEnded):
             record = event.record
-            if record.ended_by == "silence":
+            if record.replay_stopped:
+                # Its silence is a consequence of the stop, and the line says the stop.
+                self.say(record.text, warn=True)
+            elif record.ended_by == "silence":
                 self.say(f"{record.text}  (ended on silence, not on a count)", warn=True)
             elif record.acquired and (record.replayed or record.data_errors):
                 self.say(record.text, warn=True)

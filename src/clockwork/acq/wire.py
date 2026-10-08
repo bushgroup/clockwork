@@ -87,6 +87,15 @@ again (`docs/console-protocol.md`, "Trigger timestamps run on across frames" and
 status messages the fork adds"; lab record, task 99).
 """
 
+REPLAYED_PREFIX = DATA_ERROR_PREFIX + " markers replayed"
+"""The `error data:` line a fork from 1.4.0 publishes when it ends a frame at its first
+trigger because that trigger is not past the previous frame's last. The frame's
+`finished` follows with few or no scans, and the same console process then fails every
+`acquire frame` and is out of step besides, so a client restarts the console before
+acquiring again (`docs/console-protocol.md`, "Two status messages the fork adds"; lab
+record, task 105).
+"""
+
 SILENT_COMMANDS = frozenset(
     {
         "trig class",
@@ -393,6 +402,12 @@ class Status:
         """Whether this says the samples stream lags the markers (`MISALIGNED_PREFIX`), the
         one data error a retry on the same console does not cure."""
         return self.text.startswith(MISALIGNED_PREFIX)
+
+    @property
+    def is_replay_stop(self) -> bool:
+        """Whether this says the console ended the frame on a replay of the previous
+        frame's markers (`REPLAYED_PREFIX`), after which it acquires nothing more."""
+        return self.text.startswith(REPLAYED_PREFIX)
 
     @property
     def error_text(self) -> str:

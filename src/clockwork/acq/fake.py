@@ -79,6 +79,7 @@ from .wire import (
     FINISHED,
     FINISHED_ACQUIRE,
     MISALIGNED_PREFIX,
+    REPLAYED_PREFIX,
     SILENT_COMMANDS,
     TOPIC_DATA,
     TOPIC_STATUS,
@@ -322,7 +323,21 @@ class FakeConsole:
         console reading the previous acquisition's markers stream a second time does
         (lab record, task 83). The frame after one carries on from the real end of the
         counter. Combine with `short_frames` for the shape the instrument has shown; on
-        its own it is the replay that counts out."""
+        its own it is the replay that counts out, unless `replay_stops`."""
+
+        self.replay_stops = False
+        """Whether a frame `replayed_frames` replays is ended at its first trigger, as a
+        fork from 1.4.0 ends it: no batches, the `error data: markers replayed` line, then
+        `finished`. The stand-in is then `wedged`, as the console process was on the
+        instrument (`docs/console-protocol.md`, "Two status messages the fork adds"; lab
+        record, task 105)."""
+
+        self.wedged = False
+        """Whether every `acquire frame` fails at once, publishing `error unknown error
+        when acquiring UIMF data` and `finished` with no batches, which is what a 1.4.0
+        console did after a replay stop until it was restarted. A restart under
+        `FakeConsoleProcess` makes a new stand-in; set it directly for one that starts
+        that way."""
 
         self.misaligned_frames: list[bool] = []
         """Faults for the frames to come, one taken off the front per frame: whether the
@@ -680,6 +695,19 @@ class FakeConsole:
         replay = self.replayed_frames.pop(0) if self.replayed_frames else False
         if self.misaligned_frames and self.misaligned_frames.pop(0):
             self.lagging = True
+        if self.wedged or (replay and self.replay_stops):
+            # Nothing fetched, so nothing published or written, and the counter left
+            # where the real clock had it: the next frame's triggers start past it.
+            if self.wedged:
+                self.logged_errors += 1
+                end = f"{ERROR_PREFIX} unknown error when acquiring UIMF data"
+            else:
+                self.wedged = True
+                end = f"{REPLAYED_PREFIX} in frame {request.frame_number}"
+            self.running = False
+            self._publish(TOPIC_STATUS, end.encode())
+            self._publish(TOPIC_STATUS, FINISHED.encode("ascii"))
+            return
         clock_ran_to = self._timestamp
         if replay:
             self._timestamp = self._frame_began_at

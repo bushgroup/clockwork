@@ -425,10 +425,18 @@ replayed markers, and publishes
 
     error data: markers replayed in frame <frame>
 
-followed by its `finished`. Such a frame carries few or no scans and is a damaged frame to
-acquire again, like any other `error data:` frame. Note that whether ending a replayed frame this
-way keeps the samples stream in step is not yet established. A later frame that reads out of
-step publishes the misalignment line, and clockwork restarts the console on it.
+followed by its `finished`. Such a frame carries few or no scans, and on 1.4.0 the process that
+stopped it cannot acquire again: every later `acquire frame` on it publishes
+
+    error unknown error when acquiring UIMF data
+
+and its `finished` at once, with no scans, until the console is restarted (lab record, task
+105). The stop does not keep the samples stream in step either. A new `init` on the same process
+acquires again, but its first frames read misaligned, six times in six. So unlike the other
+`error data:` lines, this one is not a damaged frame that a retry on the same process can
+replace, and a client restarts the console before it acquires the frame again. The restart is
+required rather than a precaution, and clockwork makes it on this line as it does on the
+misalignment line.
 
 The ZeroMQ protocol is unchanged in every command and in both replies. A client works against
 either build.

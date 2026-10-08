@@ -955,6 +955,7 @@ class Restarter:
         self.rig.console.stop_acquire()
         if self.cures:
             self.rig.fake.lagging = False
+            self.rig.fake.wedged = False
         width = acq.start_chain(self.rig.console, self.rig.stream, timeout=5.0, settle=2.0,
                                 quiet=0.1)
         return self.width or width
@@ -1078,6 +1079,130 @@ def test_a_restart_that_fails_stops_the_run_with_its_reason(batched):
     assert not run.complete
     assert "the console restart failed (AcqError: the card did not open)" \
         in run.stopped_early
+
+
+def test_a_replay_stop_restarts_the_console_and_the_repetition_is_kept(batched):
+    """From 1.4.0 the fork ends a replayed frame at its first trigger with `error data:
+    markers replayed`, and the process then fails every `acquire frame`. The stopped
+    frame is a damaged repetition at once, not an `EmptyFrameError` after the settle, and
+    it is acquired again after a restart rather than on the console that cannot (Matt,
+    2026-10-08; lab record, task 105)."""
+    batched.fake.replayed_frames = [False, True]
+    batched.fake.replay_stops = True
+    restart = Restarter(batched)
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    events = []
+    run = batched.acquire(method, boxes, progress=events.append, recover=restart)
+
+    assert run.complete, run.text
+    assert restart.calls == 1
+    (stopped,) = run.retried
+    assert stopped.acquired and stopped.replay_stopped and stopped.damaged
+    assert (stopped.repetition, stopped.scans_published, stopped.data_errors) == (2, 0, 1)
+    assert stopped.needs_restart and not stopped.misaligned
+    assert "stopped by the console at its first trigger" in stopped.text
+    assert "refused by the console" not in stopped.text
+    assert "ended on the silence" not in stopped.text
+    assert [(record.repetition, record.retry, record.replay_stopped)
+            for record in run.frames] == [(1, False, False), (2, True, False), (3, False, False)]
+    ended = [event.record for event in events if isinstance(event, FrameEnded)]
+    assert all(record.acquired for record in ended), [record.text for record in ended]
+    assert any(isinstance(event, Warned) and "replay" in event.message
+               and "restarting the console" in event.message for event in events)
+    (retried,) = [event for event in events if isinstance(event, Retried)]
+    assert retried.text == (f"frame 1.2: 0 of {SCANS} scans, stopped by the console on a "
+                            "replay of the previous frame's triggers, acquired again")
+    raw = UimfFile(run.raw_path)
+    assert raw.frame_numbers() == [1, 2, 3]
+    assert not any(raw.is_provisional(number) for number in (1, 2, 3))
+    assert_companion_sums_the_raw_file(run)
+
+
+def test_a_replay_stop_with_nothing_to_restart_the_console_stops_at_once(batched):
+    """Without `recover` the run stops on the stop itself, with a sentence saying what to
+    do, rather than spending its retry and `abort_after` on a console that cannot
+    acquire, which is how lab #10 and #11 ended."""
+    batched.fake.replayed_frames = [False, True]
+    batched.fake.replay_stops = True
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = batched.acquire(method, boxes)
+
+    assert not run.complete
+    assert not run.retried
+    assert "frame 1.2 was stopped by the console on a replay" in run.stopped_early
+    assert "restart the console before acquiring again" in run.stopped_early
+    assert [record.replay_stopped for record in run.frames] == [False, True]
+    assert len(batched.fake.frames) == 2
+    raw = UimfFile(run.raw_path)
+    assert raw.is_provisional(2) and not raw.is_provisional(1)
+    assert_companion_sums_the_raw_file(run)
+
+
+def test_a_second_replay_stop_after_the_restart_stops_the_run(batched):
+    batched.fake.replayed_frames = [False, True, True]
+    batched.fake.replay_stops = True
+    restart = Restarter(batched)
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = batched.acquire(method, boxes, recover=restart)
+
+    assert not run.complete
+    assert restart.calls == 1
+    assert "frame 1.2 was stopped by the console on a replay of the previous frame's " \
+        "triggers again after the console was restarted" in run.stopped_early
+    assert [(record.repetition, record.retry, record.replay_stopped)
+            for record in run.frames] == [(1, False, False), (2, True, True)]
+    (fold,) = run.folds
+    assert fold.frames_folded == (1,)
+    assert_companion_sums_the_raw_file(run)
+
+
+def test_a_replay_stop_restart_that_fails_stops_the_run_with_its_reason(batched):
+    batched.fake.replayed_frames = [False, True]
+    batched.fake.replay_stops = True
+
+    def broken():
+        raise acq.AcqError("the card did not open")
+
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = batched.acquire(method, boxes, recover=broken)
+
+    assert not run.complete
+    assert ("was stopped by the console on a replay and the console restart failed "
+            "(AcqError: the card did not open)") in run.stopped_early
+
+
+def test_a_replay_stopped_frame_is_its_own_kind_of_damage():
+    line = acq.Status(text=f"{acq.REPLAYED_PREFIX} in frame 166")
+    assert line.is_data_error and line.is_replay_stop and not line.is_misaligned
+    record = loop_module.FrameRecord(method_frame=1, repetition=166, frame_number=166,
+                                     outcome="acquired", ended_by="silence",
+                                     data_errors=1, replay_stopped=True)
+    assert record.damaged and record.needs_restart
+    failed = dataclasses.replace(record, outcome="EmptyFrameError")
+    assert not failed.damaged and not failed.needs_restart
+
+
+def test_a_wedged_console_fails_every_frame_until_it_is_restarted(batched):
+    """The state the stop leaves a 1.4.0 process in, which the fake keeps so the tests
+    above are against what the instrument did and not a kinder console."""
+    batched.fake.wedged = True
+    width = acq.start_chain(batched.console, batched.stream, timeout=5.0, settle=2.0,
+                            quiet=0.1)
+    assert width.num_samples
+    request = acq.FrameRequest(frame_number=1, frame_length=SCANS)
+    try:
+        with pytest.raises(acq.ConsoleAcquisitionError, match="unknown error"):
+            acq.run_frame(batched.console, batched.stream, request, timeout=5.0)
+    finally:
+        batched.console.stop_acquire()
 
 
 def test_a_misaligned_batch_is_a_data_error_of_its_own_kind():
