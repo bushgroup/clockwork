@@ -32,7 +32,13 @@ dependencies = [
     # thread beside it -- a serial round trip, a row count -- takes ten times as
     # long. With it the same fold is fifteen times quicker and the contention is
     # gone (lab record, task 34).
-    "mainspring[fast]~=1.0",
+    #
+    # `[viewer]` is PySide6 and pyqtgraph, which left mainspring's base in 1.11.0.
+    # Nothing here draws; it is asked for so that a dev clone's configured
+    # `uv run mainspring` opens the pinned viewer, the same mainspring as the reader
+    # this package writes with, rather than exiting for want of Qt (lab record,
+    # task 106). An installed clockwork opens the installed viewer by association.
+    "mainspring[fast,viewer]~=1.0",
     "pyserial~=3.5",
     "pyzmq~=27.2",
     "protobuf~=7.36",
@@ -43,9 +49,9 @@ dependencies = [
 ]
 # pyqtgraph was a direct dependency here for a plotting pane clockwork never grew:
 # mainspring is the only viewer (Matt, 2026-09-10) and clockwork.app draws nothing.
-# Dropped as a direct dependency (task 32); it is still installed, transitively, through
-# mainspring's own viewer, and packaging/clockwork.spec's exclude list is what actually
-# keeps it out of the build -- confirmed clean (0 files) with the direct dependency gone.
+# Dropped as a direct dependency (task 32); it is installed through mainspring's
+# `viewer` extra above, for the dev clone's viewer only, and packaging/clockwork.spec's
+# exclude list is what keeps it out of the build -- confirmed clean (0 files).
 
 [project.scripts]
 clockwork = "clockwork.app:main"
@@ -64,7 +70,7 @@ packages = ["src/clockwork"]
 package = true
 
 [tool.uv.sources]
-mainspring = { git = "https://github.com/bushgroup/mainspring", tag = "v1.10.0" }
+mainspring = { git = "https://github.com/bushgroup/mainspring", tag = "v1.13.0" }
 
 [dependency-groups]
 dev = [

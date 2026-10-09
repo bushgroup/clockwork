@@ -365,8 +365,10 @@ def test_the_stand_ins_pair_sums_to_its_invented_spectrum(tmp_path, mode, frames
 
 GOLDEN_RATIOS = {
     # file: (water loss / precursor, fragments / precursor), as task 09's comparison
-    # printed them to three places (lab record, task 09).
-    "260825_BK_025.uimf": (0.504, 1.182),
+    # printed them to three places (lab record, task 09). These are FALKOR files, so
+    # since mainspring 1.13.0 they decode with UIMF-Library's marker skip, which moved
+    # 025's fragment ratio from 1.18236 to 1.18271 (lab record, task 106).
+    "260825_BK_025.uimf": (0.504, 1.183),
     "260825_BK_037.uimf": (0.557, 1.574),
     "260825_BK_057.uimf": (0.586, 1.773),
 }

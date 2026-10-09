@@ -2874,7 +2874,9 @@ def main() -> int:
             "the golden CLOCK file reproduces task 09's water-loss and fragment ratios "
             f"({ratios['water_loss']:.3f}, {ratios['fragments']:.3f})",
             (round(ratios["water_loss"], 3), round(ratios["fragments"], 3))
-            == (0.504, 1.182),
+            # 1.183 since mainspring 1.13.0 applies UIMF-Library's marker skip to a FALKOR
+            # file; task 09 printed 1.182 without it (lab record, task 106).
+            == (0.504, 1.183),
         )
 
     section("the console process")

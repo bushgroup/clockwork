@@ -79,7 +79,7 @@ name = "clockwork"
 version = "1.2.0rc4.dev0"
 source = { editable = "." }
 dependencies = [
-    { name = "mainspring", extra = ["fast"] },
+    { name = "mainspring", extra = ["fast", "viewer"] },
     { name = "mcp" },
     { name = "numpy" },
     { name = "protobuf" },
@@ -101,7 +101,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mainspring", extras = ["fast"], git = "https://github.com/bushgroup/mainspring?tag=v1.10.0" },
+    { name = "mainspring", extras = ["fast", "viewer"], git = "https://github.com/bushgroup/mainspring?tag=v1.13.0" },
     { name = "mcp", specifier = "~=2.2" },
     { name = "numpy", specifier = "~=2.5.2" },
     { name = "protobuf", specifier = "~=7.36" },
@@ -310,18 +310,21 @@ wheels = [
 
 [[package]]
 name = "mainspring"
-version = "1.10.0"
-source = { git = "https://github.com/bushgroup/mainspring?tag=v1.10.0#909a84dda51a768b848eb78f3b12b5895e062cea" }
+version = "1.13.0"
+source = { git = "https://github.com/bushgroup/mainspring?tag=v1.13.0#9006c1efc527cf2efadaf4863b705c6109e29f0e" }
 dependencies = [
     { name = "numpy" },
-    { name = "pyqtgraph" },
-    { name = "pyside6" },
     { name = "scipy" },
 ]
 
 [package.optional-dependencies]
 fast = [
     { name = "numba" },
+]
+viewer = [
+    { name = "numba" },
+    { name = "pyqtgraph" },
+    { name = "pyside6" },
 ]
 
 [[package]]

@@ -9,9 +9,10 @@ the per-user cache the first time each executable runs.
 
 clockwork depends on `mainspring[fast]` for the fold's decode (lab record, task 34) and,
 since mainspring 1.7.0, for its write too, and since 1.9.0 for its sum; the kernels are
-mainspring's (`decode.warm_kernels`: four decode, three encode, the sum, for all three
-intensity types). Unseeded, their compile lands inside the first fold, on the folding
-thread.
+mainspring's (`decode.warm_kernels`: five decode, three encode, the sum, for all three
+intensity types). The fifth decode kernel, the marker count of mainspring 1.13.0, is never
+run by a fold, but `warm_kernels` compiles it, so it is in the seed and checked here.
+Unseeded, the rest compile inside the first fold, on the folding thread.
 
 Why the built executable and not this interpreter. numba stamps a frozen program's cache
 with `sys.executable`'s modification time and size, and a cache compiled from the source
@@ -37,8 +38,8 @@ EXE = os.path.join(ROOT, "dist", "clockwork", "clockwork.exe")
 SEED_DIR = os.path.join(ROOT, "dist", "clockwork", "_internal", "numba_cache_seed")
 FOLDER = "clockwork_uimf"
 KERNELS = ("decode._k_lzf_sizes", "decode._k_lzf_expand", "decode._k_rlz_count",
-           "decode._k_rlz_fill", "decode._k_rlz_encode_sizes", "decode._k_rlz_encode_fill",
-           "decode._k_lzf_compress", "frame._k_sum_rows")
+           "decode._k_rlz_fill", "decode._k_rlz_markers", "decode._k_rlz_encode_sizes",
+           "decode._k_rlz_encode_fill", "decode._k_lzf_compress", "frame._k_sum_rows")
 
 
 def _stamp_of(index_path: str) -> tuple:
