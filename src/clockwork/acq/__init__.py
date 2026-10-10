@@ -91,6 +91,7 @@ from .loop import (
     ABORT_AFTER_FAILURES,
     ABORT_AFTER_UNWITNESSED,
     ARM_TIMEOUT_S,
+    CLOCK_LOCK_RETRY_DELAY_S,
     DECLARED_ELSEWHERE,
     FRAME_POLL_S,
     FRAME_TIMEOUT_FLOOR_S,
@@ -112,6 +113,8 @@ from .loop import (
     BoxLost,
     BoxReady,
     BoxSaid,
+    ClockLockFailed,
+    ClockLockRetried,
     EnableGateError,
     Event,
     Folded,
@@ -141,6 +144,7 @@ from .loop import (
     refusals,
     run_acquisition,
     send_phases,
+    start_chain_retrying,
 )
 from .process import (
     CONSOLE_ENV,
@@ -184,6 +188,7 @@ from .uimf import (
 )
 from .wire import (
     ACK,
+    CLOCK_LOCK_ERROR_CODE,
     COMMAND_PORT,
     DATA_ERROR_PREFIX,
     DATA_PORT,
@@ -232,8 +237,12 @@ __all__ = [
     "BoxLost",
     "BoxReady",
     "BoxSaid",
+    "CLOCK_LOCK_ERROR_CODE",
+    "CLOCK_LOCK_RETRY_DELAY_S",
     "COMMAND_PORT",
     "CONSOLE_ENV",
+    "ClockLockFailed",
+    "ClockLockRetried",
     "Console",
     "ConsoleAcquisitionError",
     "ConsoleCommandError",
@@ -354,5 +363,6 @@ __all__ = [
     "send_phases",
     "stamp_globals",
     "start_chain",
+    "start_chain_retrying",
     "summed_path",
 ]

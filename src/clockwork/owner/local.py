@@ -74,7 +74,7 @@ from ..acq import (
     refusals,
     run_acquisition,
     send_phases,
-    start_chain,
+    start_chain_retrying,
 )
 from ..acq.fake import INSTRUMENT_PERIOD_SAMPLES
 from ..acq.standing import stand_down, warm_up
@@ -103,6 +103,7 @@ from .interface import (
     JobFailed,
     JobFinished,
     JobStarted,
+    LogsOpened,
     OwnerStatus,
     PointStarted,
     Progress,
@@ -675,13 +676,16 @@ class LocalOwner:
         self._set_status(self._status_now(seconds))
         console.reconnect(self.console.command_endpoint)
         stream.reconnect(self.console.data_endpoint)
-        prepared = prepare_console(console, job.instrument, info=console.info(),
+        info = console.info()
+        prepared = prepare_console(console, job.instrument, info=info,
                                    config=self._console_config())
         for message in prepared.warnings:
             self._report(Warned(message))
         self._say(f"console restarted in {seconds:.1f} s; offset {prepared.offset_v} V, "
                   f"{'inverted' if prepared.inverted else 'not inverted'}")
-        return start_chain(console, stream)
+        return start_chain_retrying(
+            console, stream, progress=self._report,
+            prepare=lambda: prepare_console(console, job.instrument, info=info))
 
     def _status_now(self, seconds: float | None = None) -> ConsoleStatus:
         console = self.console
@@ -928,7 +932,12 @@ class LocalOwner:
                 self._say(
                     f"offset {prepared.offset_v} V, "
                     f"{'inverted' if prepared.inverted else 'not inverted'}")
-                width = start_chain(console, stream)
+                # A clock-lock refusal of `acquire` is tried once more, the card's
+                # settings sent again first; its warnings were said the first time
+                # (lab record, task 104).
+                width = start_chain_retrying(
+                    console, stream, progress=self._report,
+                    prepare=lambda: prepare_console(console, job.instrument, info=info))
                 return width
 
             try:
@@ -1284,6 +1293,11 @@ class LocalOwner:
         with transcript.to_file(transcript_path, mode="a", header=header), \
                 transcript.send_log(send_path, mode="a" if append else "w",
                                     header=header):
+            # Before anything is sent: a front end's Report names this stem from here
+            # on, whether or not the work gets as far as `RunBegun` (lab record,
+            # task 104).
+            self._report(LogsOpened(directory=directory, stem=stem,
+                                    transcript=transcript_path))
             yield (transcript_path, send_path)
 
     def _header(self, method: Method, method_path: str, instrument: Instrument,

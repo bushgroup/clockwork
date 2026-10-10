@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -68,6 +69,19 @@ it, and ends the frame with the ordinary `finished`, which is why a frame
 that carried nothing has to be treated as a failure in its own right (lab
 record, task 20).
 """
+
+CLOCK_LOCK_ERROR_CODE = -1074134951
+"""The SA220P's "Cannot lock clock synthesizer", the one driver code a client retries.
+
+Seen once, answering `acquire`, and gone four minutes later with nothing changed on the
+client side. Both places in `acquire` that can raise it do so before anything is
+started, so the configuration and `acquire` may be sent again (`docs/console-protocol.md`,
+"A driver error, and the one a client retries"; lab record, task 104).
+"""
+
+_DRIVER_CODE = re.compile(r"Error Code:\s*(-?\d+)")
+"""Where a driver error's status code sits in the console's `error` reply. The English
+after it is the driver's and is not matched on."""
 
 DATA_ERROR_PREFIX = "error data:"
 """What the fork's data subscriber begins a status line with, from 1.3.0.
@@ -156,6 +170,18 @@ class ConsoleCommandError(AcqError):
     server loop and out of `main`, and the client learns of it as a request
     that timed out because the process is gone (lab record, task 21).
     """
+
+    @property
+    def code(self) -> int | None:
+        """The digitizer driver's status code, where the console's reply carries one.
+
+        A driver error reads `Error during call to digitizer. Error Code: <n>Error
+        Message: <text>`; anything else the console caught carries no code and gives
+        None (`docs/console-protocol.md`, "A driver error, and the one a client
+        retries").
+        """
+        found = _DRIVER_CODE.search(str(self))
+        return int(found.group(1)) if found else None
 
 
 class ConsoleAcquisitionError(AcqError):
@@ -657,6 +683,7 @@ def encode_batch(batch: Batch) -> bytes:
 
 __all__ = [
     "ACK",
+    "CLOCK_LOCK_ERROR_CODE",
     "COMMAND_PORT",
     "DATA_ERROR_PREFIX",
     "DATA_PORT",

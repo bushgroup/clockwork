@@ -22,6 +22,7 @@ an old line go, both of which it does for the reason the window's mailbox does.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
@@ -39,6 +40,7 @@ __all__ = [
     "JobFailed",
     "JobFinished",
     "JobStarted",
+    "LogsOpened",
     "Owner",
     "OwnerStatus",
     "PointStarted",
@@ -194,6 +196,28 @@ class Said(Event):
     @property
     def text(self) -> str:
         return self.line
+
+
+@dataclass(frozen=True, slots=True)
+class LogsOpened(Event):
+    """A piece of work under a stem has opened its transcript and send log.
+
+    Reported before the first string or command goes anywhere, so a front end knows
+    which run a problem belongs to from the start of sending and not only from
+    `RunBegun`, which a run stopped before its first frame never reaches: a refused
+    `acquire`, a refused pusher period, a refused method, a box that did not answer.
+    That is what lets Report name the folder the failure was kept in (lab record,
+    task 104). `directory` is where the run's files go, `transcript` the wire
+    transcript's path.
+    """
+
+    directory: str
+    stem: str
+    transcript: str
+
+    @property
+    def text(self) -> str:
+        return f"logging {self.stem} to {os.path.basename(self.transcript)}"
 
 
 @dataclass(frozen=True, slots=True)

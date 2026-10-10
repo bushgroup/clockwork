@@ -465,6 +465,38 @@ than as its answer. The reply is one frame where `acquire` and `tof width` answe
 client that checks the frame count meets it as a malformed reply rather than as a period; the
 prefix is what tells the two apart.
 
+### A driver error, and the one a client retries
+
+When the failure is the digitizer driver's, the text after `error` is the driver's own report
+in a fixed shape, with no space between the code and the second label:
+
+    error Error during call to digitizer. Error Code: <n>Error Message: <text>
+
+`<n>` is the driver's signed status code, and it is what a client matches on. The message text
+is the driver's English and is not part of the protocol.
+
+One code has a client behaviour attached: **-1074134951, "Cannot lock clock synthesizer"**,
+which the SA220P has answered to `acquire` once on record, in 1.5 s, on a run whose next
+attempt four minutes later acquired normally. The failure is transient, so a client may send
+the configuration and `acquire` again, and clockwork does so once, after a pause.
+
+The fork's source shows why that is safe. Both places `acquire` can throw this code are calls
+to `configure_cst`, which applies the setup and self-calibrates the card when the driver asks
+for it: the first is the short streaming context that measures the pusher period, the second
+is the acquisition's own. In both, the throw comes before anything is started. The measuring
+context is constructed by the call that threw, so there is no context to stop and the card is
+not initiated; the acquisition's context is likewise never built, the thread is never started,
+and the held acquisition pointer is not replaced, so no unjoined thread is left behind. What
+does persist is harmless to a second attempt: the record size `acquire` set, which the next
+`acquire` sets again, and the buffer pool, which it reuses. The data socket is taken from the
+server's table of publishers and bound afresh only when nothing still holds the previous one,
+so a second `acquire` a few seconds later binds the same port without conflict. `init`, `horizontal`, `vertical` and `invert` set driver attributes on the session the
+console opened at startup and open nothing of their own, so each can be sent again at any time
+nothing is acquiring. A second `init` does not rebuild that session; only a new console
+process does. The `enable io port` the client sent before the refused `acquire` is still in
+force, and a client that disabled the input for the period measurement (the bootstrap in "The
+order commands have to come in") puts it back exactly as after a measurement that worked.
+
 ## Building it
 
 Visual Studio 2019 16.9 or newer (the source uses `std::format`, so in practice 2022), CMake,

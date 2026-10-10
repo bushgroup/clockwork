@@ -2546,6 +2546,40 @@ def test_report_a_problem_keeps_the_last_run_off_the_ui_thread(window, tmp_path,
             if row.status == "copied"} == {"ZZ-007.uimf", "ZZ-007-2026-09-25.transcript.log"}
 
 
+def test_report_after_a_run_stopped_before_its_first_frame_reuses_its_kept_folder(
+        window, tmp_path, qtbot, monkeypatch):
+    """Lab #8: `acquire` was refused, the owner kept the run under its stem, and Report --
+    which learnt stems only from `RunBegun` -- kept the method alone in a second folder.
+    The stem now arrives with `LogsOpened`, before anything is sent."""
+    from urllib.parse import parse_qs, urlsplit
+
+    from clockwork import keep
+    from clockwork.app import window as window_module
+    from clockwork.owner import LogsOpened
+
+    root = tmp_path / "kept"
+    monkeypatch.setenv(keep.ENV, str(root))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    opened = []
+    monkeypatch.setattr(window_module.QDesktopServices, "openUrl",
+                        lambda address: opened.append(address.toString()) or True)
+    window._last_run_paths = (str(tmp_path / "ZZ-006.uimf"), "", "ZZ-006")
+    log = tmp_path / "ZZ-007-2026-10-05.transcript.log"
+    log.write_text("09:21:48.000 acq.loop         Stopped: the console refused 'acquire'\n",
+                   encoding="utf-8")
+    failed = keep.keep(str(root), [str(log)], reason="the console refused 'acquire'",
+                       stems=["ZZ-007"])
+    window.mailbox.put(LogsOpened(directory=str(tmp_path), stem="ZZ-007",
+                                  transcript=str(log)))
+    window._drain()
+    window.report_problem().join(30)
+    qtbot.waitUntil(lambda: bool(opened), timeout=5000)
+    assert os.listdir(root) == [os.path.basename(failed)]
+    text = parse_qs(urlsplit(opened[0]).query)["attachments"][0]
+    assert f"Report id: {os.path.basename(failed)}" in text
+    assert "Stopped: the console refused" in text
+
+
 def test_report_this_run_on_a_queue_row_keeps_that_rows_files_not_the_last_runs(
         window, tmp_path, qtbot, monkeypatch):
     """Lab #2: the toolbar's Report kept the run after the one the trainee meant. The

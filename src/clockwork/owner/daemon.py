@@ -44,7 +44,7 @@ from collections.abc import Callable
 from typing import TextIO
 
 from .. import __version__
-from ..acq import Event, PusherPeriodChecked, Warned
+from ..acq import ClockLockRetried, Event, PusherPeriodChecked, Warned
 from ..acq.process import listening_on, stop_listener
 from ..acq.wire import COMMAND_PORT
 from ..mips import Discovery
@@ -66,7 +66,7 @@ WATCH_S = 2.0
 it, so this is about the log line appearing promptly, not about the instrument."""
 
 _LOGGED = (JobStarted, JobFinished, JobFailed, Said, Warned, PusherPeriodChecked, RunDone,
-           ConsoleChanged)
+           ClockLockRetried, ConsoleChanged)
 """The events worth a line in the log. Not `BatchSeen`, fifteen a second, nor a
 `PhaseSent` per string, which the run's own send log already holds. The pusher period
 line is one a run, and the one that says what period a run believed it had."""

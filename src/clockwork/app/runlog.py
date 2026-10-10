@@ -79,6 +79,7 @@ from ..acq import (
     BatchSeen,
     BoxReady,
     BoxSaid,
+    ClockLockRetried,
     Event,
     Folded,
     Folding,
@@ -362,6 +363,12 @@ class RunPanel(QWidget):
         if isinstance(event, Retried):
             self.say(f"{event.text}: the console lost data and the repetition is "
                      "being acquired again", warn=True)
+            return
+        if isinstance(event, ClockLockRetried):
+            # Shown whole, in the warning colour: a run that opened its chain at the
+            # second attempt is a good run, and the line is how the retries get counted
+            # (lab record, task 104).
+            self.say(event.text, warn=True)
             return
         if isinstance(event, Warned):
             self._warned(event.message)

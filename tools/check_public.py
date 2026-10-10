@@ -819,6 +819,184 @@ arm = ["SMOD,TBL"]
             owner.join(30)
 
 
+def check_early_stops() -> None:
+    """A run that stops before its first frame, and the Report made after it (lab record,
+    task 104).
+
+    Over a `--fake` owner keeping failures in a scratch root. A clock-lock refusal of
+    `acquire` is retried once, with the card's settings sent again, and the run acquires;
+    two in a row end the run on a sentence with no driver code in it. For every way a run
+    or a send can stop early, the work's first event names its stem, which is what the
+    window's Report takes, and `keep.for_report` given that stem lands in the folder the
+    failure already made rather than a second one. A method the owner refuses opens no
+    transcript at all, so there is nothing for Report to name and nothing kept.
+    """
+    import datetime as dt
+    import glob
+    import tempfile
+
+    from clockwork import instrument as instrument_module
+    from clockwork import keep
+    from clockwork import method as method_module
+    from clockwork.acq import CLOCK_LOCK_ERROR_CODE, ClockLockRetried, RunBegun
+    from clockwork.mips import Box, FakeBox
+    from clockwork.owner import (
+        Acquire,
+        Discover,
+        JobFailed,
+        JobFinished,
+        LocalOwner,
+        LogsOpened,
+        Send,
+        StartConsole,
+    )
+
+    scans = 32
+    table = (f"STBLDAT;0:[A:1,0:A:1:B:1,500:B:0,{method_module.enable_fall_tick(scans)}:"
+             f"A:0,{method_module.table_period(scans)}:];")
+
+    def make_method(**acquisition: object) -> method_module.Method:
+        return method_module.from_dict({
+            "schema_version": 2,
+            "metadata": {"name": "early stops", "created": dt.date(2026, 10, 10)},
+            "acquisition": {"frames": 1, "scans": scans, "accumulations": 2,
+                            "file_stem": "261010_SC_001",
+                            "repetition_mode": "per_repetition", "keep_raw": True,
+                            "enable": {"box": "box1", "channel": "A"}, **acquisition},
+            "boxes": [{"name": "box1", "port": "COM3", "setup": ["STBLCLK,EXT"],
+                       "load": [table], "arm": ["SMOD,TBL"]}],
+            "start": [["box1", "TBLSTRT"]],
+            "reset": [["box1", "SMOD,LOC"], ["box1", "SMOD,TBL"]],
+        })
+
+    def make_instrument(**identity: object) -> instrument_module.Instrument:
+        return instrument_module.from_dict({
+            "schema_version": 1, "instrument": {"name": "early stops", **identity},
+            "vertical": {"full_scale_v": 0.5, "offset_v": 0.251, "inverted": False}})
+
+    class SilentAtSetup(FakeBox):
+        """A box that takes its setup string and never answers it."""
+
+        def write(self, data: bytes) -> None:
+            if not data.startswith(b"STBLCLK"):
+                super().write(data)
+
+    refusal = (f"Error during call to digitizer. Error Code: {CLOCK_LOCK_ERROR_CODE}"
+               "Error Message: Unexpected response: Cannot lock clock synthesizer")
+    method, instrument = make_method(), make_instrument()
+
+    with tempfile.TemporaryDirectory() as scratch:
+        data, root = os.path.join(scratch, "data"), os.path.join(scratch, "kept")
+        owner = LocalOwner(fake=True, program="check_public early stops",
+                           kept_root=root).start()
+        try:
+            owner.submit(StartConsole())
+            _ended(owner, owner.submit(Discover(method=method)), 60)
+            fake = owner.console.fake  # type: ignore[union-attr]
+
+            def run(job: object) -> tuple[object | None, list[object]]:
+                handle = owner.submit(job)  # type: ignore[arg-type]
+                end = _ended(owner, handle, 120)
+                return end, [entry.event for entry in owner.events(handle)]
+
+            def acquire(stem: str, **job: object) -> tuple[object | None, list[object]]:
+                return run(Acquire(**{"method": method, "instrument": instrument,
+                                      "directory": data, "stem": stem, "initials": "SC",
+                                      **job}))
+
+            def opened(events: list[object], stem: str) -> bool:
+                found = [event for event in events if isinstance(event, LogsOpened)]
+                return bool(found) and found[0].stem == stem and found[0].directory == data
+
+            def one_folder(stem: str) -> tuple[bool, str]:
+                kept = keep.kept_for(root, stem)
+                again = keep.for_report(root, directory=data, stems=(stem,))
+                listed = keep.read_manifest(again)
+                return (kept is not None and again == kept and listed is not None
+                        and stem in listed.stems()), os.path.basename(again)
+
+            sent, _ = run(Send(method=method, directory=data, stem="261010_SC_001"))
+            check_true("the stand-in rack takes the method", isinstance(sent, JobFinished))
+
+            fake.refuse["acquire"] = refusal
+            fake.refuse_times["acquire"] = 1
+            mark = len(fake.commands)
+            end, events = acquire("261010_SC_001")
+            words = [command[0] for command in fake.commands[mark:]]
+            first, second = (index for index, word in enumerate(words)
+                             if word == "acquire")
+            between = words[first + 1:second]
+            log = "".join(open(path, encoding="utf-8").read() for path in glob.glob(
+                os.path.join(data, "261010_SC_001*.transcript.log")))
+            check_true(
+                "one clock-lock refusal of `acquire` is retried and the run acquires, "
+                f"the settings sent again in between ({between})",
+                isinstance(end, JobFinished) and len(end.result) == 1
+                and end.result[0].complete
+                and sum(isinstance(event, ClockLockRetried) for event in events) == 1
+                and words.count("acquire") == 2
+                and all(word in between for word in
+                        ("init", "vertical", "invert", "disable io port"))
+                and words[second + 1:second + 3] == ["stop", "enable io port"])
+            check_true("the retry is its own line in the transcript, which counts them",
+                       "ClockLockRetried: retried after a clock-lock failure" in log)
+
+            fake.refuse["acquire"] = refusal
+            fake.refuse_times["acquire"] = 2
+            end, events = acquire("261010_SC_002")
+            message = end.message if isinstance(end, JobFailed) else ""
+            same, name = one_folder("261010_SC_002")
+            check_true(
+                f"a second refusal stops the run in a sentence, no driver code in it "
+                f"({message[:72]}...)",
+                message.startswith("the digitizer could not lock its clock synthesizer, "
+                                   "twice") and "Error Code" not in message
+                and "acquire" not in fake.refuse)
+            check_true(
+                f"a run stopped at `acquire` names its stem before it stops, and Report "
+                f"reuses the folder its failure was kept in ({name})",
+                opened(events, "261010_SC_002")
+                and not any(isinstance(event, RunBegun) for event in events) and same)
+
+            end, events = acquire("261010_SC_003",
+                                  instrument=make_instrument(pusher_period_us=1000.0))
+            message = end.message if isinstance(end, JobFailed) else ""
+            same, name = one_folder("261010_SC_003")
+            check_true(
+                f"so does one the pusher period check refuses ({name})",
+                "pusher" in message and opened(events, "261010_SC_003")
+                and not any(isinstance(event, RunBegun) for event in events) and same)
+
+            kept_before = sorted(os.listdir(root))
+            end, events = acquire(
+                "261010_SC_004",
+                method=make_method(repetition_mode="single_frame", frames=2))
+            check_true(
+                "a method the owner refuses opens no transcript and keeps nothing, so "
+                "Report has no new run to name",
+                isinstance(end, JobFailed)
+                and not any(isinstance(event, LogsOpened) for event in events)
+                and sorted(os.listdir(root)) == kept_before)
+
+            owner.boxes["box1"] = Box(transport=SilentAtSetup(), name="box1")
+            end, events = run(Send(method=method, directory=data, stem="261010_SC_005"))
+            folder = keep.for_report(root, directory=data, stems=("261010_SC_005",))
+            listed = keep.read_manifest(folder)
+            copied = {row.kept for row in listed.rows if row.status == "copied"} \
+                if listed is not None else set()
+            check_true(
+                "a send a box does not answer names its stem too, so Report keeps that "
+                f"send's transcript and log rather than the method alone ({sorted(copied)})",
+                isinstance(end, JobFailed) and opened(events, "261010_SC_005")
+                and any(name.endswith(".transcript.log") for name in copied)
+                and any(name.endswith(".sent.txt") for name in copied))
+        except Exception as exc:  # noqa: BLE001 -- reporting, not handling
+            check_true(f"the early stops run over the stand-ins ({exc!r})", False)
+        finally:
+            owner.shutdown()
+            owner.join(30)
+
+
 def check_standing() -> None:
     """Warm-up and stand-down over the stand-ins (lab record, task 95).
 
@@ -3216,6 +3394,9 @@ def main() -> int:
 
     section("warm-up and stand-down")
     check_standing()
+
+    section("early stops and Report")
+    check_early_stops()
 
     section("the window")
     # Task 50. Nothing here opens a window: what a clone can establish without a

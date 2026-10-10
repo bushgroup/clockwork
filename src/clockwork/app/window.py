@@ -82,7 +82,7 @@ from ..method import (
 from ..method import template as templates
 from ..method.template import Rendered
 from ..method.text import PaneResult, render_pane, split_trainee_file, start_order
-from ..owner import SeriesJob, SeriesResult
+from ..owner import LogsOpened, SeriesJob, SeriesResult
 from . import errors, runqueue
 from .boxstate import Reading
 from .console_panel import ConsoleBar, ConsoleSettings
@@ -267,6 +267,17 @@ class MainWindow(QMainWindow):
         A replicate series keeps the previous run's names through the gap between one
         run and the next, which is right -- that file is still there and still worth
         opening -- and the job ending clears it."""
+
+        self._logged: tuple[str, str] = ("", "")
+        """`(directory, stem)` of the last piece of work that opened its transcript, for
+        Report (lab record, task 104).
+
+        Taken from `LogsOpened`, which every send and every run reports before its first
+        string goes out, rather than from `RunBegun`, which a run stopped before its first
+        frame never reaches: a refused `acquire` left Report knowing no stem at all, so it
+        kept the method alone in a second folder beside the one the failure had already
+        kept. Never cleared, since a run that has ended is exactly the one reported on;
+        `_live_run` keeps its narrower meaning, the files being written now."""
 
         self._viewer_launched = False
         """Whether this window has opened a viewer since it started.
@@ -1628,6 +1639,8 @@ class MainWindow(QMainWindow):
                                "filling faster than it could be drawn", warn=True)
         for event in events:
             self.run_panel.show(event)
+            if isinstance(event, LogsOpened):
+                self._logged = (event.directory, event.stem)
             if isinstance(event, RunBegun):
                 self._run_begun(event)
             if isinstance(event, StateRead):
@@ -1954,11 +1967,21 @@ class MainWindow(QMainWindow):
         return thread
 
     def _report_inputs(self) -> tuple[str, str, str]:
-        """`(directory, stem, transcript)` of the run in flight or else the last one."""
+        """`(directory, stem, transcript)` of the run in flight or else the last one.
+
+        The last work to open a transcript, whether or not it got as far as a file: a run
+        stopped before its first frame was kept under its stem by the owner, and Report
+        reuses that folder only if it is given the stem (`keep.for_report`, lab record,
+        task 104). The run paths are the fallback for a window that has opened no
+        transcript this session.
+        """
         from ..report import transcript_beside
 
-        raw, summed, stem = self._live_run if self._live_run[2] else self._last_run_paths
-        directory = os.path.dirname(raw or summed) or self._directory()
+        directory, stem = self._logged
+        if not stem:
+            raw, summed, stem = (self._live_run if self._live_run[2]
+                                 else self._last_run_paths)
+            directory = os.path.dirname(raw or summed) or self._directory()
         return directory, stem, transcript_beside(directory, stem)
 
     def report_url(self, *, report_id: str = "", kept: str = "") -> str:

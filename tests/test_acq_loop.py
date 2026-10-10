@@ -2878,3 +2878,44 @@ def test_a_recording_never_closed_reads_incomplete(rig, tmp_path):
         recording.close()
     assert ended(recording.raw_path)[0] == "incomplete"
 
+
+
+# --- a clock-lock refusal of `acquire` (lab #8) -----------------------------------------
+
+
+CLOCK_LOCK_REFUSAL = (f"Error during call to digitizer. Error Code: {acq.CLOCK_LOCK_ERROR_CODE}"
+                      "Error Message: Unexpected response: Cannot lock clock synthesizer")
+
+
+def test_a_clock_lock_refusal_is_tried_once_more_after_the_settings_are_sent_again(rig):
+    rig.fake.refuse["acquire"] = CLOCK_LOCK_REFUSAL
+    rig.fake.refuse_times["acquire"] = 1
+    events, paused, prepared = [], [], []
+    width = acq.start_chain_retrying(rig.console, rig.stream, progress=events.append,
+                                     prepare=lambda: prepared.append(True),
+                                     sleep=paused.append)
+    assert width.num_samples > 0 and rig.console.running is False
+    assert paused == [acq.CLOCK_LOCK_RETRY_DELAY_S] and prepared == [True]
+    [retried] = events
+    assert isinstance(retried, acq.ClockLockRetried)
+    assert retried.text.startswith("retried after a clock-lock failure")
+
+
+def test_a_second_clock_lock_refusal_is_a_sentence_and_any_other_refusal_is_not_retried(
+        rig):
+    rig.fake.refuse["acquire"] = CLOCK_LOCK_REFUSAL
+    with pytest.raises(acq.ClockLockFailed, match="twice") as caught:
+        acq.start_chain_retrying(rig.console, rig.stream, prepare=lambda: None,
+                                 sleep=lambda _: None)
+    assert caught.value.cause.code == acq.CLOCK_LOCK_ERROR_CODE
+    assert "Error Code" not in str(caught.value)
+
+    rig.fake.refuse["acquire"] = ("Error during call to digitizer. Error Code: "
+                                  "-1074118653Error Message: Acquisition running")
+    prepared = []
+    with pytest.raises(acq.ConsoleCommandError) as caught:
+        acq.start_chain_retrying(rig.console, rig.stream,
+                                 prepare=lambda: prepared.append(True),
+                                 sleep=lambda _: None)
+    assert caught.value.code == -1074118653 and not prepared
+    assert acq.ConsoleCommandError("the console refused 'acquire': bad").code is None

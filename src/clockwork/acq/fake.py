@@ -200,6 +200,14 @@ class FakeConsole:
         tell them apart.
         """
 
+        self.refuse_times: dict[str, int] = {}
+        """How many more times a command in `refuse` is refused, where it is
+        here; a command absent from this is refused every time. At zero its
+        `refuse` entry is dropped and the command answers normally, which is a
+        transient driver failure such as the clock-lock refusal of `acquire`
+        (`CLOCK_LOCK_ERROR_CODE`, lab record, task 104).
+        """
+
         self.subscriber_wait_s = subscriber_wait_s
         """How long to wait for a subscription to arrive before publishing.
 
@@ -500,6 +508,11 @@ class FakeConsole:
             # answers with, and nothing else happens: the command threw before
             # it did anything.
             self._respond(identity, f"{ERROR_PREFIX} {self.refuse[command]}".encode())
+            if command in self.refuse_times:
+                self.refuse_times[command] -= 1
+                if self.refuse_times[command] <= 0:
+                    del self.refuse_times[command]
+                    del self.refuse[command]
             return
         handler = getattr(self, "_do_" + command.replace(" ", "_"), None)
         if handler is None:
