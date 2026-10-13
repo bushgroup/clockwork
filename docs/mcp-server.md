@@ -198,8 +198,8 @@ Before `arm` or `acquire` submits anything, the server decides whether the metho
 Every send must carry a request, under `--fake` as well. Every send must also lie inside the
 instrument's [standing limits](instrument-limits.md): a template they list, at knob values inside
 their ranges, on boxes they allow, inside the budget of the daemon session. Against the
-instrument, a server with no limits refuses every send and a hand-written method is refused
-outright; the window is the surface for those. `status` reports a refusal that applies to every
+instrument, a server with no limits refuses every send, and a hand-written method is refused
+outright unless the limits set `allow.hand_written`; the window is the surface for those. `status` reports a refusal that applies to every
 send under `sends_refused`, and the budget left under `budget`.
 
 `arm` then reads back every box the method names, with getters only, and compares what each box

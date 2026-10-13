@@ -14,9 +14,13 @@ asks for approval; the limits are what that act authorizes, and the budget is co
 from it, so a budget spent is renewed by a person restarting the daemon and by nothing
 else (Matt, 2026-09-24).
 
-**Templates only.** The limits narrow a template's own knob ranges and never widen them;
-a hand-written method has no knobs to narrow, so against the instrument it is refused
-outright, and the window is the surface for one (lab record, task 71).
+**Templates, and hand-written methods only by a switch.** The limits narrow a
+template's own knob ranges and never widen them; a hand-written method has no knobs to
+narrow, so against the instrument it is refused outright unless the limits set
+`allow.hand_written`, and the window is the surface for one (lab record, task 71). The
+switch admits a hand-written method whole, with nothing bounding its strings; the boxes it
+may address, the budget and the cold-start check still apply (Matt, 2026-10-13; lab
+record, task 108).
 
 **The cold-start check is about the boxes.** A method that declares only what its
 experiment varies runs on whatever the last experiment left behind, and a cold instrument
@@ -92,7 +96,8 @@ NO_LIMITS = (
 
 HAND_WRITTEN = (
     "a hand-written method has no knobs for the standing limits to bound, so an agent "
-    "may send only templates to the instrument; run this method from the window")
+    "may send only templates to the instrument unless the limits set "
+    "allow.hand_written; run this method from the window")
 
 _HEX = re.compile(r"[0-9a-f]+\Z")
 
@@ -200,6 +205,8 @@ class Limits:
     cold_start: str = "refuse"
     description: str = ""
     path: str = ""
+    hand_written: bool = False
+    """Whether a hand-written method may be sent to the instrument (`allow.hand_written`)."""
 
     def entry_for(self, template_hash: str) -> TemplateLimits | None:
         return next((entry for entry in self.templates if entry.matches(template_hash)),
@@ -316,17 +323,23 @@ def from_dict(data: Mapping, path: str = "") -> Limits:
     mode = _mode(data.get("cold_start", "refuse"), "cold_start", problems) or "refuse"
 
     boxes: tuple[str, ...] = ()
+    hand_written = False
     allow = data.get("allow")
     if not isinstance(allow, dict):
         problems.append("[allow] is required, with boxes = the boxes an agent may address")
     else:
-        _unknown(allow, "allow", ("boxes",), problems)
+        _unknown(allow, "allow", ("boxes", "hand_written"), problems)
         raw = allow.get("boxes")
         if not isinstance(raw, list) or not raw \
                 or not all(isinstance(name, str) and name for name in raw):
             problems.append("allow.boxes must be a list of box names, at least one")
         else:
             boxes = tuple(raw)
+        raw = allow.get("hand_written", False)
+        if not isinstance(raw, bool):
+            problems.append("allow.hand_written must be true or false")
+        else:
+            hand_written = raw
 
     budget = Budget(0, 0, 0.0)
     raw_budget = data.get("budget")
@@ -368,7 +381,7 @@ def from_dict(data: Mapping, path: str = "") -> Limits:
     if problems:
         raise LimitsError(problems)
     return Limits(boxes=boxes, budget=budget, templates=tuple(templates), cold_start=mode,
-                  description=description, path=path)
+                  description=description, path=path, hand_written=hand_written)
 
 
 def loads(text: str, path: str = "") -> Limits:
@@ -425,7 +438,7 @@ def check(method: Method | None, rendered: Rendered | None, limits: Limits | Non
     problems: list[str] = []
     if method is not None:
         if rendered is None:
-            if real:
+            if real and not limits.hand_written:
                 problems.append(HAND_WRITTEN)
         else:
             problems += _template_problems(rendered, limits)

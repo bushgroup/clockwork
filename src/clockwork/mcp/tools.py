@@ -544,7 +544,8 @@ class Toolbox:
 
         Refused, before anything is sent, outside the instrument's standing limits:
         a template they do not list, a knob outside their range, a box they do not
-        allow, a spent budget, or on the instrument a hand-written method. Then the
+        allow, a spent budget, or on the instrument a hand-written method unless they
+        set `allow.hand_written`. Then the
         boxes are read back and compared with what the method declares: what a box
         holds that the method leaves as found is refused or cautioned by the limits'
         cold-start rule, and the cautions come back under `cold_start` for you to
@@ -916,6 +917,7 @@ class Toolbox:
             "limits": None if limits is None else {
                 "path": limits.path, "description": limits.description,
                 "cold_start": limits.cold_start, "boxes": list(limits.boxes),
+                "hand_written": limits.hand_written,
                 "templates": [entry.key for entry in limits.templates],
                 "problems": limits.against(self._templates()),
             },

@@ -10,7 +10,8 @@ agent's judgement (lab record, task 69). Two rules:
 - **Every send is inside the standing envelope** (`clockwork.envelope.check`): a
   template the instrument's limits list, at knob values inside their ranges, on boxes
   they allow, inside the daemon session's budget. Against the instrument, no limits
-  refuses everything and a hand-written method is refused outright; a rehearsal with no
+  refuses everything and a hand-written method is refused outright unless the limits
+  set `allow.hand_written` (lab record, task 108); a rehearsal with no
   limits is refused nothing, and one given limits is held to them exactly as the
   instrument would be (lab record, task 71).
 

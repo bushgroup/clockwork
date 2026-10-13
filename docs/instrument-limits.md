@@ -33,6 +33,7 @@ cold_start = "refuse"
 
 [allow]
 boxes = ["box1", "box2", "box3"]
+hand_written = false
 
 [budget]
 max_runs = 20
@@ -57,6 +58,13 @@ bias_hold_v = 10.0
   `caution`. A template entry may carry its own.
 - `allow.boxes` lists the boxes, by the names a method uses, that an agent may address. A method
   that names any other box is refused.
+- `allow.hand_written`, `false` by default, admits hand-written methods, i.e., methods not
+  rendered from a template, to the instrument. A hand-written method has no knobs, so the
+  limits cannot narrow it: with the key `true`, an agent may send any hand-written method to the
+  boxes `allow.boxes` lists, and only those boxes, the budget and the cold-start check below
+  stand between its strings and the instrument. Set it for a sitting that needs a method no
+  template renders, in a document of its own given with `--limits`, and leave the standing
+  document without it.
 - `budget` is what one daemon session may do unattended. `max_runs` counts acquisitions, i.e.,
   `acquire` calls, however many files each makes, and the points of a
   [series](series-file-format.md), one acquisition each; `max_replicates_per_run` bounds the files
@@ -94,7 +102,7 @@ Before `arm` or `acquire` submits a job, the server refuses:
 
 1. a request with no words, i.e., a send that cannot say what it is for;
 2. against the instrument, a hand-written method, which has no knobs for the limits to bound
-   and is run from the window instead;
+   and is run from the window instead, unless `allow.hand_written` is `true`;
 3. a template the limits do not list;
 4. a knob outside its narrowed range, and a fixed knob at any value but its own;
 5. a method that addresses a box outside `allow.boxes`;

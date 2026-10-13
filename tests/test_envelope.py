@@ -193,8 +193,39 @@ def test_the_budget_refuses_run_n_plus_one_too_many_replicates_and_too_long():
 
 def test_a_hand_written_method_is_refused_against_the_instrument_only():
     method = render(b_ticks=300).method
+    assert not LIMITS.hand_written
     assert check(method, None, LIMITS, Ledger(), real=True) == [HAND_WRITTEN]
     assert check(method, None, LIMITS, Ledger(), real=False) == []
+
+
+def switched(value: str) -> str:
+    """The test limits with `allow.hand_written` set to `value`, as TOML."""
+    return limits_text().replace('boxes = ["box1"]\n',
+                                 f'boxes = ["box1"]\nhand_written = {value}\n')
+
+
+def test_allow_hand_written_lets_a_hand_written_method_through_whole():
+    limits = envelope.loads(switched("true"))
+    assert limits.hand_written
+    method = render(b_ticks=500).method
+    # b_ticks 500 is outside the template entry's range: a hand-written method is not
+    # held to any template's knobs, only to the boxes and the budget.
+    assert check(method, None, limits, Ledger(), real=True) == []
+    assert envelope.loads(switched("false")).hand_written is False
+    renamed = dataclasses.replace(method, boxes=(dataclasses.replace(
+        method.boxes[0], name="box9"),))
+    [boxed] = check(renamed, None, limits, Ledger(), real=True)
+    assert "do not allow box9" in boxed
+    [spent] = check(method, None, limits, Ledger(runs=3), real=True)
+    assert "made its 3 acquisitions" in spent
+    [many] = check(method, None, limits, Ledger(), real=True, replicates=3)
+    assert "3 replicates is more than the 2" in many
+
+
+def test_allow_hand_written_must_be_true_or_false():
+    with pytest.raises(LimitsError) as caught:
+        envelope.loads(switched('"yes"'))
+    assert caught.value.problems == ["allow.hand_written must be true or false"]
 
 
 # --- the cold-start check --------------------------------------------------------------

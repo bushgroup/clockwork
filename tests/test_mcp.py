@@ -138,7 +138,8 @@ def audit_lines(output: str) -> list[dict]:
 
 
 def limits_text(library: str, *, templates: tuple[str, ...] = ("line-b.toml",),
-                cold_start: str = "caution", max_runs: int = 1) -> str:
+                cold_start: str = "caution", max_runs: int = 1,
+                hand_written: bool = False) -> str:
     """Limits over the library's templates: `b_ticks` 200 to 450, box1 only."""
     entries = []
     for name in templates:
@@ -147,6 +148,7 @@ def limits_text(library: str, *, templates: tuple[str, ...] = ("line-b.toml",),
         entries.append(f'[templates.{key}]\nhash = "{loaded.hash[:12]}"\n'
                        f"[templates.{key}.knobs]\nb_ticks = {{ min = 200, max = 450 }}\n")
     return (f'schema_version = 1\ncold_start = "{cold_start}"\n[allow]\nboxes = ["box1"]\n'
+            f"hand_written = {str(hand_written).lower()}\n"
             f"[budget]\nmax_runs = {max_runs}\nmax_replicates_per_run = 2\nmax_hours = 8\n"
             + "".join(entries))
 
@@ -330,6 +332,12 @@ def test_the_interlock_refuses_a_real_owner_and_an_empty_request(fake_owner, lib
         limited.call("arm", {"request": REQUEST, "initials": "zz",
                              "method": "line-b-default.toml"})
     assert str(caught.value) == HAND_WRITTEN
+    assert limited.call("status", {})["limits"]["hand_written"] is False
+    switched = envelope.loads(limits_text(library, hand_written=True))
+    hand = method_module.load(os.path.join(library, "line-b-default.toml"))
+    assert guard_acquisition(real, None, REQUEST, method=hand, limits=switched) == []
+    assert Toolbox(real, library=library, output=str(tmp_path), limits=switched).call(
+        "status", {})["limits"]["hand_written"] is True
     with pytest.raises(ToolFailure, match="outside the standing limits"):
         limited.call("arm", {"request": REQUEST, **chosen, "knobs": {"b_ticks": 500}})
     assert limited.call("status", {})["sends_refused"] is None

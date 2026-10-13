@@ -543,7 +543,7 @@ def check_envelope() -> None:
     A limits document loaded and held against a template: a render inside it passes,
     and each refusal is its own sentence -- a knob outside the range, a fixed knob
     moved, a box not allowed, the budget's next acquisition, a hand-written method
-    against the instrument. Then the cold-start check over stand-in boxes read back
+    against the instrument unless the limits set `allow.hand_written`. Then the cold-start check over stand-in boxes read back
     with getters, as a send reads them: the one DC bias channel the method leaves
     undeclared is a refusal, and an ARB stand-in's two RF heads at 0 % drive are not.
     Last, the tools over a `--fake` owner given the limits refuse that method's `arm`
@@ -641,6 +641,12 @@ arm = ["SMOD,TBL"]
                "rehearsal",
                check(rendered.method, None, limits, Ledger(), real=True) == [HAND_WRITTEN]
                and check(rendered.method, None, limits, Ledger(), real=False) == [])
+    switched = dataclasses.replace(limits, hand_written=True)
+    check_true("allow.hand_written lets a hand-written method through, still held to the "
+               "boxes it may address",
+               check(rendered.method, None, switched, Ledger(), real=True) == []
+               and any("do not allow box9" in line
+                       for line in check(renamed, None, switched, Ledger(), real=True)))
 
     sequencer = Box(transport=FakeBox(rf_channels=2), name="box1")
     arb = Box(transport=FakeBox(arb_modules=4, rf_channels=2, dcb_channels=0), name="box2")
