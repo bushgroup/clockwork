@@ -1419,7 +1419,7 @@ gates off *n−1* of every *n* waveform cycles on the compress module
 |---|---|---|
 | `SARBCTBL`/`GARBCTBL` | string ≤ 130 chars | Compression table (mini-language below); volatile, not saved |
 | `SARBCMODE`/`GARBCMODE` | `Normal\|Compress` | Force mode (drives the compress line directly) |
-| `SARBCORDER`/`GARBCORDER` | 0–65535 | Compression order (>255 uses the extended TWI command) |
+| `SARBCORDER`/`GARBCORDER` | 0–65535 | Compression order. Takes no module: `SARBCORDER` writes board index 1 (`CompressBoard`, >255 uses the extended TWI command), `GARBCORDER` takes no argument and reports the controller's saved copy (§8.4) |
 | `SARBCTD`/`GARBCTD` | ms (float) | Trigger delay |
 | `SARBCTC`/`GARBCTC` | ms | Compress time per cycle |
 | `SARBCTN`/`GARBCTN` | ms | Normal time per compress cycle |
@@ -1811,12 +1811,27 @@ RF heads; `GTBLFRQ` and `GTBLSTA` for the sequencer; and per ARB module
 `GWFREQ`, `GWFVRNG`, `GWFDIR`, `GARBMODE`, `GALTWFM`, `GALTENA`,
 `GALTHWD` and `GARBCTBL` (§6.2, §6.4, §6.6).
 
-Two of those have a known refusal that is not a defect. `GARBCORDER` is
-rejected with error 3 and the text *"already in LOC mode"* on every
-module of both ARB boxes (2026-09-15) — a getter refused for a mode
-reason, whose message names the mode the box is already in. And
-`SARBCCLK` has no getter at all on 1.243t, so a module's common-clock
-assignment is not readable and rests on the strings that set it (§7).
+Two things are missing from that list. `GARBCORDER` takes no
+argument: the command table at `bd32aae` registers it with zero
+(`Serial.cpp`), and `GetARBCorder` (`ARBcompressor.cpp`) prints the
+controller's own saved compression order, not a module's. The
+per-module form `GARBCORDER,<m>` is therefore refused for its
+argument: when a token arrives where the line should end,
+`ProcessCommand` sends a NAK without setting an error code, so a
+`GERR` read afterwards returns whatever code an earlier rejection
+left. On both ARB boxes (2026-09-15) that was error 3, *"already in
+LOC mode"*, a stale code of the kind `SMOD,LOC` leaves on a box that
+is already local (§4), and it was misread at the time as a refusal on
+mode grounds. The bare form answers: `GARBCORDER` returned 0 on
+BUFFLEHEAD (lab record, task 10). Its setter takes no module either:
+`SARBCORDER,<n>` stores *n* in the same controller copy and writes it
+over TWI to board index 1 only (`CompressBoard`, `include/ARB.h`;
+§6.6), so neither command addresses any other module. The ARB2 module
+firmware has no TWI read of a module's order (its `TWI_READ_*` set is
+frequency, status, points per period, version and sweep status), so
+what a module actually holds cannot be read back at all. And `SARBCCLK`
+has no getter at all on 1.243t, so a module's common-clock assignment
+is not readable and rests on the strings that set it (§7).
 
 ### 8.5 Box health getters: `UPTIME`, `STATUS`, `THREADS`
 

@@ -96,10 +96,13 @@ The first four are the waveform state a transmission or compression experiment
 depends on; the last three are the alternate-waveform system (§6.4), whose `REV`
 on one module per box is a persistent setting neither golden method sets.
 
-`GARBCORDER` is deliberately absent. It is refused with error 3 on every module
-of both boxes -- a getter refused for a mode reason, the message naming the mode
-the box is already in -- and nothing clockwork does needs the compression order
-(lab record, task 40). `SARBCCLK` has no getter at all on this firmware (§7).
+`GARBCORDER` is deliberately absent. It takes no module: the firmware registers
+it with no argument and it prints the controller's own saved order, so the
+`GARBCORDER,<m>` form is refused for its argument, a NAK with no error code of
+its own (the error 3 once read after it was a stale code). Its setter writes
+board index 1 only, no module's order can be read back over TWI, and nothing
+clockwork does needs the compression order (§8.4; lab record, task 40).
+`SARBCCLK` has no getter at all on this firmware (§7).
 """
 
 COMPRESSOR_GETTERS: tuple[str, ...] = ("GARBCTBL", "GARBCTD")
