@@ -1665,6 +1665,25 @@ def main() -> int:
             "a tick count that is not whole is refused, asking for round()",
             "round() its derivation" in str(exc),
         )
+    # The ARB compressor reads a compress-line time (`c`, `n`, `t`) and a module's order (`J`)
+    # as whole numbers (docs/mips-wire-format.md section 6.6), so a hole there must come
+    # out whole; the per-repetition CLOCK method's table is of this shape.
+    line = templates.loads_template(template_sample.replace(
+        '"STBLDAT;0:[A:{cycles},{end_tick}:];"', '"SARBCTBL,J3{cycles}[HRc{length_ms}n1C]1"'))
+    check_true(
+        "a compression order and a compress-line time render whole, as the box reads them",
+        templates.render(line, {"cycles": 4, "length_ms": 16.0}, {"sample": "check"})
+        .method.boxes[0].load == ("SARBCTBL,J34[HRc16n1C]1",),
+    )
+    try:
+        templates.render(line, {"length_ms": 12.5}, {"sample": "check"})
+        check_true("a compress-line time that is not a whole millisecond is refused", False)
+    except templates.TemplateError as exc:
+        check_true(
+            "a compress-line time that is not a whole millisecond is refused, asking for round()",
+            "a compress-line time, in whole milliseconds" in str(exc)
+            and "round() its derivation" in str(exc),
+        )
     try:
         templates.loads_template(template_sample.replace("/ tick_us)", "/ period_us)"))
         check_true("a name nothing defines is refused when the template is loaded", False)

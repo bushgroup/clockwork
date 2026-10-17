@@ -25,6 +25,17 @@ Custom Electronics vendor documents, inventoried in the lab's vendor-document ma
   `1e8a149` (2024-12-07), version 1.24: the ARB module's own on-board
   firmware (the other end of the controller↔module link). Note the
   caveat in §6.4: this clone predates the alternate-waveform feature.
+- **ARB2 module firmware:** `github.com/GordonAnderson/ARB2`, commit
+  `4ae6acb` (2026-10-10), version 2.27. This is the line the installed
+  modules run: every ARB module on BUFFLEHEAD answers `GARBVER` with
+  `ARB version: 2.25` (lab record, task 10), and 2.25 (April 2024) is
+  an ARB2 revision, not a 1.x one. ARB2 is the firmware of the rev 4.x
+  module board, which carries its own SAM3X8E; `ARB` 1.24 belongs to
+  the older plug-in board. Where the two disagree, the module-side
+  statements in §6 follow ARB2. The 2.25 source itself is not in the
+  repository's history, which starts at the 2.27 PlatformIO port, and
+  the revision log lists no change to the compression, sync or DMA
+  paths between 2.25 and 2.27.
 - **Vendor docs:** primarily *Pulse sequence generation*
   (`Pulse_Sequence_Generation.pdf`), which matches the firmware on every
   overlapping fact except two nuances flagged inline below; for §6,
@@ -1230,11 +1241,16 @@ Module-side interpretation (module firmware `ARB.ino`, v1.24 baseline):
 
   The UI "Dir input" is analogous: a front-panel-only DI attachment that
   flips TW direction on an input change (TWI-paced, not tick-accurate).
-- **Compress**, level-sensitive, if the module's compress-follow flag
-  is set (`SARBCPEX,<mod>,TRUE`): line HIGH = compress mode (the
-  module latches its compression order and switches waveform), LOW =
-  normal. `SARBHISR,<mod>,TRUE` makes the module service this line in
-  an ISR instead of polling once per waveform cycle.
+- **Compress**, level-sensitive, if the module's compress-follow flag is
+  set (`SARBCPEX,<mod>,TRUE`): line HIGH = compression enabled at the
+  module's programmed order (`SetCompression(true)`, the order copied to
+  `WorkingOrder` at that moment), LOW = normal. A module with
+  `SALTHWD,<mod>,TRUE` takes the line as its alternate-waveform trigger
+  instead (§6.4, §6.6). `SARBHISR,<mod>,TRUE` makes the module service
+  this line in an ISR instead of polling it once per pass of its main
+  loop, and acts only once `SARBCMPLN` installs the handler (§6.6). At
+  power-up the controller enables following on board index 1 only and
+  leaves modules 3 and 4 as it finds them (§6.6).
 
 **Per-module line-role mapping.** Each module is told which physical
 line is its sync and which its compress: `SARBSYNLN,<mod>,1|2`
@@ -1282,6 +1298,13 @@ between primary and alternate on a command or a hardware signal.
 > `GARBVER` check mandatory at deploy time, and any hairline behavior
 > question (exact switch latency, edge cases) a hardware test, not a
 > source read.
+>
+> **Update, 2026-10-14:** the installed modules run the ARB2 line
+> (version 2.25; see Provenance), whose source at commit `4ae6acb`
+> does carry the alternate-waveform commands, `SetAlternateWaveform`
+> and the compress-line handling. The module-side statements in this
+> section can now be read against `src/ARB2.cpp` and `src/Hardware.cpp`
+> of that commit. The `GARBVER` check at deploy time stays.
 
 **Alternate waveform types** (`SALTWFM`; encoded 1–5 over TWI):
 
@@ -1398,22 +1421,41 @@ tick-accurate as described in §6.3. `c:A` calls
 compression-table state machine of §6.6 (`c:T` starts the Twave one,
 §5).
 
-### 6.6 ARB compressor (`c:A` target: future CRIMP support)
+### 6.6 ARB compressor: what the modules were measured doing
 
-Deferred capability for Layer 1 v1 (current experiments don't use
-compression), documented because `c:A` is a table channel and the
-compression table is the module-orchestration mini-language.
+The ARB compressor is a MIPS-side state machine on a dedicated timer
+(`ARBcompressor.cpp`), started by `c:A`, `TARBTRG` or a UI-configured
+external input. It walks the compression table, driving the **compress
+broadcast line** (§6.3) with pin writes and the modules with TWI
+parameter writes. At power-up `ARBcompressor_init` enables compress-line
+following on `CompressBoard` (board index 1, the second module) and
+disables it on modules 1 and 2 only; modules 3 and 4 keep whatever they
+hold. What this section states as measured was measured on one
+instrument's ARB box (MIPS 1.243t, four modules at ARB 2.25, 14914.8 Hz)
+with a scope on the modules' outputs (lab record, task 114); the
+firmware quoted is the MIPS clone at `bd32aae` and the ARB2 clone at
+`4ae6acb` named under Provenance.
 
-Structure parallels the Twave compressor (§5) but is richer: a
-MIPS-side state machine on a dedicated timer (`ARBcompressor.cpp`),
-started by `c:A`, `TARBTRG`, or a UI-configured external input. It
-walks the compression table, driving the **compress broadcast line**
-(normal/compress states) and per-module TWI parameter writes. By
-convention ARB module 2 is the compress region (`CompressBoard = 1`,
-i.e. board index 1): at init the controller enables compress-line
-following on that module only. Order semantics: compression order *n*
-gates off *n−1* of every *n* waveform cycles on the compress module
-(order 1 ≡ normal).
+**Order semantics, per module.** `J<mod><order>` (walked at `TARBTRG` +
+`SARBCTD`) writes the module's order over TWI; `m<mod>C` enables
+compression on that module and `m<mod>N` disables it. With compression
+enabled the module's DMA handler plays the primary waveform period once
+in every `WorkingOrder` buffer passes and the alternate period the rest
+of the time, switching only at cycle boundaries (ARB2 `Hardware.cpp`,
+`DMAC_Handler`, `Bcount == WorkingOrder`); the clock never stops, so a
+neighbour on the same frequency keeps its phase relation through and
+after the window. Order *n* ≥ 2 is CRIMP at ratio *n*. **Order 0 plays
+the alternate period on every pass** (`Bcount > 0` is always true): a
+module at `J<mod>0` under `m<mod>C` holds the alternate waveform for the
+whole window. Order 1 is normal. The alternate period's content is the
+module's `SALTWFM` type (§6.4): `COMP`, the default, holds every channel
+at the primary period's last sample, a stationary wave at the
+end-of-cycle pattern; `REV` is the primary waveform with its phase step
+reversed, which is how a region is run backwards for a window
+(`SALTWFM,<mod>,REV` with `J<mod>0` and `m<mod>C`). Measured: a module
+at `J34`, `J316` or `J364` holds *n* − 1 cycles between played ones,
+from the first cycle boundary after `m3C` lands to the one after `m3N`,
+and a table without `s` leaves every module's clock running.
 
 | Command | Args | Notes |
 |---|---|---|
@@ -1432,7 +1474,7 @@ gates off *n−1* of every *n* waveform cycles on the compress module
 Compression-table ops (`ARBcompressor.cpp:
 ARBgetNextOperationFromTable()`): the Twave set (§5), `N`/`C` passes,
 `D` delay, `O` order, `V`/`v` module 1/2 voltage, `F` frequency,
-`c`/`n`/`t` times, `s`/`r` clock stop/restart, `S` switch, `o`/`g`/`G`
+`c`/`n`/`t` times (whole milliseconds, below), `s`/`r` clock stop/restart, `S` switch, `o`/`g`/`G`
 gate times, `M` amplitude mode, `K`/`k` order ramp (Cramp) rate/step,
 `[`…`]`*n* loops, plus ARB-only ops: `W`*n*/`w`*n* waveform type for
 module 1/2 (1=SIN…5=ARB), `L`/`l` module 3/4 voltage, `B`/`b`/`E`/`e`
@@ -1475,6 +1517,89 @@ host that sends `TARBTRG` and then immediately releases the edge the
 halt waits for will miss it. Set `SARBCTD` explicitly rather than
 inheriting whatever a box has saved; `GARBCTD` reads it back.
 
+**The TWI race.** `m<mod>C`, `m<mod>N` and `J` are TWI writes issued
+from the compressor timer ISR. When the bus is busy they are queued
+(`TWIqueue`), and a queued `m<mod>C` reaches the module as compress off
+(§7 has the mechanism). On the instrument measured, the two writes at
+the R edge of a per-repetition table (`m1C`, `m3C`) are lost together in
+9–23 % of repetitions per run, and a third state, a hold of the whole
+window, appears in 5–20 % of frames, which is what order 0 does: the
+`J3n` value mangled on the bus. The loss is per repetition and random
+along a run.
+
+**The compress broadcast line.** The table ops `C` and `N` drive the
+box's compress line high and low with a pin write inside the compressor
+timer ISR (`ARBcompress`/`ARBnormal`), tick-accurate and with no TWI.
+`C` holds the line high for the compress time and then low for the
+normal time before the next op is read; `N` holds it low for the
+non-compress time. The three times are the `c`, `n` and `t` ops, in
+**whole milliseconds**: the op's integer value, any fraction after the
+point discarded, converted to counts of the 656250 Hz compressor clock.
+`D` holds whatever the line is. No op is read while a `C` runs, so a TWI
+switch cannot be placed inside a `C` window. A module follows the line
+as compression when `SARBCPEX,<mod>,TRUE` (`TWI_SET_COMP_EXT`,
+`CompressHardware`): its `compressISR` calls `SetCompression(line
+HIGH)`, which copies the programmed order into `WorkingOrder`, so the
+order is whatever the last `J<mod><order>` or `SARBCORDER` left. With
+`SARBHISR,<mod>,TRUE` the line is serviced in the module's pin-change
+interrupt; otherwise it is polled once per pass of the module's main
+loop. Neither `SARBCPEX` nor `SARBHISR` has a getter: a method that uses
+the line declares all four modules every time, and the scope is the
+record. **`SARBHISR,<mod>,TRUE` alone leaves the module deaf**
+(measured: order 1 and no reversal in 100 of 100 frames): the module's
+`TWI_SET_HWDISR` handler sets only the `ISRcompress` flag, the line's
+interrupt handler (`ARBline2stateISR = compressISR`) is installed at
+boot and by `TWI_SET_COMPLINE` only, and the main loop stops polling
+once the flag is set. A method that turns the ISR on after boot sends
+`SARBCMPLN,<mod>,2` (line 2 is the default compress line, so no role
+moves) after `SARBHISR`. Measured with the ISR installed: the
+compress-following module's first held cycle begins **0.105 ms after the
+R edge** (median over 7 runs of 99 frames, 0.000–0.135 ms, sd 0.02 ms:
+the ISR's pin write and the next cycle boundary), and its release lands
+**16.063 ms** after the edge for `c16` (16.061–16.157 ms); over TWI the
+same switches read 0.709 and 16.264 ms. Whether a module with `SARBHISR`
+FALSE misses short windows was not measured; the polled path reads the
+line as a level once per main-loop pass.
+
+**The same line as the alternate-waveform trigger.** A module with
+`SALTHWD,<mod>,TRUE` reads the compress line as its alternate-waveform
+trigger **instead of** as compression: `compressISR` returns after the
+alternate-waveform branch, so `SARBCPEX` is ignored on that module. In
+`SALTTMODE LEVEL` the alternate waveform plays while the line is high;
+in `POS` (or `NEG`) the rising (falling) edge starts it after `SALTDLY`
+ms and the module's own timer (656.25 counts a millisecond) stops it
+`SALTPLY` ms later, so a level of one length on the line can drive an
+alternate waveform of another length on a second module. The edge modes
+need `SARBHISR TRUE` on that module, since the polled path reads the
+line as a level only, and the ISR must be installed with `SARBCMPLN` as
+above. The switch, both ways, is at the next cycle boundary. Measured
+(`SALTDLY,1,0`, `SALTPLY,1,12`, 5 runs of 99 frames): the reversal
+begins **0.134 ms after the R edge** and ends **12.270 ms** after it,
+the same in every frame (two cycles in, the module's own timer out; the
+measure's grid is 68 µs); over TWI (`m1C` at the edge, `m1N` at 12 ms)
+the same reversal began at 0.402 ms and ended between 12.54 and 13.48
+ms, run to run and frame to frame. With `D0.6` before the `C` the line
+rises 0.6 ms later and both switches follow it (0.709 and 0.738 ms).
+After the alternate waveform the module's direction and phase relation
+are as before the window.
+
+**What a per-repetition CLOCK method does with this.** The ARB box's
+table `J34[HRc16n1C]1` squeezes region 3 at order 4 for 16 ms from the R
+edge over the line (`SARBCPEX,3,TRUE`, `SARBHISR,3,TRUE`,
+`SARBCMPLN,3,2`) and reverses region 2 for 12 ms from the same edge as a
+`POS` alternate-waveform trigger (`SALTHWD,1,TRUE`, `SALTTMODE,1,POS`,
+`SALTDLY,1,0`, `SALTPLY,1,12`, `SARBHISR,1,TRUE`, `SARBCMPLN,1,2`), with
+`SARBCPEX,2,FALSE` undoing the power-up default on the second module and
+`SALTHWD` FALSE on the modules that take no trigger. The TWI race is out
+of the per-repetition path: 495 repetitions on the line lost none where
+TWI lost 12 %. The windows are those of the TWI tables, region 2 forward
+12 ms and region 3 squeezed 16 ms (the TWI tables' 16.0366 ms, 239
+cycles, is 16.000 ms, 238.6 cycles, on the line). `SARBCPEX`, `SARBHISR`
+and `SALTHWD` persist in module RAM across acquisitions, so a method
+that ends a sitting on the line sends their FALSEs, and a method that
+uses the line sends its TRUEs and FALSEs every time rather than trusting
+what the modules hold.
+
 ---
 
 ## 7. Open items / to verify on hardware
@@ -1491,10 +1616,12 @@ inspection, not scriptable):
 - Whether any DIO-output→digital-input loopback cables are installed
   (needed for more than two independent ARB trigger groups per box,
   §6.3/§6.4). Part of the pending lab wiring inspection.
-- Scope-check the alternate-waveform switch latency (§6.4 says up to
-  one waveform period, from the manual; the module firmware that
-  implements it isn't public) if Layer 1 timing budgets come to depend
-  on the exact value.
+- **Measured (lab record, tasks 101 and 114):** the alternate-waveform
+  switch latency. Over TWI (`m1C` at a table op) the reversal begins
+  0.4–0.8 ms after the edge; over the compress line a `POS` trigger
+  begins it 0.134 ms after the edge and a compress-following module
+  holds its first cycle 0.105 ms after it, both to the next cycle
+  boundary, the same in every frame (§6.6).
 - **Whether an `SDIO` sent in table mode is applied at the table's next
   event.** §4 reads the firmware as leaving the bit in the image and in
   the shift registers with only the latch missing, which makes the
@@ -1550,7 +1677,13 @@ exists, rather than a one-off manual check:
   particular has no getter on either firmware, so a module's
   as-found common-clock assignment is never readable; the line-role
   config and the common-clock assignment rest on the strings that
-  set them and nothing else.
+  set them and nothing else. **Revised (lab record, task 114):** the
+  setters do exist on 1.243t. `SARBCCLK` in every method's setup is
+  what selects the module a table's `s` freezes, and `SARBCPEX`,
+  `SARBHISR` and `SARBCMPLN` were each acknowledged and acted, the
+  modules following the compress line only after them (§6.6). What
+  the box lacks is a getter for `SARBCPEX` and `SARBHISR`, so the
+  strings that set them remain the only record of what a module holds.
 - Each module's UI "Sync input" config, required for the module to
   follow table `s` events (§6.3 config gotcha), but front-panel-only,
   so it must be inspected/set at the box and persisted with Save.

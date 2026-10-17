@@ -290,6 +290,54 @@ def test_a_compression_table_number_may_not_be_negative():
     assert "the mini-language's numbers start with a digit" in problems_of(exc_info)
 
 
+# --- the compress line ----------------------------------------------------------------
+
+# Box2's compression table in the shape the per-repetition CLOCK method sends over the box's
+# compress broadcast line (wire format section 6.6): the module's order after `J2`, the line
+# high for `c` whole milliseconds, and the module-timed play time of a second module's
+# alternate waveform in its setup.
+LINE = {
+    'wait_ms = { default = 10.0, min = 1.0, max = 50.0, unit = "ms", description = "compression wait" }':
+        'order = { default = 4, min = 1, max = 64, unit = "", description = "compression order" }\n'
+        'squeeze_ms = { default = 16, min = 1, max = 100, unit = "ms", description = "line high" }\n'
+        'play_ms = { default = 12.0, min = 1.0, max = 100.0, unit = "ms", description = "module play" }',
+    'setup = ["SWFREQ,1,15000"]\nload = ["STWCTBL,J22[HRsm2CD5m2ND{wait_ms}r]10"]':
+        'setup = ["SWFREQ,1,15000", "SALTPLY,2,{play_ms}"]\n'
+        'load = ["SARBCTBL,J2{order}[HRc{squeeze_ms}n1C]1"]',
+}
+
+
+def test_the_compress_line_shape_renders_the_order_and_whole_milliseconds():
+    rendered = template.render(loads(**LINE), labels=LABELS)
+    assert rendered.method.boxes[1].load == ("SARBCTBL,J24[HRc16n1C]1",)
+    assert rendered.method.boxes[1].setup == ("SWFREQ,1,15000", "SALTPLY,2,12")
+    turned = template.render(loads(**LINE), {"order": 1, "squeeze_ms": 20, "play_ms": 12.5}, LABELS)
+    assert turned.method.boxes[1].load == ("SARBCTBL,J21[HRc20n1C]1",)
+    assert turned.method.boxes[1].setup[1] == "SALTPLY,2,12.5"
+
+
+def test_a_compress_line_time_and_a_compression_order_must_be_whole():
+    fractional = dict(LINE)
+    fractional[next(iter(LINE))] = fractional[next(iter(LINE))].replace(
+        "order = { default = 4, min = 1, max = 64", "order = { default = 4.0, min = 1.0, max = 64.0"
+    ).replace("squeeze_ms = { default = 16, min = 1, max = 100",
+              "squeeze_ms = { default = 16.0, min = 1.0, max = 100.0")
+    t = loads(**fractional)
+    with pytest.raises(template.TemplateError) as exc_info:
+        template.render(t, {"squeeze_ms": 16.5}, LABELS)
+    assert ("{squeeze_ms} is a compress-line time, in whole milliseconds and must be a whole "
+            "number, but comes to 16.5; round() its derivation") in problems_of(exc_info)
+    with pytest.raises(template.TemplateError) as exc_info:
+        template.render(t, {"order": 2.5}, LABELS)
+    assert "{order} is a module's compression order and must be a whole number" in problems_of(exc_info)
+
+
+def test_the_twave_compressor_times_still_take_a_fraction():
+    t = loads(**{"[HRsm2CD5m2ND{wait_ms}r]10": "[HRc{wait_ms}n1C]10"})
+    rendered = template.render(t, {"wait_ms": 2.5}, LABELS)
+    assert rendered.method.boxes[1].load == ("STWCTBL,J22[HRc2.5n1C]10",)
+
+
 def test_a_hole_outside_a_command_string_or_with_arithmetic_inside_is_refused():
     with pytest.raises(template.TemplateError) as exc_info:
         loads(**{'description = "A minimal two-box method for tests."':

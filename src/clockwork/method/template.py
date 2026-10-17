@@ -420,6 +420,13 @@ def _hole_rule(text: str, start: int) -> tuple[str, str] | None:
     if word in ("SARBCTBL", "STWCTBL"):
         if before.endswith("]"):
             return ("loop", "a compression table's loop count")
+        if re.search(r"[JO]\d*$", before):
+            # `J<mod><order>` and `O<order>`: an order is a whole number (§6.6).
+            return ("count", "a module's compression order")
+        if word == "SARBCTBL" and re.search(r"[cnt]$", before):
+            # The ARB compressor reads its `c`, `n` and `t` times as whole milliseconds and
+            # discards a fraction (§6.6); the Twave compressor's (§5) take floats.
+            return ("count", "a compress-line time, in whole milliseconds")
         return ("unsigned", "a compression table's number")
     return None
 

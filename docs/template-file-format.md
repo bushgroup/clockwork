@@ -140,8 +140,9 @@ number is written in its shortest form with at most four decimals, so a wait of 
 written `208` and `16.7628` stays as it is, which is how the strings are written by hand. Where
 the wire format counts in whole units the hole must come out whole: a time point's tick count
 and a table's cycle count in an `STBLDAT` table
-([`mips-wire-format.md`](mips-wire-format.md) §2), and a compression table's loop count (§6.6).
-A count may not be negative, because a negative count makes the time point dynamic (§2), and no
+([`mips-wire-format.md`](mips-wire-format.md) §2); a compression table's loop count, a module's
+compression order after `J` or `O`, and the compress line's `c`, `n` and `t` times, which the
+controller reads in whole milliseconds (§6.6). A count may not be negative, because a negative count makes the time point dynamic (§2), and no
 number in a compression table may be negative, because the mini-language's numbers start with a
 digit (§5). A loop count of 0 is refused because the table would never terminate.
 

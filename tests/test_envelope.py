@@ -169,6 +169,44 @@ def test_a_fixed_knob_moved_is_refused():
     assert "level_v is fixed at 5.0 V" in refusal and "asked for 6.0" in refusal
 
 
+LINE_TEMPLATE = TEMPLATE.replace(
+    'level_v = { default = 5.0, min = 0.0, max = 20.0, unit = "V", description = "a level" }',
+    'compress_order = { default = 4, min = 1, max = 64, unit = "", description = "CRIMP order" }\n'
+    'squeeze_ms = { default = 16, min = 1, max = 100, unit = "ms", description = "line high" }\n'
+    'reverse_ms = { default = 12.0, min = 1.0, max = 100.0, unit = "ms", description = "play" }',
+).replace(
+    'setup = ["STBLCLK,EXT", "SDCB,2,{level_v}"]\n'
+    'load = ["STBLDAT;0:[A:1,0:A:1:B:1,{b_ticks}:B:0,532:A:0,533:];"]',
+    'setup = ["SARBCPEX,3,TRUE", "SALTPLY,1,{reverse_ms}"]\n'
+    'load = ["SARBCTBL,J3{compress_order}[HRc{squeeze_ms}n1C]1"]',
+)
+LINE_OBJECT = template_module.loads_template(LINE_TEMPLATE)
+
+
+def line_limits(fixed: str = "squeeze_ms = 16") -> envelope.Limits:
+    return envelope.loads(limits_text().replace(
+        "b_ticks = { min = 200, max = 450 }",
+        "compress_order = { min = 1, max = 16 }\nreverse_ms = { min = 8.0, max = 16.0 }",
+    ).replace("level_v = 5.0", fixed).replace(TEMPLATE_OBJECT.hash[:12], LINE_OBJECT.hash[:12]))
+
+
+def test_the_compress_line_knobs_are_bounded_and_fixed_like_any_other():
+    limits = line_limits()
+    inside = template_module.render(LINE_OBJECT, {"compress_order": 4, "b_ticks": 300}, {})
+    assert check(inside.method, inside, limits, Ledger(), real=True) == []
+    order = template_module.render(LINE_OBJECT, {"compress_order": 64, "b_ticks": 300}, {})
+    [refusal] = check(order.method, order, limits, Ledger(), real=True)
+    assert "compress_order = 64 is outside the standing" in refusal and "1 to 16" in refusal
+    window = template_module.render(LINE_OBJECT, {"squeeze_ms": 20, "b_ticks": 300}, {})
+    [refusal] = check(window.method, window, limits, Ledger(), real=True)
+    assert "squeeze_ms is fixed at 16 ms" in refusal and "asked for 20" in refusal
+
+
+def test_a_whole_millisecond_knob_cannot_be_fixed_at_a_fraction():
+    [problem] = line_limits("squeeze_ms = 16.5").against([LINE_OBJECT])
+    assert "fix squeeze_ms at 16.5 and it takes whole values" in problem
+
+
 def test_a_box_the_limits_do_not_allow_is_refused():
     rendered = render(b_ticks=300)
     moved = dataclasses.replace(rendered.method, boxes=(

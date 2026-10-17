@@ -34,10 +34,14 @@ Three terms carry more than one sense and are given both in one entry: *table*, 
   question rather than a free choice.
 - **mainspring.** The lab's UIMF reader and viewer,
   [bushgroup/mainspring](https://github.com/bushgroup/mainspring). It reads what clockwork writes.
-- **CRIMP.** The ion-compression technique the ARB compressor, the `c:A` table channel and the
-  `COMP` alternate waveform exist to support. Version 1 defers it; section 6.6 of
-  [mips-wire-format.md](mips-wire-format.md) documents the hooks so that deferring it costs nothing
-  later.
+- **CRIMP.** Compression ratio ion mobility programming (Garimella et al., *Anal. Chem.* 2016,
+  88, 11877): the downstream region plays its travelling wave once in every *n* cycles and holds
+  the end-of-cycle pattern between, so the ions delivered over a window stack into a packet about
+  *n* times shorter. On the ARB modules here it is compression order *n* on that region's module,
+  switched at cycle boundaries by `m<mod>C`/`m<mod>N` over TWI or by the compress broadcast line;
+  order 0 holds the alternate waveform for the whole window. Section 6.6 of
+  [mips-wire-format.md](mips-wire-format.md) states what the modules were measured doing, and the
+  per-repetition CLOCK method squeezes region 3 at order 4 over the line.
 - **SLIM Reverser.** An external 16-pole bidirectional analog switch that passes a traveling-wave
   signal set through either straight or in reversed electrode order, selected by an isolated
   0 to 5 V control input. It reverses a region downstream of the waveform generator, so its
