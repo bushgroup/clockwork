@@ -425,18 +425,40 @@ replayed markers, and publishes
 
     error data: markers replayed in frame <frame>
 
-followed by its `finished`. Such a frame carries few or no scans, and on 1.4.0 the process that
+followed by its `finished`. Such a frame carries few or no scans, and on 1.4.x the process that
 stopped it cannot acquire again: every later `acquire frame` on it publishes
 
     error unknown error when acquiring UIMF data
 
 and its `finished` at once, with no scans, until the console is restarted (lab record, task
-105). The stop does not keep the samples stream in step either. A new `init` on the same process
-acquires again, but its first frames read misaligned, six times in six. So unlike the other
-`error data:` lines, this one is not a damaged frame that a retry on the same process can
-replace, and a client restarts the console before it acquires the frame again. The restart is
-required rather than a precaution, and clockwork makes it on this line as it does on the
-misalignment line.
+105). The stop does not keep the samples stream in step either. A new acquisition chain on the
+same process (`init`, then `acquire`) acquires again, but its first frames read misaligned, six
+times in six. So unlike the other `error data:` lines, this one is not a damaged frame that a
+retry on the same process can replace, and a client restarts the console before it acquires the
+frame again. The restart is required rather than a precaution, and clockwork makes it on this
+line as it does on the misalignment line.
+
+To find why a 1.4.x process could not acquire after the stop, we read its log against the
+source (lab record, task 83). After the stop, each later frame's markers stream began part way
+through a trigger's records, on a gate with no trigger before it in that acquisition. The
+console's walk passed over such a gate twice over, 32 elements where one hunk is 16, so it
+stepped over every trigger record after it, read past the end of the fetch, and stopped on an
+error thrown as a bare string that only a catch-all handler could see: 250 skipped gates in a
+500-hunk fetch, then the line above, on every frame. Nothing the console keeps from the stopped
+frame survives into the next one, whereas a new chain clears the offset, so the offset lies in
+the stream the driver hands over. From 1.5.0 a gate before an acquisition's first trigger is
+passed over once and logged as
+
+    markers: <n> gates before this acquire's first trigger, <e> sample elements, the first at element <p> in hunk <hunk>, skipped
+
+and an error the acquisition loop cannot classify publishes
+
+    error unknown error when acquiring UIMF data: <what it caught>
+
+What a 1.5.0 process does after a stop is not yet observed. The next frame may acquire with
+its samples out of step, which the misalignment line reports, stop on a second replay, or fail
+with an error that now names its cause. None of these makes the process sound again, so the
+restart rule above does not change.
 
 The ZeroMQ protocol is unchanged in every command and in both replies. A client works against
 either build.
