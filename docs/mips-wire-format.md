@@ -1648,6 +1648,41 @@ arrives while a pass is still in its `D` abandons the pass without its
 `r` and leaves the common clock stopped until the next pass's own `r`,
 so the repetition period must exceed the pass.
 
+**The same on a second box, with the window delayed.** The instrument's
+other ARB box (MIPS 1.235t, four modules at ARB 2.22; its `GCMDS`
+listing carries every setter above and the 1.236-1.243 changelog
+touches none of these paths) was measured on the same cabling with the
+table `J416[HRD90c12n1CsD207r]1`: a `D` before the `C`, so the window
+opens 90 ms after the R edge on the compressor's own timer (lab record,
+task 122). Everything the first box showed held, at these latencies.
+The compress follower ran at order 1 from the edge, re-phased by the
+sync pulse, and took the order `J416` had written in 147 of 147 record
+frames (and `J44`'s 4 in 49 of 49): no queued write was lost on this
+box, whose TWI bus is idle at `SARBCTD` (it has no DC-bias module). Its
+first held cycle began **90.09 ms** after the edge (median; `D90` is
+59062 counts, 89.999 ms), the line fell at ~102.2, `s` froze it at
+**103.038 ms** (sd 2-7 us within a take; the compressor's 102.999 plus
+the ISR) and `r` released it at **310.040 ms** (`D207`'s 309.998 plus
+0.042), the wave resuming where it stalled. In three frames of one take
+every event of the pass came 0.4 ms late together, the edge having been
+serviced late; the stop itself never scattered. **The stop phase on
+this box was fixed, not random**: 0.24 cycle, the same held level in
+282 of 284 frames, where the first box's `s` landed on either level of
+its square wave. Both the compressor's timer and the module's DMA
+restart on the sync pulse are locked to the edge, so with no TWI write
+between the edge and the stop there is nothing to scatter the phase;
+which of the two the first box's two-level result reflects was not
+separated. The alternate-waveform module (`SALTTMODE POS`, `SALTDLY 0`,
+`SALTPLY 10`) reversed **90.10 to 100.29 ms** after the edge in every
+frame, its module timer closing the window before the line fell. `s`
+stopped the common-clock module alone: the alternate-waveform module ran
+backward and the power-up `CompressBoard` module, told `SARBCPEX FALSE`,
+ran forward at order 1 with no reversal and no hold through the frame.
+The clock-stop catch the same box runs today, `J30[HRsD90m3CD10m3ND208r]1`,
+measured beside it: the follower held from 33 us after the edge to
+308.05 ms (`D208`'s 307.999 plus 0.05) and the alternate-waveform
+module reversed 90.4 to 100.6 ms over TWI.
+
 ---
 
 ## 7. Open items / to verify on hardware

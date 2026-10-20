@@ -289,6 +289,17 @@ def test_the_two_hold_forms_walk_to_one_pass_each() -> None:
     assert compression_passes("SARBCTBL,J30[HRc1017n1C]1") == (1,)
 
 
+def test_a_delayed_window_and_the_catch_it_replaces_walk_to_one_pass_each() -> None:
+    """The second box's tables (section 6.6): a `D` before the `C` opens the window on
+    the compressor's timer, the squeeze-then-stop hold follows it, and the clock-stop
+    catch it stands beside freezes at the edge and runs its TWI window inside the hold.
+    `D` takes a whole number here and a float elsewhere; both scan past. One outermost
+    loop, one pass, in each, and `J4{n}` leaves the pass count alone."""
+    assert compression_passes("SARBCTBL,J416[HRD90c12n1CsD207r]1") == (1,)
+    assert compression_passes("SARBCTBL,J44[HRD90c12n1CsD207r]1") == (1,)
+    assert compression_passes("SARBCTBL,J30[HRsD90m3CD10m3ND208r]1") == (1,)
+
+
 def test_a_compression_table_that_cannot_be_read_says_so_rather_than_guessing() -> None:
     """The box syntax-checks nothing on load and skips what it does not know, so an
     unbalanced table is a string this host cannot check rather than one the box would
