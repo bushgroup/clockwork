@@ -270,6 +270,25 @@ def test_an_op_that_swallows_the_next_character_does_not_hide_a_bracket() -> Non
     assert compression_passes("SARBCTBL,[HRm1CS]1g]2G]3r]4") == (4,)
 
 
+def test_the_ramp_ops_take_a_value_and_no_module() -> None:
+    """`K` and `k` (the order ramp) and `O` take a number and nothing else: they
+    write board index 1 whatever module a `J` named, so no module number and no
+    raw character follows them (section 6.6). The walk reads them as plain valued
+    ops, and the loop after them is still the table's one pass."""
+    assert compression_passes("SARBCTBL,J34K60k32767[HRc16n1C]1") == (1,)
+    assert compression_passes("SARBCTBL,O4[HRc16n1C]1") == (1,)
+
+
+def test_the_two_hold_forms_walk_to_one_pass_each() -> None:
+    """The squeeze-then-stop form and the order-0 form of a hold after the
+    squeeze (section 6.6): `s`, `D` and `r` take no raw character, `D` takes a
+    float the walk scans past, and the whole-millisecond `c` is a count. One
+    outermost loop, one pass, in each."""
+    assert compression_passes("SARBCTBL,J34[HRc16n1CsD1000r]1") == (1,)
+    assert compression_passes("SARBCTBL,J34[HRc16n1CsD0.5r]1") == (1,)
+    assert compression_passes("SARBCTBL,J30[HRc1017n1C]1") == (1,)
+
+
 def test_a_compression_table_that_cannot_be_read_says_so_rather_than_guessing() -> None:
     """The box syntax-checks nothing on load and skips what it does not know, so an
     unbalanced table is a string this host cannot check rather than one the box would

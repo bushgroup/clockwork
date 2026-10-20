@@ -1486,6 +1486,18 @@ lowercase = falling). Numeric arguments may be floats where the
 quantity is a time/voltage. Unknown characters are skipped without
 error; the table is not syntax-checked on load.
 
+**Which ops address a module.** Only `J` and `m` take a module number.
+`K`, `k` and `O` write board index 1 (`CompressBoard`, the second
+module) whatever module a `J` in the same table named: the `K` and `k`
+handlers set the controller's copy of the ramp and call
+`Set16bitInt(CompressBoard, ...)`, the compressor's 100 ms loop
+re-sends both to that board whenever the copy changes, and the module
+has no serial command for the ramp, so `TWICMD` cannot reach it either
+(`ARBcompressor.cpp`, the `K`, `k` and `O` cases; `include/ARB.h`,
+`CompressBoard`; ARB2 `Serial.cpp`, the command table). On a box whose
+compress follower is module 3 the order ramp is a dead op: it ramps
+module 2 and nothing else (lab record, task 117).
+
 **How one op is scanned**, which a host has to mirror to read anything
 back out of a table string. An op is one character. Digits immediately
 after it are its value, decimal point and all; where no digit follows,
@@ -1535,8 +1547,15 @@ normal time before the next op is read; `N` holds it low for the
 non-compress time. The three times are the `c`, `n` and `t` ops, in
 **whole milliseconds**: the op's integer value, any fraction after the
 point discarded, converted to counts of the 656250 Hz compressor clock.
-`D` holds whatever the line is. No op is read while a `C` runs, so a TWI
-switch cannot be placed inside a `C` window. A module follows the line
+A zero time hangs the table: `n0` (as would `c0` or `t0`) adds 0 to the
+timer's compare register, which then holds a value the free-running
+32-bit counter has just matched and passed, and the next match comes
+after the wrap, 2^32 / 656250 s, 1.8 hours later. One millisecond is
+therefore the floor of the gap between the line's fall and the next op,
+and `n1` is the shortest `n` a table may carry (lab record, task 117).
+`D` holds whatever the line is, for a float of milliseconds. No op is
+read while a `C` runs, so a TWI switch cannot be placed inside a `C`
+window. A module follows the line
 as compression when `SARBCPEX,<mod>,TRUE` (`TWI_SET_COMP_EXT`,
 `CompressHardware`): its `compressISR` calls `SetCompression(line
 HIGH)`, which copies the programmed order into `WorkingOrder`, so the
@@ -1599,6 +1618,35 @@ and `SALTHWD` persist in module RAM across acquisitions, so a method
 that ends a sitting on the line sends their FALSEs, and a method that
 uses the line sends its TRUEs and FALSEs every time rather than trusting
 what the modules hold.
+
+**A hold after the squeeze, and what `s` stops.** No op is read while
+a `C` runs, so a hold of the squeezed packet cannot begin inside the
+window; it begins after the line falls. Two forms run on the firmware
+as installed, both measured on the same box at holds of 0.1, 1 and 10 s
+(lab record, task 119). `J34[HRc16n1CsD{hold}r]1` keeps the squeeze
+above and follows it with the compressor's own clock stop: the ISR
+drops the line at 16 ms and waits the `n1`, then `s` stops the common
+clock, `D{hold}` waits and `r` restarts it. Measured, the compress
+follower froze **17.012 to 17.052 ms** after the R edge (the
+compressor's 16.9996 ms plus the ISR; 0.95 ms of travel, 14 cycles,
+after the squeeze's end at 16.063 ms), at a random phase of the
+travelling wave, and played again **0.024 to 0.087 ms after the nominal
+17 + hold ms**, resuming from the sample at which it stalled rather
+than from the start of a cycle. `J30[HRc{17+hold}n1C]1` is one line
+level at order 0 from the edge: a stationary end-of-cycle pattern from
+0.148 to 0.156 ms after the edge with no squeeze before it, released at
+the line's fall plus the module's next cycle boundary, **0.086 to
+0.171 ms after the nominal 17 + hold ms**. Both held for any length the
+compressor counted, neither played a cycle during the hold, and no
+repetition was lost in 147 record frames at 0.1 and 1 s or in the 10 s
+single shots. `s` stops only the modules whose `SARBCCLK` is TRUE: the
+module on its own clock that reverses region 2 ran backward at the
+full rate through every hold, as the per-module `TWI_ARB_SET_EXT_CLOCK`
+that `SARBCCLK` sends predicts (§6.2); an earlier scope reading that
+every module froze at `s` is superseded by this one. A `TARBTRG` that
+arrives while a pass is still in its `D` abandons the pass without its
+`r` and leaves the common clock stopped until the next pass's own `r`,
+so the repetition period must exceed the pass.
 
 ---
 
