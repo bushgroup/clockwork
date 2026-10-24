@@ -70,7 +70,7 @@ packages = ["src/clockwork"]
 package = true
 
 [tool.uv.sources]
-mainspring = { git = "https://github.com/bushgroup/mainspring", tag = "v1.13.0" }
+mainspring = { git = "https://github.com/bushgroup/mainspring", tag = "v1.15.0" }
 
 [dependency-groups]
 dev = [
