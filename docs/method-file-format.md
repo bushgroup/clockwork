@@ -74,7 +74,11 @@ ARB boxes have neither.
 - `acquisition` carries the run: `frames`, `scans` and `accumulations`, the two settings below that
   say how those are divided into acquisition console frames and what survives on disk,
   `file_stem`, the base name the UIMF file is written under, and `enable`, which names the digital
-  output that gates the digitizer.
+  output that gates the digitizer. Each of the three counts has a ceiling, the same one the
+  window's box for it ranges to: 10 000 method frames, 100 000 accumulations and 20 000 000
+  scans, about 21 minutes of frame at a 62 µs pusher. The scans ceiling is set by the fold, which
+  holds every repetition of a method frame in memory before adding them, at an 8-byte row pointer
+  per scan of each.
 - `[[boxes]]` is an array of tables, one per box, each naming the box, its COM port, its
   strings in three phases, and optionally the DC bias and RF settings it should hold.
 - `start` and `reset` are the two ordered cross-box sequences, written as `[box, command]` pairs.
@@ -428,7 +432,8 @@ runs an attached method, a detached one and a hand-written one alike.
 `MethodError`, so a method with several mistakes reports all of them in one pass rather than one
 per fix. Rejected: an unrecognized `schema_version`, a missing or empty field, a key the schema
 does not define, a duplicate box name, a box name or port with whitespace around it, a
-`repetition_mode` that is not one of the two, a `keep_raw` that is not a boolean, a `file_stem`
+`repetition_mode` that is not one of the two, a `keep_raw` that is not a boolean, a `frames`,
+`scans` or `accumulations` above its ceiling, a `file_stem`
 containing a path separator, a `start` or `reset` step naming a box the method does not have, an
 empty `start`, a method in which no box has anything to `load`, a `dc_bias` or `rf` key that is not
 a channel number or is below 1, an `rf` `mode` that is neither `MANUAL` nor `AUTO`, a

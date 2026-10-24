@@ -474,3 +474,29 @@ def test_a_declaration_is_not_range_checked_here() -> None:
                           + "\n[[boxes]]\nname = \"box2\"" + rest)
     assert loaded.box("box1").dc_bias == ((16, -9999.0),)
 
+
+
+def test_scans_above_the_ceiling_is_refused_naming_the_key_and_the_ceiling() -> None:
+    """A document past `MAX_SCANS` is refused at load, not clamped by the window's box
+    on its way in (lab record, task 130: a 1 617 100-scan method opened as 1 000 000)."""
+    with pytest.raises(method.MethodError) as excinfo:
+        method.loads(SAMPLE.replace("scans = 100", f"scans = {method.MAX_SCANS + 1}"))
+    assert f"acquisition.scans: {method.MAX_SCANS + 1} is above the ceiling of " \
+           f"{method.MAX_SCANS}" in excinfo.value.problems
+
+
+def test_scans_at_the_ceiling_loads() -> None:
+    loaded = method.loads(SAMPLE.replace("scans = 100", f"scans = {method.MAX_SCANS}"))
+    assert loaded.acquisition.scans == method.MAX_SCANS
+
+
+def test_frames_and_accumulations_have_ceilings_too() -> None:
+    """The window's other two boxes had ranges the loader never held."""
+    text = SAMPLE.replace("frames = 1\n", f"frames = {method.MAX_FRAMES + 1}\n") \
+                 .replace("accumulations = 10\n",
+                          f"accumulations = {method.MAX_ACCUMULATIONS + 1}\n")
+    with pytest.raises(method.MethodError) as excinfo:
+        method.loads(text)
+    problems = "\n".join(excinfo.value.problems)
+    assert f"acquisition.frames: {method.MAX_FRAMES + 1} is above the ceiling" in problems
+    assert f"acquisition.accumulations: {method.MAX_ACCUMULATIONS + 1} is above" in problems

@@ -138,6 +138,10 @@ def names_it_elsewhere(message: str) -> bool:
     return DECLARED_ELSEWHERE in message
 
 
+BAR_RANGE = 2**31 - 1
+"""The widest range a `QProgressBar` takes: the largest C `int`. See `Progress.unit`."""
+
+
 @dataclass(frozen=True, slots=True)
 class Progress:
     """Where a run has got to, for the bar and its caption.
@@ -165,6 +169,27 @@ class Progress:
     frame_number: int = 0
     """Which console frame of the run is running, counted across method frames. What
     `scans` is measured from, since a batch says how far into *its* frame it is."""
+
+    unit: int = 1
+    """Scans per step of the bar. One, unless `total` is past what a `QProgressBar`
+    can range over: Qt's range is a C `int`, and a run can ask for more scans than
+    that -- ten thousand method frames of a hundred thousand repetitions of twenty
+    million scans is 2e13 -- where PySide raises `OverflowError` rather than clamp,
+    which would have killed the run log at `RunBegun`. The counts stay in scans and
+    the bar is drawn in units of this many (lab record, task 130)."""
+
+    @staticmethod
+    def unit_for(total: int) -> int:
+        """The smallest unit that puts `total` inside the bar's range."""
+        return max(1, -(-int(total) // BAR_RANGE))
+
+    @property
+    def bar_total(self) -> int:
+        return max(1, self.total // self.unit)
+
+    @property
+    def bar_value(self) -> int:
+        return self.scans // self.unit
 
     def at_batch(self, scans_so_far: int) -> Progress:
         """This run, with the bar moved to a batch's own count of its frame.
@@ -326,13 +351,14 @@ class RunPanel(QWidget):
             # is the only thing that moves inside a frame, and inside a `single_frame`
             # method's frame it is the only thing that moves at all.
             self.progress = self.progress.at_batch(event.scans_so_far)
-            self.bar.setValue(self.progress.scans)
+            self.bar.setValue(self.progress.bar_value)
             return
         if isinstance(event, RunBegun):
             total = event.frames * event.console_frames * event.frame_length
             self.progress = Progress(frames=event.frames, of=event.console_frames,
-                                     total=total, frame_length=event.frame_length)
-            self.bar.setRange(0, max(1, total))
+                                     total=total, frame_length=event.frame_length,
+                                     unit=Progress.unit_for(total))
+            self.bar.setRange(0, self.progress.bar_total)
             self.bar.setValue(0)
             self.say(event.text)
             return
@@ -345,7 +371,7 @@ class RunPanel(QWidget):
             # To this frame's own start, so a frame whose batches are still coming does
             # not leave the bar where the last one's overrun put it.
             self.progress = self.progress.at_batch(0)
-            self.bar.setValue(self.progress.scans)
+            self.bar.setValue(self.progress.bar_value)
             self.caption.setText(self.progress.text)
             return
         if isinstance(event, FrameEnded):

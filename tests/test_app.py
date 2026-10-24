@@ -2844,3 +2844,60 @@ def test_the_library_lists_a_template_and_open_refuses_it_with_the_way_to_render
     dialog.table.selectRow(rendered_row)
     dialog._open()
     assert dialog.chosen_path.endswith("cell.toml")
+
+
+def test_the_three_boxes_range_to_the_loader_s_ceilings(window):
+    """One ceiling each, in `clockwork.method`, so a box can never show a number the
+    document does not say (lab record, task 130)."""
+    assert window.frames.maximum() == method_module.MAX_FRAMES
+    assert window.scans.maximum() == method_module.MAX_SCANS
+    assert window.accumulations.maximum() == method_module.MAX_ACCUMULATIONS
+
+
+def test_a_method_past_the_ceiling_is_refused_at_open_not_clamped(window, tmp_path):
+    """Lab issue 12: a 1 617 100-scan method opened into a box that stopped at a
+    million, clamped without a word, and the gate-rule check then refused the run
+    against 1 000 000, a number the trainee never wrote. Refused at open instead,
+    naming the key and the ceiling, with the box left where it was."""
+    over = method_module.MAX_SCANS + 1
+    text = method_module.dumps(make_method(scans=1000)).replace(
+        "scans = 1000", f"scans = {over}")
+    path = tmp_path / "too-long.toml"
+    path.write_text(text, encoding="utf-8")
+    before = window.scans.value()
+    assert window._load_method(str(path), quiet=True) is False
+    assert window.scans.value() == before
+    said = "\n".join(window.run_panel.log.topLevelItem(i).text(1)
+                     for i in range(window.run_panel.log.topLevelItemCount()))
+    assert "too-long.toml could not be opened" in said
+    assert f"acquisition.scans: {over} is above the ceiling of " \
+           f"{method_module.MAX_SCANS}" in said
+
+
+def test_the_bar_survives_a_run_wider_than_qt_s_int(qtbot):
+    """`QProgressBar.setRange` takes a C `int` and PySide raises past it rather than
+    clamp, so a run of more than 2 147 483 647 scans killed the run log at `RunBegun`.
+    Drawn in units instead: the counts stay in scans, the bar scales."""
+    panel = RunPanel()
+    qtbot.addWidget(panel)
+    panel.show(RunBegun("raw.uimf", "summed.uimf", frames=1, console_frames=100_000,
+                        frame_length=20_000_000, frame_timeout=60.0))
+    assert panel.progress.total == 2_000_000_000_000
+    assert panel.progress.unit == 932
+    assert panel.bar.maximum() == 2_000_000_000_000 // 932 <= 2**31 - 1
+
+    panel.show(FrameBegun(method_frame=1, repetition=50_000, frame_number=50_000,
+                          of=100_000))
+    assert panel.progress.scans == 49_999 * 20_000_000
+    assert panel.bar.value() == panel.progress.scans // 932
+    panel.show(BatchSeen(1, 50_000, _batch(500), scans_so_far=10_000_000))
+    assert panel.bar.value() == (49_999 * 20_000_000 + 10_000_000) // 932
+
+
+def test_a_run_inside_qt_s_int_is_drawn_in_scans(qtbot):
+    panel = RunPanel()
+    qtbot.addWidget(panel)
+    panel.show(RunBegun("raw.uimf", "summed.uimf", frames=1, console_frames=100,
+                        frame_length=20_000_000, frame_timeout=60.0))
+    assert panel.progress.unit == 1
+    assert panel.bar.maximum() == 2_000_000_000

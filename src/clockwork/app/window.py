@@ -69,6 +69,9 @@ from ..acq import StateRead, find_console
 from ..acq.loop import WHEN_ARMED, RunBegun, cautions, refusals
 from ..instrument import UNCALIBRATED, Instrument
 from ..method import (
+    MAX_ACCUMULATIONS,
+    MAX_FRAMES,
+    MAX_SCANS,
     REPETITION_MODES,
     Acquisition,
     BoxMethod,
@@ -402,13 +405,17 @@ class MainWindow(QMainWindow):
 
     def _side_panel(self) -> QWidget:
         """The form half: what is acquired, where it goes, and the six buttons."""
-        self.frames = _spin(1, 10_000, 1, "How many ion mobility experiments this "
-                                          "method acquires, each folded into one frame "
-                                          "of the companion file.")
-        self.scans = _spin(1, 1_000_000, 5000,
+        # Ranged to the loader's own ceilings, so a box can never show a number other
+        # than the one the document says: a document past a ceiling is refused at
+        # open rather than clamped into the box (`clockwork.method.MAX_SCANS`).
+        self.frames = _spin(1, MAX_FRAMES, 1, "How many ion mobility experiments this "
+                                              "method acquires, each folded into one "
+                                              "frame of the companion file.")
+        self.scans = _spin(1, MAX_SCANS, 5000,
                            "Pusher pulses in one ion mobility experiment. One scan is "
-                           "one push.")
-        self.accumulations = _spin(1, 100_000, 100,
+                           f"one push. At most {MAX_SCANS:,}: about 21 minutes of frame "
+                           "at a 62 µs pusher.")
+        self.accumulations = _spin(1, MAX_ACCUMULATIONS, 100,
                                    "How many times each experiment is repeated and "
                                    "summed. Under per_repetition each is its own "
                                    "console frame with its own start edge.")

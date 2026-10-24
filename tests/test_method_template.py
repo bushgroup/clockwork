@@ -591,3 +591,15 @@ def test_same_run_ignores_what_a_window_assigns_and_nothing_else():
     assert not method.same_run(base, dataclasses.replace(base, start=base.start[::-1]))
     assert not method.same_run(base, template.render(loads(), {"pulse_ms": 2.5},
                                                      LABELS).method)
+
+
+def test_a_derived_scan_count_above_the_ceiling_is_refused_by_name():
+    """A hold long enough to put the frame past `MAX_SCANS` is refused where the
+    document would be, naming `acquisition.scans` and the ceiling (lab record, task 130).
+    The template itself loads, because its defaults render inside the ceiling."""
+    t = loads(**{**FOLLOWING,
+                 'frame_scans = "off_tick + 75"': 'frame_scans = "off_tick * 500000"'})
+    assert template.render(t, labels=LABELS).method.acquisition.scans == 12_500_000
+    with pytest.raises(template.TemplateError) as exc_info:
+        template.render(t, {"pulse_ms": 4.0}, LABELS)
+    assert "acquisition.scans: 25000000 is above the ceiling of 20000000"         in problems_of(exc_info)

@@ -69,6 +69,29 @@ Kept, because discarding it is irreversible and it is the only record of how one
 repetition differed from the next (lab record, task 02).
 """
 
+MAX_FRAMES = 10_000
+MAX_ACCUMULATIONS = 100_000
+MAX_SCANS = 20_000_000
+"""The most a method may ask for: method frames, repetitions of one, and pushes in one.
+
+One place, because the window's three spin boxes and the loader bound the same three
+numbers and have to agree. They did not: the window's box for `scans` stopped at a
+million while the loader took any positive integer, and a document above the box was
+not refused but *clamped* on its way into it -- a 1 617 100-scan method opened as
+1 000 000 without a word, and the gate-rule check then refused the run against a
+number the trainee never wrote (lab record, task 130). A document above any of these
+is refused at load, naming the key and the ceiling, and the boxes range to the same
+numbers, so nothing a box shows is ever other than what the document says.
+
+The scans ceiling is twenty million: about 21 minutes of frame at the 62 us pusher
+and 43 at 129 (Matt, 2026-10-24). What bounds it is the fold, which reads every
+repetition of a method frame into memory before adding them and carries an 8-byte row
+pointer per scan of each: at a hundred repetitions of the ceiling that is 16 GB of
+pointers before the first point, inside the instrument PC's memory and not far
+inside. Moving it further means the fold streaming its repetitions first. The other
+two are the boxes' long-standing ranges, written down here so the loader holds them too.
+"""
+
 NOTIFY_ON_SCANS_COUNT = 500
 """The console's batch size: `NotifyOnScansCount` in its `config.txt`.
 
@@ -505,9 +528,14 @@ def _optional_number(
     return float(value)
 
 
-def _positive_int(value: object, path: str, problems: list[str]) -> int | None:
+def _positive_int(
+    value: object, path: str, problems: list[str], at_most: int | None = None
+) -> int | None:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         problems.append(f"{path}: expected a positive integer")
+        return None
+    if at_most is not None and value > at_most:
+        problems.append(f"{path}: {value} is above the ceiling of {at_most}")
         return None
     return value
 
@@ -712,10 +740,15 @@ def from_dict(data: dict) -> Method:
             ),
             problems,
         )
-        frames = _positive_int(acquisition_raw.get("frames"), "acquisition.frames", problems)
-        scans = _positive_int(acquisition_raw.get("scans"), "acquisition.scans", problems)
+        frames = _positive_int(
+            acquisition_raw.get("frames"), "acquisition.frames", problems, MAX_FRAMES
+        )
+        scans = _positive_int(
+            acquisition_raw.get("scans"), "acquisition.scans", problems, MAX_SCANS
+        )
         accumulations = _positive_int(
-            acquisition_raw.get("accumulations"), "acquisition.accumulations", problems
+            acquisition_raw.get("accumulations"), "acquisition.accumulations", problems,
+            MAX_ACCUMULATIONS,
         )
         file_stem = _non_empty_str(
             acquisition_raw.get("file_stem"), "acquisition.file_stem", problems
@@ -1055,6 +1088,9 @@ __all__ = [
     "COMMENT_PREFIX",
     "DEFAULT_KEEP_RAW",
     "DEFAULT_REPETITION_MODE",
+    "MAX_ACCUMULATIONS",
+    "MAX_FRAMES",
+    "MAX_SCANS",
     "NOTIFY_ON_SCANS_COUNT",
     "REPETITION_MODES",
     "SCHEMA_VERSION",
