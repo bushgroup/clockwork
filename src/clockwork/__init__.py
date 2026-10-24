@@ -26,7 +26,7 @@ import logging
 import os
 import subprocess
 
-__version__ = "1.2.0rc6.dev0"
+__version__ = "1.2.0rc6"
 
 # The library emits records and configures nothing: no handler, no level, no
 # format. `clockwork.transcript.to_file` is the only thing that attaches one,
