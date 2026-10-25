@@ -123,17 +123,30 @@ description states which convention it assumed, as the example above does.
 
 A hole is a bare name in braces, `{duration_ms}`, standing for a knob, a constant or a
 derivation. Holes are filled only in the boxes' `setup`, `load` and `arm` strings, in the
-`start` and `reset` commands, and in one acquisition setting, the scan count. A hole anywhere
-else is refused, and so is arithmetic inside the braces, which belongs in `[derive]`.
+`start` and `reset` commands, and in two acquisition settings, the scan count and the repetition
+count. A hole anywhere else is refused, and so is arithmetic inside the braces, which belongs in
+`[derive]`.
 
-The scan count may be written as a hole, `scans = "{frame_scans}"`, and nothing else in the
-`[acquisition]` table may. It is counted in the same pusher ticks as the table that lowers the
-digitizer's gate, so an experiment whose record must outlast a hold of ten seconds, and need not
-outlast one of ten milliseconds, derives its frame from the same knob that sets the hold, and
-each rendered method asks the console for the frame it needs. The string is the whole hole: a
-name with arithmetic around it is refused. The value must come out a whole number of at least
-1, and the rendered method is then checked as any other, which is where a gate lowered on the
-wrong tick for that frame is caught.
+The scan count may be written as a hole, `scans = "{frame_scans}"`. It is counted in the same
+pusher ticks as the table that lowers the digitizer's gate, so an experiment whose record must
+outlast a hold of ten seconds, and need not outlast one of ten milliseconds, derives its frame
+from the same knob that sets the hold, and each rendered method asks the console for the frame
+it needs.
+
+The repetition count may be written as a hole too, `accumulations = "{repetitions}"`, usually
+naming a whole-number knob of that name with the template's usual count as its default. A
+[series plan](series-file-format.md#repetitions-per-point) can then acquire a hundred repetitions
+of a short frame and twenty of a long hold in one series. The count is set as a knob rather than
+after the render so that it is checked against the knob's range and the standing limits, stamped
+with the other knobs, and rendered again whenever a file's provenance is checked. Under
+`per_repetition` no string carries the count. A `single_frame` template that makes it a knob must
+write the same hole into the table's loop counts, since the acquisition loop refuses strings that
+loop a different number of times.
+
+Nothing else in the `[acquisition]` table may be a hole. Either string is the whole hole: a name
+with arithmetic around it is refused. The value must come out a whole number of at least 1 and
+no larger than the method's ceiling for that count, and the rendered method is then checked as
+any other, which is where a gate lowered on the wrong tick for its frame is caught.
 
 How a number is written into a string is the wire format's decision, not the template's. Every
 number is written in its shortest form with at most four decimals, so a wait of `208.0000` is

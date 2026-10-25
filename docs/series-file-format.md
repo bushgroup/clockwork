@@ -2,7 +2,8 @@
 
 A series plan is a list of experiments to be acquired as one: the points of a grid over a
 template's knobs, or a list of points whose knobs move together, each acquired the same number of
-times, with the template's defaults as references at the start, the end or both. It exists because
+times, with the template's defaults as references at the start, the end or both. Where the
+template makes its repetition count a knob, the plan may set the count point by point. It exists because
 a series is acquired in shuffled order, so that drift in the source or the instrument is spread
 across the knob values rather than confounded with them, and a shuffled series can only be read
 back if every file says where it sat in the plan and what shuffled it. Clockwork stores a plan as a
@@ -60,6 +61,35 @@ Each `[[points]]` table is one point, with the knobs it sets. A knob a point doe
 the template's default, so an empty table is the defaults. This plan is five points of one file
 each, and the seed makes its order the same every time it is acquired.
 
+## Repetitions per point
+
+How many repetitions a point acquires is a knob of the template, not a key of the plan. A
+template that lets a series set the count writes `accumulations = "{repetitions}"` in its
+`[acquisition]` table and declares a `repetitions` knob
+([template file](template-file-format.md#holes)). A plan then sets the count as it sets any other
+knob: in `[grid]`, to acquire every point of the grid at each count, or in `[[points]]`, point by
+point, where a point that does not name it takes the template's default.
+
+```toml
+[[points]]
+amplitude_v = 37
+duration_ms = 200
+
+[[points]]
+amplitude_v = 37
+duration_ms = 10000
+repetitions = 20
+```
+
+The first point acquires the template's default count of a 200 ms hold and the second 20
+repetitions of a 10 s hold, a fifth of the time the default of 100 would take. Because the count
+is a knob, it is checked against the template's range and the standing limits with the rest,
+stamped in every file as `ClockworkKnobRepetitions`, and rendered again with the other knobs
+whenever a file's provenance is checked, so a file acquired at 20 repetitions reproduces as one
+acquired at the default does. A template without the knob acquires every point at its own count.
+Two points that differ only in their count put the same strings on the wire, so the second is
+acquired without a send.
+
 ## Keys
 
 | Key | Required | Meaning |
@@ -112,6 +142,18 @@ session with five acquisitions left is refused, not stopped after the fifth. The
 read back once, and every distinct method in the plan is compared with what they hold, as `arm`
 compares one ([MCP server](mcp-server.md#the-interlock)).
 
+The tool also says how long the series will acquire for, in minutes, for each point and in all.
+Each repetition costs its frame, counted at the pusher period the instrument document states or,
+where it states none, at the template's `tick_us`, and then the acquisition console's re-arm
+before the next frame, which measures 0.337 s on our instrument and is as long as the frame
+itself at the shortest holds. The sends and the folds between points are not counted. Where
+neither document gives a pusher period, the minutes are left empty rather than guessed. Asked
+with `check` true (`clockwork series PLAN --check` at the command line), the tool does all of
+the above up to the read-back of the boxes and stops there: it sends nothing, starts no job and
+writes no record, and answers each point's knob values, repetitions, files and minutes in
+planned order, or the refusal the series would meet. A plan's cost can therefore be seen, and
+the plan cut, before anyone is asked to run it.
+
 ## What each file records
 
 Every file of a series stamps the series parameters that the
@@ -132,4 +174,5 @@ a request's indices and positions never repeat.
 
 A series stopped part way leaves the files it finished, each stamped as above, and the run record
 says after which point it stopped and why. The record's `plans` section holds the plan's text, the
-seed and the order drawn, so the plan can be set beside the files it produced.
+seed, the order drawn, and each point's knob values, repetitions and minutes, so the plan can be
+set beside the files it produced.

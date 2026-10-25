@@ -476,7 +476,8 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
                       "problem")
             return 0
         _print(out, answer, indent=2)
-        if verb.tool.name in WAITS and not args.no_wait:
+        if verb.tool.name in WAITS and not args.no_wait and "job" in answer:
+            # A `series --check` answers without starting a job.
             return _wait(toolbox, int(answer["job"]), err, program)
         return 0
     except KeyboardInterrupt:

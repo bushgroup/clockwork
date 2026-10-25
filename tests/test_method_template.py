@@ -393,8 +393,58 @@ def test_the_scan_count_hole_is_the_whole_string_and_a_known_name():
         loads(**{**FOLLOWING, 'scans = "{frame_scans}"': 'scans = "{frame_pushes}"'})
     assert "frame_pushes" in problems_of(exc_info)
     with pytest.raises(template.TemplateError) as exc_info:
-        loads(**{"accumulations = 10": 'accumulations = "{cycles}"'})
-    assert "acquisition.accumulations: holes are filled only" in problems_of(exc_info)
+        loads(**{"frames = 1": 'frames = "{cycles}"'})
+    assert "acquisition.frames: holes are filled only" in problems_of(exc_info)
+
+
+# --- a repetition count that is a knob ------------------------------------------------------
+
+
+COUNTED = {
+    "accumulations = 10": 'accumulations = "{repetitions}"',
+    "cycles = {": 'repetitions = { default = 10, min = 1, max = 1000, unit = "", '
+                  'description = "repetitions" }\ncycles = {',
+}
+
+
+def test_the_repetition_count_may_be_a_hole_and_then_follows_its_knob(tmp_path):
+    """A series plan sets the count per point as a knob, so it is stamped and reproduces
+    as every knob does (lab record, task 133)."""
+    t = loads(**COUNTED)
+    at_default = template.render(t, labels=LABELS)
+    assert at_default.method.acquisition.accumulations == 10
+    assert at_default.method == method.loads(SAMPLE)
+    fewer = template.render(t, {"repetitions": 25}, LABELS)
+    assert fewer.method.acquisition.accumulations == 25 and fewer.knobs["repetitions"] == 25
+    assert fewer.method.boxes == at_default.method.boxes, "no string carries the count"
+    path = str(tmp_path / "fewer.toml")
+    method.save(template.attached(fewer), path)
+    rendered, why = template.reproduce(method.load(path))
+    assert why == "" and rendered is not None
+    assert rendered.method.acquisition.accumulations == 25
+    with pytest.raises(template.TemplateError, match="outside the range this template"):
+        template.render(t, {"repetitions": 1001}, LABELS)
+
+
+def test_a_repetition_count_that_is_not_a_whole_positive_number_is_refused():
+    with pytest.raises(template.TemplateError) as exc_info:
+        loads(**{**COUNTED, 'accumulations = "{repetitions}"': 'accumulations = "{half}"',
+                 'off_tick = "on_tick': 'half = "repetitions / 4"\noff_tick = "on_tick'})
+    assert ("acquisition.accumulations: {half} is the repetition count, a whole number of "
+            "repetitions of at least 1, but comes to 2.5") in problems_of(exc_info)
+    with pytest.raises(template.TemplateError) as exc_info:
+        loads(**{**COUNTED, 'accumulations = "{repetitions}"':
+                 'accumulations = "{repetitions} * 2"'})
+    assert ("acquisition.accumulations: '{repetitions} * 2' is not a hole; the repetition "
+            "count is one bare name") in problems_of(exc_info)
+
+
+def test_a_repetition_count_above_the_ceiling_is_refused_by_name():
+    t = loads(**{**COUNTED, "max = 1000, unit": "max = 1000000, unit"})
+    with pytest.raises(template.TemplateError) as exc_info:
+        template.render(t, {"repetitions": 100_001}, LABELS)
+    assert ("acquisition.accumulations: 100001 is above the ceiling of 100000"
+            in problems_of(exc_info))
 
 
 # --- the document -----------------------------------------------------------------------

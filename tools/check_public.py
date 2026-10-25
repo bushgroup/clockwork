@@ -777,6 +777,27 @@ arm = ["SMOD,TBL"]
         seeded = str(exc)
     check_true("a seed in an unshuffled plan is refused", "orders a shuffle" in seeded)
 
+    # The repetition count as a knob: set point by point, and every render reproduces
+    # (lab record, task 133).
+    counted = template_module.loads_template(template_text.replace(
+        "accumulations = 2", 'accumulations = "{repetitions}"').replace(
+        "[metadata]", 'repetitions = { default = 2, min = 1, max = 100000, unit = "", '
+                      'description = "repetitions a file" }\n[metadata]', 1))
+    by_point = series.expand(series.loads(
+        head.replace("grid.toml", "counted.toml")
+        + "[[points]]\nrepetitions = 1\n[[points]]\nrepetitions = 3\n"), counted)
+    renders = [template_module.render(counted, dict(point.knobs), {}) for point in by_point]
+    check_true("a plan sets the repetition count point by point, the references at the "
+               "template's default",
+               [rendered.method.acquisition.accumulations for rendered in renders]
+               == [2, 1, 3, 2])
+    check_true("a render at a count reproduces from its [rendered] table",
+               all(template_module.reproduce(template_module.attached(rendered))[1] == ""
+                   for rendered in renders))
+    check_true("a point's minutes count every repetition and the console's re-arm",
+               abs(series.seconds(renders[2].method, 1, 129.0)
+                   - 3 * (32 * 129e-6 + series.REARM_GAP_S)) < 1e-9)
+
     with tempfile.TemporaryDirectory() as scratch:
         library = os.path.join(scratch, "library")
         output = os.path.join(scratch, "runs")
@@ -791,6 +812,13 @@ arm = ["SMOD,TBL"]
             asked = {"request": "two points and the defaults", "initials": "sc"}
             toolbox.call("discover_boxes", {"template": "grid.toml"})
             issued = owner.status().issued
+            checked = toolbox.call("series", {**asked, "check": True,
+                                              "plan": head + "[grid]\nb_ticks = [300, 450]\n"})
+            check_true("a series check answers every point's repetitions, sends nothing, and "
+                       "gives no minutes where nothing states a pusher period",
+                       checked["sent"] is False and "job" not in checked
+                       and [point["repetitions"] for point in checked["points"]] == [2] * 4
+                       and checked["minutes"] is None and owner.status().issued == issued)
             try:
                 toolbox.call("series", {**asked, "plan": head + "[grid]\nb_ticks = [90]\n"})
                 outside = ""

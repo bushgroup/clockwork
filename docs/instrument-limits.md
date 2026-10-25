@@ -78,7 +78,11 @@ bias_hold_v = 10.0
   template's `metadata.name`, a check that the hash was copied from the right template.
 - `templates.<key>.knobs` narrows a knob's range with `min`, `max` or both. A bound outside the
   template's own range is an error in the limits, because limits narrow a range and never widen
-  it. A knob the entry does not name keeps the template's own range.
+  it. A knob the entry does not name keeps the template's own range. Where a template makes its
+  repetition count a knob ([template file](template-file-format.md#holes)), the entry bounds it
+  as any other, so `repetitions = { min = 10, max = 100 }` lets a series run fewer repetitions
+  than the default and none more. Every acquisition still counts once against `max_runs`,
+  whatever its count.
 - `templates.<key>.fixed` holds a knob at one value, which must lie within the template's range.
   A render at any other value is refused.
 

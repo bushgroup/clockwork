@@ -93,7 +93,7 @@ relative to the output directory, unless it is absolute.
 | | `warm_up` | none | The instrument file's standing method's `setup` phase sent, its DC bias, RF drive and ARB range ramped; whether every declared setting reads back as declared (`ok`, `differences`), the read-back, and the send log |
 | | `stand_down` | `stop`, `reason` | Every box local, its DC bias, RF drive and ARB range ramped to zero and its outputs lowered; what is not at zero, the outputs lowered, the read-back, and whether the daemon, the lock and the console are gone once it has been shut down |
 | Acquisition | `acquire` | as `arm` without `setup` and `conditions`, plus `replicates` | A job number, at once; the run proceeds on the owner |
-| | `series` | `request`, `initials`, `plan`, `conditions`, `setup`, `request_id` | A job number, at once, with the seed, the order drawn and the counts; the daemon arms and acquires every point of the [series plan](series-file-format.md) |
+| | `series` | `request`, `initials`, `plan`, `conditions`, `setup`, `request_id`, `check` | A job number, at once, with the seed, the order drawn, the counts and the minutes; the daemon arms and acquires every point of the [series plan](series-file-format.md). With `check`, each point's repetitions and minutes and nothing sent |
 | | `progress` | `job`, `after`, `wait_s` | The job's events since number `after`, how many files are done of how many were asked for, and whether it is done |
 | | `stop` | `reason` | Whether a run was in flight; it ends after its current repetition and fold |
 | | `status` | none | Simulated or real, the console, the boxes, the running and queued jobs, the method the boxes were last armed with, why sends are refused if they are, the standing limits in force and the budget left |
@@ -155,9 +155,14 @@ the acquisition loop's refusals and the standing limits, the count of its acquis
 point, against the budget left, and every distinct method against the boxes read back once. One
 point outside is enough to refuse the plan, and the refusal names the point. The points between
 the references are then shuffled under the plan's seed, or one drawn for it, and `series` answers
-the job number, the seed and the planned indices in the order they will be acquired. `progress`
-follows the job as it follows an `acquire`, and adds under `series` the point in flight and the
-order.
+the job number, the seed, the planned indices in the order they will be acquired and about how
+many minutes the series will acquire for. `progress` follows the job as it follows an `acquire`,
+and adds under `series` the point in flight and the order.
+
+A template whose repetition count is a knob lets the plan set the count point by point
+([series plan](series-file-format.md#repetitions-per-point)). With `check` true, `series` stops
+before the read-back and sends nothing: it answers each point's knob values, repetitions, files
+and minutes, so that a session can show the person what a plan costs before asking to run it.
 
 ### Warm-up and stand-down
 

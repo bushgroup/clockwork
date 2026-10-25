@@ -8,6 +8,7 @@ the fake files are small (32 scans, two accumulations), so a series of eight tak
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import time
@@ -15,6 +16,7 @@ import time
 import pytest
 
 from clockwork import envelope
+from clockwork import method as method_module
 from clockwork import series as series_module
 from clockwork.acq.uimf import SUMMED_SUFFIX
 from clockwork.mcp import Toolbox, ToolFailure
@@ -174,7 +176,137 @@ def test_the_series_job_and_its_result_cross_the_wire():
 def test_the_series_verb_takes_its_plan_bare():
     [verb] = [entry for entry in verbs() if entry.name == "series"]
     assert {flag.parameter for flag in verb.flags} == {
-        "request", "initials", "plan", "conditions", "setup", "request_id"}
+        "request", "initials", "plan", "conditions", "setup", "request_id", "check"}
+
+
+# --- the repetition count -------------------------------------------------------------
+
+# The test template with its repetition count a knob, as a template that opts in writes it
+# (lab record, task 133). The ceiling is past the loader's so that the loader's own refusal
+# can be met.
+REPETITIONS = TEMPLATE.replace("accumulations = 2", 'accumulations = "{repetitions}"').replace(
+    'b_ticks = { default = 500',
+    'repetitions = { default = 2, min = 1, max = 1000000, unit = "", description = "repetitions '
+    'a file" }\nb_ticks = { default = 500')
+
+
+def repetitions_plan(middle: str, *, references: str = "[]") -> str:
+    return plan_text(middle=middle, references=references, extra="shuffle = false").replace(
+        "two-knob.toml", "repetitions.toml")
+
+
+@pytest.fixture
+def counted(library):
+    with open(os.path.join(library, "repetitions.toml"), "w", encoding="utf-8") as handle:
+        handle.write(REPETITIONS)
+    return library
+
+
+def test_the_series_seconds_count_every_repetition_and_its_re_arm():
+    t = template_module.loads_template(REPETITIONS)
+    per = template_module.render(t, {"repetitions": 100}, LABELS).method
+    assert series_module.seconds(per, 1, 129.0) == pytest.approx(
+        100 * (32 * 129e-6 + series_module.REARM_GAP_S))
+    assert series_module.seconds(per, 3, 129.0) == pytest.approx(
+        3 * series_module.seconds(per, 1, 129.0))
+    # One console frame of every repetition's pushes, and one re-arm after it.
+    single = dataclasses.replace(per, acquisition=dataclasses.replace(
+        per.acquisition, repetition_mode="single_frame"))
+    assert series_module.seconds(single, 1, 129.0) == pytest.approx(
+        100 * 32 * 129e-6 + series_module.REARM_GAP_S)
+
+
+def test_a_plan_sets_the_count_point_by_point_and_a_check_answers_the_minutes(
+        fake_owner, counted, tmp_path):  # noqa: F811
+    toolbox = Toolbox(fake_owner, library=counted, output=str(tmp_path / "runs"),
+                      instrument=SIMULATED)
+    issued = fake_owner.status().issued
+    checked = toolbox.call("series", {
+        "request": REQUEST, "initials": "zz", "check": True, "plan": repetitions_plan(
+            "[[points]]\nb_ticks = 300\n[[points]]\nb_ticks = 450\nrepetitions = 1000\n",
+            references='["start"]')})
+    assert checked["sent"] is False and "job" not in checked
+    assert [(point["index"], point["repetitions"], point["reference"])
+            for point in checked["points"]] == [(1, 2, "start"), (2, 2, ""), (3, 1000, "")]
+    frame_s = 32 * 129e-6 + series_module.REARM_GAP_S
+    assert [point["minutes"] for point in checked["points"]] == [
+        round(count * frame_s / 60, 1) for count in (2, 2, 1000)]
+    assert checked["minutes"] == round(1004 * frame_s / 60, 1)
+    assert (checked["acquisitions"], checked["files"]) == (3, 3)
+    assert fake_owner.status().issued == issued, "a check sends nothing"
+
+
+def test_a_count_past_the_ceiling_refuses_the_plan_naming_the_point(fake_owner, counted,  # noqa: F811
+                                                                    tmp_path):
+    toolbox = Toolbox(fake_owner, library=counted, output=str(tmp_path), instrument=SIMULATED)
+    for check in (True, False):
+        with pytest.raises(ToolFailure) as caught:
+            toolbox.call("series", {
+                "request": REQUEST, "initials": "zz", "check": check,
+                "plan": repetitions_plan("[grid]\nrepetitions = [100, 200000]\n")})
+        said = str(caught.value)
+        assert said.startswith("the series was refused whole and nothing was sent")
+        assert ("point 2 (repetitions = 200000): rendered method: acquisition.accumulations: "
+                "200000 is above the ceiling of 100000") in said
+        assert "point 1 (" not in said
+
+
+def test_a_grid_over_the_count_acquires_each_point_at_its_own_and_every_file_reproduces(
+        fake_owner, counted, tmp_path):  # noqa: F811
+    output = str(tmp_path / "runs")
+    toolbox = Toolbox(fake_owner, library=counted, output=output, instrument=SIMULATED)
+    toolbox.call("discover_boxes", {"template": "repetitions.toml", "labels": LABELS})
+    started = toolbox.call("series", {"request": REQUEST, "initials": "zz",
+                                      "plan": repetitions_plan(
+                                          "[grid]\nrepetitions = [1, 3]\nb_ticks = [450]\n")})
+    assert started["order"] == [1, 2] and started["minutes"] is not None
+    ended = followed(toolbox, started["job"], timeout=120)
+    assert ended["result"]["points_done"] == 2 and len(ended["runs"]) == 2
+    t = template_module.loads_template(REPETITIONS)
+    spelled = {template_module.camel_case(knob.name): knob.name for knob in t.knobs}
+    counts = []
+    for name in sorted(os.listdir(output)):
+        if not name.endswith(SUMMED_SUFFIX):
+            continue
+        summary = summarize(os.path.join(output, name), texts=True)
+        stamps = summary["clockwork"]
+        knobs = {spelled[key.removeprefix("ClockworkKnob")]: value
+                 for key, value in stamps.items() if key.startswith("ClockworkKnob")}
+        acquired = method_module.loads(stamps["ClockworkMethodText"])
+        rendered = template_module.render(
+            template_module.loads_template(stamps["ClockworkTemplateText"]), knobs, LABELS)
+        assert method_module.same_run(rendered.method, acquired), name
+        assert acquired.acquisition.accumulations == knobs["repetitions"]
+        assert summary["accumulations"] == [knobs["repetitions"]]
+        counts.append((stamps["ClockworkSeriesIndex"], knobs["repetitions"]))
+    assert sorted(counts) == [(1, 1), (2, 3)]
+
+    toolbox.recorder(started["job"]).join(60)
+    [plan] = record_of(started["record"])["plans"]
+    assert [(point["index"], point["repetitions"]) for point in plan["points"]] == [
+        (1, 1), (2, 3)]
+    assert plan["minutes"] == started["minutes"]
+
+
+def test_two_points_that_differ_only_in_the_count_are_acquired_without_a_second_send(
+        fake_owner, counted, tmp_path):  # noqa: F811
+    toolbox = Toolbox(fake_owner, library=counted, output=str(tmp_path), instrument=SIMULATED)
+    toolbox.call("discover_boxes", {"template": "repetitions.toml", "labels": LABELS})
+    started = toolbox.call("series", {"request": REQUEST, "initials": "zz",
+                                      "plan": repetitions_plan(
+                                          "[[points]]\nrepetitions = 1\n"
+                                          "[[points]]\nrepetitions = 2\n")})
+    events, last = [], 0
+    while True:
+        answer = toolbox.call("progress", {"job": started["job"], "after": last, "wait_s": 5})
+        events += answer["events"]
+        last = answer["last"]
+        if answer["done"]:
+            break
+    assert [event["sends"] for event in events if event["kind"] == "PointStarted"] == [
+        True, False]
+    assert sorted(summarize(os.path.join(str(tmp_path), name))["accumulations"][0]
+                  for name in os.listdir(tmp_path) if name.endswith(SUMMED_SUFFIX)) == [1, 2]
 
 
 # --- refused whole ------------------------------------------------------------------

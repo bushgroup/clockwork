@@ -73,8 +73,12 @@ TEMPLATE_KEYS = ("template_schema", "renders", "knobs", "labels", "constants", "
                  "marks")
 PHASES = ("setup", "load", "arm")
 
-SCANS_PATH = "acquisition.scans"
-"""The one key outside the command strings that may hold a hole: see `_scans_hole`."""
+_COUNTS = (
+    ("scans", "the frame's scan count", "pushes", "frame_scans"),
+    ("accumulations", "the repetition count", "repetitions", "repetitions"),
+)
+"""The two keys outside the command strings that may hold a hole, each with what it is
+called in a message, what it counts and the name an example gives it: see `_count_hole`."""
 
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _HOLE = re.compile(r"\{([^{}]*)\}")
@@ -747,44 +751,55 @@ def _check_holes(body: dict, seen: dict[str, str], problems: list[str]) -> None:
                 )
             else:
                 _undefined({name}, path, seen, problems)
-    scans = _scans_hole(body)
-    if scans is not None:
-        if not _NAME.match(scans):
+    holed = set()
+    for key, called, _, example in _COUNTS:
+        name = _count_hole(body, key)
+        if name is None:
+            continue
+        path = f"acquisition.{key}"
+        holed.add(path)
+        if not _NAME.match(name):
             problems.append(
-                f"{SCANS_PATH}: {_scans_text(body)!r} is not a hole; the scan count is one "
-                "bare name in braces, as in \"{frame_scans}\", or a whole number"
+                f"{path}: {_count_text(body, key)!r} is not a hole; {called} is one bare "
+                f"name in braces, as in \"{{{example}}}\", or a whole number"
             )
         else:
-            _undefined({scans}, SCANS_PATH, seen, problems)
+            _undefined({name}, path, seen, problems)
     for path, text in _other_strings(body, ""):
-        if path == SCANS_PATH and scans is not None:
+        if path in holed:
             continue
         if path not in command_paths and _HOLE.search(text):
             problems.append(
                 f"{path}: holes are filled only in the boxes' setup, load and arm strings, "
-                "the start and reset commands, and the scan count"
+                "the start and reset commands, the scan count and the repetition count"
             )
 
 
-def _scans_text(body: dict) -> str | None:
-    """`acquisition.scans` where it is written as a string, else None."""
+def _count_text(body: dict, key: str) -> str | None:
+    """`acquisition.<key>` where it is written as a string, else None."""
     acquisition = body.get("acquisition")
-    if isinstance(acquisition, dict) and isinstance(acquisition.get("scans"), str):
-        return acquisition["scans"]
+    if isinstance(acquisition, dict) and isinstance(acquisition.get(key), str):
+        return acquisition[key]
     return None
 
 
-def _scans_hole(body: dict) -> str | None:
-    """The name inside `acquisition.scans` where that key is a string.
+def _count_hole(body: dict, key: str) -> str | None:
+    """The name inside `acquisition.scans` or `acquisition.accumulations` where that key
+    is a string.
 
-    The scan count is the one acquisition setting a template may derive, because it is
-    counted in the same pusher ticks as the table that lowers the digitizer's gate: a
-    frame that must outlast a hold of ten seconds and need not outlast one of ten
-    milliseconds has to be arithmetic over the knob, or every rendered method pays for
-    the longest hold (lab record, task 102). The string is the whole hole and nothing
-    else, so that `scans = "{frame_scans} + 1"` is refused rather than half-read.
+    These are the two acquisition settings a template may derive. The scan count,
+    because it is counted in the same pusher ticks as the table that lowers the
+    digitizer's gate: a frame that must outlast a hold of ten seconds and need not
+    outlast one of ten milliseconds has to be arithmetic over the knob, or every rendered
+    method pays for the longest hold (lab record, task 102). The repetition count,
+    because a series plan sets it per point -- a hundred repetitions of a short frame
+    and twenty of a hundred-second hold -- and a count that is a knob is checked, bounded
+    by the limits, stamped and reproduced as every knob is, where one applied after the
+    render would leave a file its `[rendered]` table no longer renders (lab record, task
+    133). The string is the whole hole and nothing else, so that
+    `scans = "{frame_scans} + 1"` is refused rather than half-read.
     """
-    text = _scans_text(body)
+    text = _count_text(body, key)
     if text is None:
         return None
     text = text.strip()
@@ -1002,17 +1017,18 @@ def _render(
         filled = _fill(container[key], values, path, problems)
         if filled is not None:
             container[key] = filled
-    scans_name = _scans_hole(body)
-    if scans_name is not None and scans_name in values:
-        count = values[scans_name]
-        written = format_number(count)
+    for key, called, counts, _ in _COUNTS:
+        name = _count_hole(body, key)
+        if name is None or name not in values:
+            continue
+        written = format_number(values[name])
         if "." in written or written.startswith("-") or written == "0":
             problems.append(
-                f"{SCANS_PATH}: {{{scans_name}}} is the frame's scan count, a whole number "
-                f"of pushes of at least 1, but comes to {written}; round() its derivation"
+                f"acquisition.{key}: {{{name}}} is {called}, a whole number of {counts} of "
+                f"at least 1, but comes to {written}; round() its derivation"
             )
         else:
-            body["acquisition"]["scans"] = int(count)
+            body["acquisition"][key] = int(values[name])
     if problems:
         raise TemplateError(problems)
 

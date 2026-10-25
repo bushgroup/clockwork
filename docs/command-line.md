@@ -147,7 +147,9 @@ series sends each point itself, and a point the boxes already hold is acquired w
 The verb answers the seed and the order drawn, then waits for the last file as `acquire` does and
 prints each point's line on standard error as it begins. The plan is refused whole, with nothing
 sent, if any point lies outside the standing limits or the series would spend more of the budget
-than is left.
+than is left. With `--check` the verb checks the plan the same way and stops before the boxes
+are read back: it sends nothing and prints each point's repetitions and minutes and the totals,
+so that how long a plan will take is known before it is run.
 
 ## A table of every run
 

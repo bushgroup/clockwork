@@ -26,11 +26,12 @@ import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
+from .method import Method
 from .method.template import Template, format_number
 
-__all__ = ["PLAN_SCHEMA", "REFERENCES", "SEED_LIMIT", "Plan", "PlanError", "Point",
-           "acquisitions", "describe", "draw_seed", "expand", "files", "from_dict", "load",
-           "loads", "looks_inline", "order", "resolve"]
+__all__ = ["PLAN_SCHEMA", "REARM_GAP_S", "REFERENCES", "SEED_LIMIT", "Plan", "PlanError",
+           "Point", "acquisitions", "describe", "draw_seed", "expand", "files", "from_dict",
+           "load", "loads", "looks_inline", "order", "resolve", "seconds"]
 
 PLAN_SCHEMA = 1
 
@@ -38,6 +39,15 @@ REFERENCES = ("start", "end")
 
 SEED_LIMIT = 2**31
 """Seeds are drawn from 0 up to this, which is what the file's Int32 holds."""
+
+REARM_GAP_S = 0.337
+"""What one console frame costs past its own pushes: the console's re-arm between one
+frame and the next, measured on the instrument (lab record, task 102).
+
+At a hundred repetitions of a 0.36 s frame it is half the acquisition, which is why a
+plan's minutes count it: a sweep reckoned from the frames alone came out at two thirds of
+what it took. The estimate leaves out each point's send and the fold, which are seconds
+a point, not seconds a repetition."""
 
 _KEYS = ("plan_schema", "description", "template", "labels", "replicates", "references",
          "grid", "points", "shuffle", "seed")
@@ -257,6 +267,18 @@ def acquisitions(points: Sequence[Point]) -> int:
 
 def files(points: Sequence[Point]) -> int:
     return sum(point.replicates for point in points)
+
+
+def seconds(method: Method, replicates: int, period_us: float) -> float:
+    """About how long `replicates` files of `method` take to acquire at a pusher period
+    of `period_us`: every console frame's pushes and `REARM_GAP_S` after each.
+
+    A `per_repetition` method frame is `accumulations` console frames of `scans`, and a
+    `single_frame` one is one console frame of `scans * accumulations`, so the count
+    reaches the answer through `Acquisition.console_frames` and `frame_length` alike."""
+    acquisition = method.acquisition
+    frame_s = acquisition.frame_length * period_us / 1e6 + REARM_GAP_S
+    return replicates * acquisition.frames * acquisition.console_frames * frame_s
 
 
 def describe(point: Point) -> str:

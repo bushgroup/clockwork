@@ -676,7 +676,7 @@ class Toolbox:
 
     @tool("acquisition", read_only=False)
     def series(self, request: str, initials: str, plan: str, conditions: str = "",
-               setup: bool = True, request_id: str = "") -> dict:
+               setup: bool = True, request_id: str = "", check: bool = False) -> dict:
         """Acquire a whole planned series as one job, in shuffled order, and answer at once.
 
         `plan` is a series plan's TOML text, or the path of a file holding one: a
@@ -684,10 +684,12 @@ class Toolbox:
         `[[points]]` whose knobs move together, `replicates` per point, `references` at
         the template's defaults (`["start", "end"]` puts one before and one after), an
         optional `seed`, and `shuffle`, true by default (docs/series-file-format.md).
-        `request`, `initials`, `conditions` and `request_id` are as for `arm`; `setup`
-        is the first point's, and each later point sends its setup only when it differs.
-        No `arm` is needed first: the series sends every point itself, and a point the
-        boxes already hold from the point before is acquired without a send.
+        A template with a `repetitions` knob takes the repetitions per file like any
+        knob, for the whole plan in `[grid]` or point by point. `request`, `initials`,
+        `conditions` and `request_id` are as for `arm`; `setup` is the first point's,
+        and each later point sends its setup only when it differs. No `arm` is needed
+        first: the series sends every point itself, and a point the boxes already hold
+        from the point before is acquired without a send.
 
         Refused whole, before anything is sent, for a point outside the template's
         ranges or the standing limits, naming the point; for more acquisitions than the
@@ -696,9 +698,15 @@ class Toolbox:
         points between the references are shuffled under the seed, drawn when the plan
         gives none; every file stamps the request id, the point's planned index, its
         own position in the order acquired and the seed. Answers the job number, the
-        seed, the order, the counts and the run record; follow it with `progress` and
-        end it with `stop`, which leaves the finished files and the record saying where
-        it stopped.
+        seed, the order, the counts, about how many minutes the series will acquire for
+        (every repetition's frame and the console's re-arm after it) and the run record;
+        follow it with `progress` and end it with `stop`, which leaves the finished
+        files and the record saying where it stopped.
+
+        `check` true does everything up to the read-back and sends nothing, starts no
+        job and writes no record: it answers each point's knobs, repetitions, files and
+        minutes in planned order, and the totals, or the refusal the series would meet.
+        Use it to show a person what a plan costs before asking to run it.
         """
         who = self._initials(initials)
         try:
@@ -741,6 +749,17 @@ class Toolbox:
                     f"files) and this daemon session's budget has {left} of "
                     f"{self.limits.budget.max_runs} left, so nothing was sent: shorten the "
                     "plan")
+        costs = [self._point_entry(point, rendered)
+                 for point, rendered in zip(points, renders, strict=True)]
+        seconds = [self._point_seconds(point, rendered)
+                   for point, rendered in zip(points, renders, strict=True)]
+        minutes = (None if None in seconds
+                   else round(sum(s for s in seconds if s is not None) / 60, 1))
+        if check:
+            return {"sent": False, "template": template_path,
+                    "template_hash": template.hash[:HASH_DIGITS], "points": costs,
+                    "acquisitions": spent, "files": series_module.files(points),
+                    "minutes": minutes}
         found = self._read_boxes(renders[0].method)
         mode = self._cold_start_mode(renders[0])
         cautioned: list[str] = []
@@ -791,9 +810,8 @@ class Toolbox:
             "path": plan_path, "template": template_path, "template_hash": template.hash,
             "labels": dict(planned.labels), "seed": seed, "shuffled": seed is not None,
             "first_place": place, "acquisitions": spent, "files": count,
-            "points": [{"index": offset + point.index, "knobs": dict(point.knobs),
-                        "replicates": point.replicates, "reference": point.reference}
-                       for point in points],
+            "minutes": minutes,
+            "points": [{**cost, "index": offset + cost["index"]} for cost in costs],
             "order": order})
         record.append("acquisitions", {
             "job": handle.id, "series": True, "replicates": planned.replicates,
@@ -807,7 +825,7 @@ class Toolbox:
         return {"job": handle.id, "request_id": identity, "label": handle.label,
                 "seed": seed, "order": order, "first_place": place,
                 "acquisitions": spent, "files": count, "points": len(points),
-                "cold_start": cautioned, "record": record.path,
+                "minutes": minutes, "cold_start": cautioned, "record": record.path,
                 "follow": f"call progress with job={handle.id}"}
 
     @tool("acquisition")
@@ -1471,6 +1489,26 @@ class Toolbox:
         rendered = template_module.render(template_module.load_template(path),
                                           dict(knobs or {}), dict(labels or {}))
         return rendered.method, rendered, path
+
+    def _point_seconds(self, point: series_module.Point, rendered: Rendered) -> float | None:
+        """About how long a series point's files take to acquire.
+
+        At the instrument document's pusher period, which is what the digitizer is
+        checked against, or else at the period the template assumed; with neither, None
+        rather than a guess."""
+        period = self.instrument.pusher_period_us or rendered.tick_us
+        if period is None:
+            return None
+        return series_module.seconds(rendered.method, point.replicates, period)
+
+    def _point_entry(self, point: series_module.Point, rendered: Rendered) -> dict:
+        """One series point as the record and a `check` give it: its knobs, the
+        repetitions each file acquires, and its minutes."""
+        seconds = self._point_seconds(point, rendered)
+        return {"index": point.index, "knobs": dict(point.knobs),
+                "repetitions": rendered.method.acquisition.accumulations,
+                "replicates": point.replicates, "reference": point.reference,
+                "minutes": None if seconds is None else round(seconds / 60, 1)}
 
     def _refuse_unless_allowed(self, loaded: Method, rendered: Rendered | None, request: str,
                                *, replicates: int | None = None) -> None:
