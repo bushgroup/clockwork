@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from ..acq import Run, Snapshot
+from ..acq import BeamGuard, Run, Snapshot
 from ..instrument import UNCALIBRATED, Instrument
 from ..method import Method
 from ..mips import BoxHealth, BoxState
@@ -168,6 +168,10 @@ class Acquire(Job):
     is refused before a file exists (`clockwork.acq.uimf.stamp_globals`)."""
     knobs: Mapping[str, float] = field(default_factory=dict)
     labels: Mapping[str, str] = field(default_factory=dict)
+    beam_guard: BeamGuard | None = None
+    """End each run whose beam is lost (`run_acquisition`'s `beam_guard`); None, the
+    default, watches nothing. The window's run queue sets it on its rows when the
+    guard is armed (lab record, task 134)."""
 
 
 @dataclass(frozen=True, slots=True)

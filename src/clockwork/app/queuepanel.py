@@ -23,21 +23,31 @@ The dialog asks for a number of passes and whether each gets its own order; what
 does to the rows is `RunQueue.randomize`, and the window applies it, asks before
 replacing passes that exist, and writes the seed and order to the run log. The `pass`
 column is shown only once a queue has passes.
+
+**The beam guard is armed here and kept by the window** (lab record, task 134). The
+dialog takes a floor typed in or worked out from a run picked off disk, and how many
+repetitions in a row under it end a run; the button says whether it is armed, so a
+trainee leaving the rack reads it there.
 """
 
 from __future__ import annotations
 
+import os
+from collections.abc import Callable
+
 from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFont
+from PySide6.QtGui import QBrush, QColor, QDoubleValidator, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMenu,
     QPushButton,
     QSpinBox,
@@ -47,6 +57,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..acq import GUARD_FRACTION, GUARD_REPETITIONS, BeamGuard, from_run
 from .runqueue import (
     DONE,
     FAILED,
@@ -57,7 +68,7 @@ from .runqueue import (
     RunQueue,
 )
 
-__all__ = ["HEADINGS", "QueuePanel", "RandomizeDialog"]
+__all__ = ["HEADINGS", "BeamGuardDialog", "QueuePanel", "RandomizeDialog"]
 
 HEADINGS = ("", "pass", "state", "method", "sample or conditions", "reps", "setup",
             "stays first", "go on if it fails", "outcome")
@@ -83,6 +94,13 @@ the table -- two stems, a stop reason, a retry count and the console's errors --
 one whose tail a trainee can afford to read in the tooltip."""
 
 
+GUARD_OFF = "Beam guard: off…"
+GUARD_ON = "Beam guard: armed…"
+GUARD_TIP = ("Stop the queue when the beam is lost: a run whose repetitions read under a "
+             "floor of ions, several in a row, ends after the current repetition, its "
+             "row fails and the rows after it are skipped.")
+
+
 class QueuePanel(QWidget):
     """The rows of an unattended series, with add, remove, reorder and reset."""
 
@@ -104,6 +122,8 @@ class QueuePanel(QWidget):
     save_requested = Signal()
     open_requested = Signal()
     """Save the queue to a file, or replace it with one. The dialogs are the window's."""
+    guard_requested = Signal()
+    """Arm, change or disarm the beam guard. The window asks and keeps it."""
 
     def __init__(self, queue: RunQueue, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -157,6 +177,7 @@ class QueuePanel(QWidget):
         self.down_button = QPushButton("Down")
         self.reset_button = QPushButton("Reset")
         self.randomize_button = QPushButton("Randomize…")
+        self.guard_button = QPushButton(GUARD_OFF)
         self.open_button = QPushButton("Open queue…")
         self.save_button = QPushButton("Save queue…")
         self.start_button = QPushButton("Start the queue")
@@ -182,6 +203,7 @@ class QueuePanel(QWidget):
                                     "replicates are spread over the series. Rows ticked "
                                     "\"stays first\" open every pass. A row's own "
                                     "replicates stay together."),
+            (self.guard_button, GUARD_TIP),
             (self.open_button, "Replace the queue with one saved to a file. Every row "
                                "opens waiting: the file is a plan, not a record."),
             (self.save_button, "Save the rows, their passes and the seed to a file, to "
@@ -202,6 +224,7 @@ class QueuePanel(QWidget):
         self.down_button.clicked.connect(lambda: self._move(1))
         self.reset_button.clicked.connect(self._reset)
         self.randomize_button.clicked.connect(lambda: self.randomize_requested.emit())
+        self.guard_button.clicked.connect(lambda: self.guard_requested.emit())
         self.open_button.clicked.connect(lambda: self.open_requested.emit())
         self.save_button.clicked.connect(lambda: self.save_requested.emit())
         self.start_button.clicked.connect(lambda: self.start_requested.emit())
@@ -215,6 +238,7 @@ class QueuePanel(QWidget):
                        self.randomize_button):
             row.addWidget(button)
         row.addStretch(1)
+        row.addWidget(self.guard_button)
         row.addWidget(self.open_button)
         row.addWidget(self.save_button)
         row.addWidget(self.start_button)
@@ -294,6 +318,10 @@ class QueuePanel(QWidget):
         return muted
 
     def _refresh_caption(self) -> None:
+        guard = self.queue.guard
+        self.guard_button.setText(GUARD_ON if guard is not None else GUARD_OFF)
+        self.guard_button.setToolTip(
+            f"Armed: {guard.text}. {GUARD_TIP}" if guard is not None else GUARD_TIP)
         if not self.queue.rows:
             self.caption.setText(
                 "Nothing queued. Add methods here to run a series of samples or "
@@ -325,6 +353,7 @@ class QueuePanel(QWidget):
         self.randomize_button.setEnabled(
             not running and not self._busy and bool(self.queue.template()))
         self.open_button.setEnabled(not running)
+        self.guard_button.setEnabled(not running)
         self.save_button.setEnabled(bool(self.queue.rows))
 
     def show_others(self, lines: list[str]) -> None:
@@ -458,6 +487,127 @@ class RandomizeDialog(QDialog):
 
     def chosen(self) -> tuple[int, bool]:
         return self.passes.value(), self.reshuffle.isChecked()
+
+
+class BeamGuardDialog(QDialog):
+    """Arm the beam guard: a floor, typed in or taken from a run, and how many in a row.
+
+    The floor is total ions a repetition. "From a run…" reads a per-repetition file,
+    usually the day's gate run, and sets the floor to the fraction beside it of that
+    run's median; typing over the number afterwards makes it a number again, with no
+    run behind it. `pick` is the window's file dialog.
+    """
+
+    def __init__(self, guard: BeamGuard | None, pick: Callable[[], str],
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Beam guard")
+        self._pick = pick
+        self._source = guard.source if guard is not None else ""
+        self.armed = QCheckBox("stop the queue when the beam is lost")
+        self.armed.setChecked(guard is not None)
+        self.floor = QLineEdit(f"{guard.floor:.4g}" if guard is not None else "")
+        validator = QDoubleValidator(self.floor)
+        validator.setBottom(0.0)
+        self.floor.setValidator(validator)
+        self.floor.setToolTip("Total ions a repetition, under which a repetition counts "
+                              "as having no beam.")
+        self.floor.textEdited.connect(self._typed)
+        self.repetitions = QSpinBox()
+        self.repetitions.setRange(1, 99)
+        self.repetitions.setValue(guard.repetitions if guard is not None
+                                  else GUARD_REPETITIONS)
+        self.repetitions.setToolTip("How many repetitions in a row under the floor end "
+                                    "the run.")
+        self.fraction = QDoubleSpinBox()
+        self.fraction.setRange(0.01, 1.0)
+        self.fraction.setDecimals(2)
+        self.fraction.setSingleStep(0.01)
+        self.fraction.setValue(GUARD_FRACTION)
+        self.fraction.setToolTip("The floor \"From a run…\" sets, as a fraction of that "
+                                 "run's median ions a repetition.")
+        self.from_run = QPushButton("From a run…")
+        self.from_run.setToolTip("Pick a run acquired on a good beam, such as the day's "
+                                 "gate run: its per-repetition file, not the summed one.")
+        self.from_run.clicked.connect(self._from_run)
+        self.source = QLabel(self._source)
+        self.source.setWordWrap(True)
+        self.problem = QLabel("")
+        self.problem.setWordWrap(True)
+        self.problem.setVisible(False)
+        caption = QLabel(
+            "Every repetition of every row counts its ions. When that many repetitions "
+            "in a row read under the floor, the row stops after its current repetition "
+            "and fails, the rows after it are skipped, and the run log says why. A row "
+            "marked to go on after a failure stops the queue too.")
+        caption.setWordWrap(True)
+        taken = QWidget()
+        line = QHBoxLayout(taken)
+        line.setContentsMargins(0, 0, 0, 0)
+        line.addWidget(self.fraction)
+        line.addWidget(QLabel("x the median of"))
+        line.addWidget(self.from_run)
+        line.addStretch(1)
+        form = QFormLayout(self)
+        form.addRow(caption)
+        form.addRow("", self.armed)
+        form.addRow("Floor (ions):", self.floor)
+        form.addRow("", taken)
+        form.addRow("", self.source)
+        form.addRow("In a row:", self.repetitions)
+        form.addRow(self.problem)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def _typed(self, _: str) -> None:
+        self._source = ""
+        self.source.setText("")
+
+    def _say(self, problem: str) -> None:
+        self.problem.setText(problem)
+        self.problem.setVisible(bool(problem))
+
+    def take_from(self, path: str) -> bool:
+        """Set the floor from a run's file; False, with the reason shown, if it gave none."""
+        try:
+            guard = from_run(path, self.fraction.value(), self.repetitions.value())
+        except Exception as exc:  # noqa: BLE001 -- whatever file a trainee picked
+            self._say(f"{os.path.basename(path)} gave no floor: {exc}")
+            return False
+        self._say("")
+        self.floor.setText(f"{guard.floor:.4g}")
+        self._source = guard.source
+        self.source.setText(guard.source)
+        self.armed.setChecked(True)
+        return True
+
+    def _from_run(self) -> None:
+        path = self._pick()
+        if path:
+            self.take_from(path)
+
+    def chosen(self) -> BeamGuard | None:
+        """The guard as the dialog stands, or None when it is not armed. Raises
+        `ValueError` for an armed guard with no usable floor."""
+        if not self.armed.isChecked():
+            return None
+        try:
+            floor = float(self.floor.text().replace(",", ""))
+        except ValueError:
+            raise ValueError("type a floor, or take one from a run") from None
+        return BeamGuard(floor=floor, repetitions=self.repetitions.value(),
+                         source=self._source)
+
+    def accept(self) -> None:  # noqa: D102 -- QDialog's, refusing a floor that is none
+        try:
+            self.chosen()
+        except ValueError as exc:
+            self._say(str(exc))
+            return
+        super().accept()
 
 
 # -- small helpers -------------------------------------------------------------------

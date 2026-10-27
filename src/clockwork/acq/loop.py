@@ -132,6 +132,7 @@ from ..transcript import RUN as _RUN
 from ..transcript import note_block as _note_block
 from ..transcript import sent as _sent
 from .console import Console
+from .guard import BeamGuard
 from .session import EMPTY_SETTLE_S, run_frame, start_chain
 from .stream import DataStream, StreamTimeout
 from .uimf import Geometry, Provenance, Recording, failure_reason
@@ -169,6 +170,7 @@ __all__ = [
     "START_STEP_GAP_S",
     "AcquisitionRefused",
     "BatchSeen",
+    "BeamLost",
     "BoxLost",
     "BoxReady",
     "BoxSaid",
@@ -194,6 +196,7 @@ __all__ = [
     "WHEN_ARMED",
     "WHEN_BEFORE",
     "Warned",
+    "beam_lost_reason",
     "cautions",
     "check_pusher_period",
     "DECLARED_ELSEWHERE",
@@ -949,6 +952,33 @@ class Retried(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class BeamLost(Event):
+    """The beam guard's count reached its limit: the run ends after this repetition.
+
+    Reported once, on the repetition that reached it and before the run's fold, so the
+    line is in the transcript ahead of everything the stop does (`BeamGuard`, lab
+    record, task 134). `totals` are the repetitions that counted, oldest first.
+    """
+
+    method_frame: int
+    repetition: int
+    floor: float
+    totals: tuple[int, ...]
+
+    @property
+    def text(self) -> str:
+        return (f"frame {self.method_frame}.{self.repetition}: the beam guard stops the "
+                f"run: {beam_lost_reason(self.floor, self.totals)}")
+
+
+def beam_lost_reason(floor: float, totals: Sequence[int]) -> str:
+    """The guard's sentence, which `BeamLost`, the file's outcome and a queue row share."""
+    shown = ", ".join(f"{total:.2g}" for total in totals)
+    return (f"the beam was lost: {len(totals)} repetitions in a row read under "
+            f"{floor:.3g} ions ({shown})")
+
+
+@dataclass(frozen=True, slots=True)
 class ClockLockRetried(Event):
     """`acquire` was refused with the clock-lock code, and is being tried once more.
 
@@ -1027,6 +1057,14 @@ class FrameRecord:
     batches: int = 0
     scans_published: int = 0
     scans_after_finished: int = 0
+    total_counts: int = 0
+    """Every ion this frame counted: the per-scan `tic` of every batch published, added up.
+
+    The console fills the published `tic` and the file's `Frame_Scans.TIC` from the same
+    per-scan number, so this is the frame's TIC in the file, read off the data socket
+    with no file opened (`docs/console-protocol.md`, "Messages").
+    What the beam guard watches (`BeamGuard`, lab record, task 134)."""
+
     trailing_batches: int = 0
     rows_at_finished: int | None = None
     rows_at_end: int | None = None
@@ -1256,6 +1294,13 @@ class Run:
 
     Filled by whoever holds the console process -- the loop talks to the console's
     sockets and never sees its stdout -- and zero where nobody does (lab #2)."""
+    beam_lost: str | None = None
+    """The beam guard's sentence, where the guard ended the run (`BeamGuard`).
+
+    `stopped_early` carries the same sentence, so everything that reads a short run
+    reads this one as short; this field is what tells it from a run the operator
+    stopped, which is the difference between a row that failed and one that was
+    stopped (lab record, task 134)."""
 
     @property
     def failures(self) -> tuple[FrameRecord, ...]:
@@ -2295,6 +2340,7 @@ def run_acquisition(
     overwrite: bool = False,
     stop: Callable[[], str | None] | None = None,
     recover: Callable[[], TofWidth] | None = None,
+    beam_guard: BeamGuard | None = None,
     clock: Callable[[], float] = time.perf_counter,
 ) -> Run:
     """Acquire everything one method asks for, into one pair of files.
@@ -2415,6 +2461,14 @@ def run_acquisition(
     (`Run.stopped_early` carries the reason). It is called on the acquisition thread,
     so it must not block.
 
+    `beam_guard` ends the run the same way, between repetitions, when that many
+    repetitions in a row counted fewer ions than its floor: the beam lost at the source,
+    which fails nothing else the loop watches (`clockwork.acq.guard`, lab record, task
+    134). The difference is whose decision it is. A stop is the caller's and the file
+    says `stopped`; a trip is the run's own finding that what it acquires is not the
+    experiment, so the file says `failed` with the guard's sentence, and `Run.beam_lost`
+    carries it as well as `Run.stopped_early`.
+
     Returns a `Run` describing what happened, including the frames that did not work: an
     empty frame, a console error and a frame that never ended are outcomes recorded
     against their frame, which is left provisional in the file, and the run goes on to
@@ -2501,7 +2555,8 @@ def run_acquisition(
                         else _gate_dwell(recording.geometry)),
             witness_box=enable_witness(method) if guard_gate else None,
             rearm_with_reset=rearm_with_reset, abort_after=abort_after,
-            stop=stop, recover=recover, clock=clock, started=started,
+            stop=stop, recover=recover, beam_guard=beam_guard, clock=clock,
+            started=started,
             frame_timeout=(frame_timeout if frame_timeout is not None
                            else _frame_timeout(method, recording.geometry)),
         )
@@ -2762,6 +2817,7 @@ class _Loop:
     recover: Callable[[], TofWidth] | None = None
     """Restart the console and open its chain again, returning the new chain's width;
     None where nothing in reach can (`run_acquisition`'s `recover`)."""
+    beam_guard: BeamGuard | None = None
 
     start_step_gap: float = START_STEP_GAP_S
     row_settle: float = ROW_SETTLE_S
@@ -2773,6 +2829,9 @@ class _Loop:
     stopped_early: str | None = None
     _asked: bool = False
     """Whether `stopped_early` is the caller's `stop` rather than the loop's own."""
+    beam_lost: str | None = None
+    _under_floor: list[int] = field(default_factory=list)
+    """The totals of the repetitions in a row under the beam guard's floor."""
     _consecutive_failures: int = 0
     _consecutive_unwitnessed: int = 0
     _witnessed_at: float | None = None
@@ -2806,6 +2865,7 @@ class _Loop:
             for method_frame in range(1, acquisition.frames + 1):
                 for repetition in range(1, acquisition.console_frames + 1):
                     self._one_frame(method_frame, repetition)
+                    self._watch_beam()
                     self._asked_to_stop()
                     if self.stopped_early is not None:
                         break
@@ -2863,6 +2923,7 @@ class _Loop:
             seconds=self.clock() - self.started,
             replicate=replicate,
             stopped_early=self.stopped_early,
+            beam_lost=self.beam_lost,
         )
 
     def outcome(self, failure: BaseException | None) -> tuple[str, str]:
@@ -2907,6 +2968,31 @@ class _Loop:
             self.recording.set_outcome(outcome, reason)
         except Exception as exc:  # noqa: BLE001 -- the run's own end comes first
             self.report(Warned(f"the file could not be told the run {outcome}: {exc}"))
+
+    def _watch_beam(self) -> None:
+        """Count the repetition just recorded against the beam guard's floor.
+
+        The repetition's own record, the attempt that counts: a retried one has been
+        acquired again by now. One that did not acquire, or that stopped the run
+        damaged, holds no data and leaves the count where it was. At the guard's limit
+        the run ends as the loop's own decision, so its file says `failed` with the
+        guard's sentence rather than `stopped` (`outcome`, `BeamGuard`).
+        """
+        guard = self.beam_guard
+        if guard is None or self.stopped_early is not None or not self.frames:
+            return
+        record = self.frames[-1]
+        if not record.acquired or record.damaged:
+            return
+        if not guard.under(record.total_counts):
+            self._under_floor.clear()
+            return
+        self._under_floor.append(record.total_counts)
+        if len(self._under_floor) < guard.repetitions:
+            return
+        totals = tuple(self._under_floor)
+        self.beam_lost = self.stopped_early = beam_lost_reason(guard.floor, totals)
+        self.report(BeamLost(record.method_frame, record.repetition, guard.floor, totals))
 
     def _asked_to_stop(self) -> None:
         """Ask the caller's `stop` whether this repetition was the last one.
@@ -3199,6 +3285,7 @@ class _Loop:
             batches=len(seen),
             scans_published=sum(batch.scans for batch in seen),
             scans_after_finished=sum(batch.scans for batch in seen) - scans_before,
+            total_counts=sum(int(batch.tic.sum(dtype="u8")) for batch in seen),
             trailing_batches=trailing,
             rows_at_finished=rows_at_finished,
             rows_at_end=rows_after,

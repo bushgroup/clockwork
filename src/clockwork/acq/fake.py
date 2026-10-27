@@ -325,6 +325,18 @@ class FakeConsole:
         `short_frame_errors` lines to `logged_errors`, as the console's stdout does.
         """
 
+        self.beam: list[float] = []
+        """The beam for the frames to come, one taken off the front per frame: what
+        that frame's published `tic` and `mz` are multiplied by. 1.0 is the beam every
+        other frame has and 0.0 is none at all.
+
+        A beam lost at the source, which on the instrument reads as every repetition's
+        total ion count falling by one or two orders of magnitude while every frame
+        still counts out (lab record, task 134). Only what is published changes; the
+        file's rows are the invented spectrum either way, because what watches the beam
+        is the loop, and it reads the data socket.
+        """
+
         self.replayed_frames: list[bool] = []
         """Faults for the frames to come, one taken off the front per frame: whether that
         frame's trigger timestamps start again from the previous frame's first, as a
@@ -706,6 +718,7 @@ class FakeConsole:
         if lost:
             self.logged_errors += self.short_frame_errors
         replay = self.replayed_frames.pop(0) if self.replayed_frames else False
+        beam = self.beam.pop(0) if self.beam else 1.0
         if self.misaligned_frames and self.misaligned_frames.pop(0):
             self.lagging = True
         if self.wedged or (replay and self.replay_stops):
@@ -741,7 +754,7 @@ class FakeConsole:
                 # completes the frame's count.
                 due = time.monotonic() + (self.final_batch_delay_s
                                           if index == len(sizes) - 1 else 0.0)
-                self._deferred.append((due, request, first_scan, self._batch(scans)))
+                self._deferred.append((due, request, first_scan, self._batch(scans, beam)))
             else:
                 if self.final_batch_delay_s > 0 and index == len(sizes) - 1:
                     time.sleep(self.final_batch_delay_s)
@@ -752,7 +765,7 @@ class FakeConsole:
                     # frame before it is finalised is held to that by the completion
                     # marker, not by this.
                     write_error = self._write_scans(request, first_scan, scans)
-                self._publish(TOPIC_DATA, encode_batch(self._batch(scans)))
+                self._publish(TOPIC_DATA, encode_batch(self._batch(scans, beam)))
                 if self.lagging:
                     self._publish(TOPIC_STATUS, (
                         f"{MISALIGNED_PREFIX} (3 of 4 gates) in frame "
@@ -887,19 +900,20 @@ class FakeConsole:
         bins = [base + (phase * span) // self.scan_period + step * 4 for step in range(3)]
         return [b for b in bins if b < self.num_samples], [7, 31 + phase, 5][: len(bins)]
 
-    def _batch(self, scans: int) -> Batch:
+    def _batch(self, scans: int, beam: float = 1.0) -> Batch:
         """A summary shaped like the console's, with invented contents.
 
         Sparse, because a zero-suppressed spectrum is: a handful of non-zero
         bins per scan, summed over the batch into the dense array the console
         publishes. The peak positions are fixed so that a caller comparing two
-        batches is comparing counts and not noise.
+        batches is comparing counts and not noise. `beam` scales them (`beam`).
         """
         mz = np.zeros(self.num_samples, dtype=np.int32)
         peaks = np.linspace(
             self.post_trigger_samples, self.num_samples - 1, num=7, dtype=np.int64
         )
-        mz[peaks] = np.array([120, 400, 2600, 900, 300, 80, 40], dtype=np.int32) * scans
+        heights = np.array([120, 400, 2600, 900, 300, 80, 40], dtype=np.float64) * beam
+        mz[peaks] = np.round(heights).astype(np.int32) * scans
         per_scan = int(mz.sum() // max(scans, 1))
         stamps = self._timestamp + self.pusher_period_samples * np.arange(
             1, scans + 1, dtype=np.uint64

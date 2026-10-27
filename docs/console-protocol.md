@@ -175,6 +175,15 @@ summed spectrum over the batch, one entry per sample in the record), `tic` (one 
 `time_stamps` (one per scan, in samples of the digitizer clock). One `Message` is published per
 batch in both modes, whether or not the request named a file.
 
+A scan's `tic` is the number the console writes to that scan's `TIC` column in `Frame_Scans`:
+the data subscriber and the UIMF writer both copy the encoded result's own `tic` (fork source,
+`AqMD3_console/src/zmqacquireddatasubscriber.cpp` and `UIMFWriter/src/UIMFWriter.cpp`, commit
+`d9e203381cd193cc84c8140838569142280fc18e`). With `start_trigger` 0, which is what clockwork
+sends, every scan published is a scan written, so a frame's `tic` summed over its batches is the
+frame's total ion count in the file, and clockwork's beam guard reads that total off this socket
+without opening the file. On a raw file of 50 repetitions acquired on the instrument, every
+frame's `TIC` sum equals the sum of its decoded intensities.
+
 On topic `status`, the plain string `finished` when a frame's scans are all in, and
 `finished acquire` after `stop acquire`. What `finished` means is narrower than it looks. The
 acquisition thread publishes it once it has counted `frame_length` scans off the digitizer and

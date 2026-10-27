@@ -65,7 +65,7 @@ import clockwork
 from .. import instrument as instrument_module
 from .. import keep
 from .. import method as method_module
-from ..acq import StateRead, find_console
+from ..acq import BeamGuard, StateRead, find_console
 from ..acq.loop import WHEN_ARMED, RunBegun, cautions, refusals
 from ..instrument import UNCALIBRATED, Instrument
 from ..method import (
@@ -99,7 +99,7 @@ from .launch import (
 from .librarypanel import LibraryDialog
 from .naming import clean_initials, next_stem
 from .panes import BoxPane
-from .queuepanel import QueuePanel, RandomizeDialog
+from .queuepanel import BeamGuardDialog, QueuePanel, RandomizeDialog
 from .runlog import RunPanel
 from .runqueue import FAILED, STOPPED, QueueRow, RunQueue, outcome_of
 from .serving import serve_command, start_serve
@@ -745,6 +745,7 @@ class MainWindow(QMainWindow):
         self.queue_panel.randomize_requested.connect(self.randomize_queue)
         self.queue_panel.save_requested.connect(self.save_queue)
         self.queue_panel.open_requested.connect(self.open_queue)
+        self.queue_panel.guard_requested.connect(self.queue_guard)
 
         self.initials.editingFinished.connect(self._initials_changed)
         self.output_dir.editingFinished.connect(self._refresh_stem)
@@ -1206,7 +1207,8 @@ class MainWindow(QMainWindow):
         self.worker.submit(job)
         return job
 
-    def acquire(self, *, replicate_only: bool = False) -> Acquire | None:
+    def acquire(self, *, replicate_only: bool = False,
+                beam_guard: BeamGuard | None = None) -> Acquire | None:
         method = self.build_method()
         if method is None:
             return None
@@ -1232,6 +1234,7 @@ class MainWindow(QMainWindow):
             template=rendered.template_text if rendered is not None else "",
             knobs=dict(rendered.knobs) if rendered is not None else {},
             labels=dict(rendered.labels) if rendered is not None else {},
+            beam_guard=beam_guard,
         )
         self.worker.submit(job)
         return job
@@ -1335,6 +1338,40 @@ class MainWindow(QMainWindow):
         self.queue_panel.refresh()
         self._refresh_actions()
 
+    def queue_guard(self) -> None:
+        """Arm, change or disarm the beam guard every queue row's acquisition carries.
+
+        Kept by the window and not saved with the queue: the floor is a reading of the
+        day's beam, so a queue opened after arming keeps it (lab record, task 134).
+        """
+        if self.queue.running:
+            return
+        answer = self._ask_guard(self.queue.guard)
+        if answer is None:
+            return
+        guard = answer[0]
+        if guard == self.queue.guard:
+            return
+        self.queue.guard = guard
+        self.run_panel.say(f"the beam guard is armed: {guard.text}" if guard is not None
+                           else "the beam guard is off")
+        self.queue_panel.refresh()
+
+    def _ask_guard(self, guard: BeamGuard | None) -> tuple[BeamGuard | None] | None:
+        """The guard dialog, a method of its own so that a test can answer it: the
+        guard chosen (None to disarm) in a one-tuple, or None for Cancel."""
+        dialog = BeamGuardDialog(guard, self._guard_run_path, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return (dialog.chosen(),)
+
+    def _guard_run_path(self) -> str:
+        """The file dialog for the run a floor is taken from."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "The run to take the floor from", self._directory(),
+            "Per-repetition files (*.uimf);;All files (*)")
+        return path
+
     def _ask_randomize(self, rows: int, passes: int) -> tuple[int, bool] | None:
         """The passes dialog, a method of its own so that a test can answer it."""
         dialog = RandomizeDialog(rows, passes, self)
@@ -1427,6 +1464,9 @@ class MainWindow(QMainWindow):
             return
         self.run_panel.say(
             f"the queue starts: {self.queue.waiting + 1} row(s) to run")
+        guard = self.queue.guard
+        self.run_panel.say(f"the beam guard is armed: {guard.text}" if guard is not None
+                           else "the beam guard is off")
         self._start_row(row)
 
     def _start_row(self, row: QueueRow) -> None:
@@ -1468,7 +1508,7 @@ class MainWindow(QMainWindow):
                 return
             row.step = "acquiring"
             self.queue_panel.refresh()
-            self._queue_job = self.acquire()
+            self._queue_job = self.acquire(beam_guard=self.queue.guard)
             if self._queue_job is None:
                 self._row_finished(FAILED, "there was no method to acquire")
             return

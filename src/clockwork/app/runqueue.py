@@ -44,6 +44,14 @@ hidden original list; randomizing again rebuilds every pass from pass 1.
 **A queue file is a plan, not a record.** `save` and `load` write and read the rows'
 settings and the last seed, never their outcomes, which stay in the run log and the kept
 files: every row of an opened queue is waiting.
+
+**A lost beam stops the series whatever the row says** (lab record, task 134).
+`RunQueue.guard` is the beam guard the window arms, and every row's acquisition carries
+it; a run it ends is a row that `failed`, with the guard's sentence as its `beam_lost`,
+and the series ends there even on a row marked `go_on`, because what failed is the
+source every later row needs and not the row. The guard is not in the queue file: its
+floor is a reading of the day's beam, and a queue opened after the guard was armed
+keeps the guard.
 """
 
 from __future__ import annotations
@@ -57,7 +65,7 @@ from dataclasses import dataclass, field
 
 import tomli_w
 
-from ..acq import Run
+from ..acq import BeamGuard, Run
 
 __all__ = [
     "DONE",
@@ -149,6 +157,8 @@ class QueueRow:
     find the row where the console lost data (lab record, task 82)."""
     console_errors: int = 0
     """`[error]` lines the console logged during the row's runs (`Run.console_errors`)."""
+    beam_lost: str = ""
+    """The beam guard's sentence, where it ended one of the row's runs (`Run.beam_lost`)."""
     problem: str = ""
 
     @property
@@ -183,7 +193,9 @@ class QueueRow:
         parts: list[str] = []
         if self.stems:
             parts.append(", ".join(self.stems))
-        if self.stopped_early:
+        if self.beam_lost:
+            parts.append(self.beam_lost)
+        elif self.stopped_early:
             parts.append(f"stopped: {self.stopped_early}")
         if self.retried_frames:
             parts.append(f"{self.retried_frames} repetition(s) acquired again")
@@ -203,6 +215,7 @@ class QueueRow:
         self.stopped_early = ""
         self.retried_frames = 0
         self.console_errors = 0
+        self.beam_lost = ""
         self.problem = ""
 
 
@@ -211,7 +224,9 @@ def outcome_of(row: QueueRow, runs: Sequence[Run]) -> str:
 
     A run that came back incomplete is a failure even though it wrote files: frames that
     did not acquire, folds that did not write and a run the loop aborted are all the
-    instrument telling the queue that the next eleven rows will go the same way.
+    instrument telling the queue that the next eleven rows will go the same way. A run
+    the beam guard ended is one of those, and is told from a run the operator stopped by
+    `Run.beam_lost`, not by `stopped_early`, which both carry.
     """
     row.stems = tuple(
         os.path.splitext(os.path.basename(run.raw_path))[0] for run in runs)
@@ -219,9 +234,10 @@ def outcome_of(row: QueueRow, runs: Sequence[Run]) -> str:
         (os.path.dirname(run.raw_path) for run in runs if run.raw_path), "")
     row.retried_frames = sum(len(run.retried) for run in runs)
     row.console_errors = sum(run.console_errors for run in runs)
-    row.stopped_early = next(
+    row.beam_lost = next((run.beam_lost for run in runs if run.beam_lost), "") or ""
+    row.stopped_early = "" if row.beam_lost else next(
         (run.stopped_early for run in runs if run.stopped_early), "") or ""
-    if not runs:
+    if not runs or row.beam_lost:
         return FAILED
     if row.stopped_early:
         return STOPPED
@@ -267,6 +283,9 @@ class RunQueue:
         still finishes and closes itself; nothing after it starts."""
         self.seed: int | None = None
         """The seed of the last randomization, which a saved queue file carries."""
+        self.guard: BeamGuard | None = None
+        """The beam guard every row's acquisition carries, or None for none. Set by the
+        window, never by a queue file."""
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -424,6 +443,8 @@ class RunQueue:
             row.problem = problem
         if state == STOPPED:
             self.cancel(row.problem or "stopped by the operator")
+        elif state == FAILED and row.beam_lost:
+            self.cancel(f"the beam guard stopped the series at {row.name}")
         elif state == FAILED and not row.go_on:
             self.cancel(f"{row.name} failed and the series stops on a failure")
         return not self.cancelled

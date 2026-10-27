@@ -1176,6 +1176,7 @@ class LocalOwner:
                     provenance=provenance,
                     stop=self._stop_check,
                     recover=lambda: self._recover(console, stream, job),
+                    beam_guard=job.beam_guard,
                 )
             except Exception as exc:
                 # Written while the transcript is still open: the run log is not the

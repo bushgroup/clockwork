@@ -2919,3 +2919,116 @@ def test_a_second_clock_lock_refusal_is_a_sentence_and_any_other_refusal_is_not_
                                  sleep=lambda _: None)
     assert caught.value.code == -1074118653 and not prepared
     assert acq.ConsoleCommandError("the console refused 'acquire': bad").code is None
+
+
+# --- the beam guard (lab record, task 134) --------------------------------------------
+
+
+FULL_BEAM = 4440 * SCANS
+"""The stand-in's ions a repetition at a beam of 1.0: its seven peaks' heights a scan."""
+
+
+def test_every_repetition_carries_its_total_ion_count_off_the_stream(rig):
+    rig.fake.beam = [1.0, 0.5, 0.0]
+    method = make_method()
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = rig.acquire(method, boxes)
+    assert run.complete
+    assert [record.total_counts for record in run.frames] == [
+        FULL_BEAM, FULL_BEAM // 2, 0]
+
+
+def test_a_lost_beam_ends_the_run_failed_after_its_count_of_repetitions(rig):
+    """The rule: N repetitions in a row under the floor end the run after the one in
+    hand, as a Stop would, but the run's own finding and so `failed` in both files with
+    the guard's sentence, and told apart from a stop by `beam_lost`."""
+    rig.fake.beam = [1.0, 1.0, 0.0, 0.02, 0.0, 1.0, 1.0, 1.0]
+    method = make_method(accumulations=8)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    events: list[acq.Event] = []
+    guard = acq.BeamGuard(floor=0.1 * FULL_BEAM, repetitions=3)
+    run = rig.acquire(method, boxes, beam_guard=guard, progress=events.append)
+
+    assert not run.complete
+    assert len(run.frames) == 5
+    assert run.beam_lost and run.beam_lost == run.stopped_early
+    assert run.beam_lost.startswith("the beam was lost: 3 repetitions in a row read "
+                                    f"under {0.1 * FULL_BEAM:.3g} ions")
+    (lost,) = [event for event in events if isinstance(event, acq.BeamLost)]
+    assert (lost.method_frame, lost.repetition) == (1, 5)
+    assert lost.totals == (0, round(0.02 * 4440) * SCANS, 0)
+    assert lost.text.startswith("frame 1.5: the beam guard stops the run: the beam was "
+                                "lost")
+    for path in (run.raw_path, run.summed_path):
+        assert ended(path) == ("failed", run.beam_lost, 5, 8)
+    (fold,) = run.folds
+    assert fold.error is None and len(fold.frames_folded) == 5
+
+
+def test_a_repetition_with_beam_starts_the_count_again(rig):
+    rig.fake.beam = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+    method = make_method(accumulations=8)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = rig.acquire(method, boxes,
+                      beam_guard=acq.BeamGuard(floor=0.1 * FULL_BEAM, repetitions=3))
+    assert run.complete and run.beam_lost is None
+
+
+def test_the_count_runs_across_method_frames(rig):
+    """Every repetition of the run in order, whichever method frame it falls in."""
+    rig.fake.beam = [1.0, 0.0, 0.0, 0.0, 1.0, 1.0]
+    method = make_method(frames=2, accumulations=3)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = rig.acquire(method, boxes,
+                      beam_guard=acq.BeamGuard(floor=0.1 * FULL_BEAM, repetitions=3))
+    assert run.beam_lost
+    assert [(record.method_frame, record.repetition) for record in run.frames] == [
+        (1, 1), (1, 2), (1, 3), (2, 1)]
+    assert len(run.folds) == 2
+
+
+def test_without_a_guard_a_lost_beam_runs_to_the_end_as_before(rig):
+    rig.fake.beam = [1.0] + [0.0] * 5
+    method = make_method(accumulations=6)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = rig.acquire(method, boxes)
+    assert run.complete and run.beam_lost is None
+    assert ended(run.raw_path)[0] == "completed"
+
+
+def test_a_floor_from_a_run_is_a_fraction_of_its_median_repetition(rig):
+    method = make_method(accumulations=4)
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    run = rig.acquire(method, boxes)
+    totals = acq.repetition_totals(run.raw_path)
+    assert totals == [UimfFile(run.raw_path).frame_totals()[frame]
+                      for frame in (1, 2, 3, 4)]
+    guard = acq.from_run(run.raw_path, 0.25, 4)
+    median = sorted(totals)[1:3]
+    assert guard.floor == pytest.approx(0.25 * sum(median) / 2)
+    assert guard.repetitions == 4
+    stem = os.path.basename(run.raw_path)[: -len(".uimf")]
+    assert guard.source.startswith(f"0.25x the median of {stem} (")
+    with pytest.raises(ValueError, match="summed companion"):
+        acq.from_run(run.summed_path)
+
+
+@pytest.mark.parametrize("floor, repetitions, problem", [
+    (0.0, 5, "above zero"), (-1.0, 5, "above zero"), (1.0, 0, "at least one")])
+def test_a_guard_that_could_never_mean_anything_is_refused(floor, repetitions, problem):
+    with pytest.raises(ValueError, match=problem):
+        acq.BeamGuard(floor=floor, repetitions=repetitions)
+
+
+def test_a_guard_says_itself_in_one_line():
+    guard = acq.BeamGuard(floor=2.78e5, repetitions=5,
+                          source="0.1x the median of 261027_BK_330 (2.78e6)")
+    assert guard.text == ("a run stops when 5 repetitions in a row read under 2.78e+05 "
+                          "ions (0.1x the median of 261027_BK_330 (2.78e6))")
+    assert guard.under(277_999) and not guard.under(278_000)

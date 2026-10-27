@@ -38,6 +38,7 @@ from mainspring.interface import (  # noqa: E402
     OPTION_SHOW,
     SHOW_WORDS,
 )
+from mainspring.uimf import UimfFile  # noqa: E402
 from PySide6.QtCore import QSettings, Qt  # noqa: E402
 from PySide6.QtWidgets import QDialog  # noqa: E402
 
@@ -46,6 +47,7 @@ from clockwork import method as method_module  # noqa: E402
 from clockwork import transcript  # noqa: E402
 from clockwork.acq import (  # noqa: E402
     BatchSeen,
+    BeamGuard,
     Folding,
     FrameBegun,
     FrameEnded,
@@ -84,7 +86,7 @@ from clockwork.app.librarypanel import (  # noqa: E402
 )
 from clockwork.app.methodlib import method_diff  # noqa: E402
 from clockwork.app.panes import MARGIN_TAGS, BoxPane  # noqa: E402
-from clockwork.app.queuepanel import QueuePanel  # noqa: E402
+from clockwork.app.queuepanel import BeamGuardDialog, QueuePanel  # noqa: E402
 from clockwork.app.runlog import (  # noqa: E402
     _IS_WARNING,
     RunPanel,
@@ -2901,3 +2903,105 @@ def test_a_run_inside_qt_s_int_is_drawn_in_scans(qtbot):
                         frame_length=20_000_000, frame_timeout=60.0))
     assert panel.progress.unit == 1
     assert panel.bar.maximum() == 2_000_000_000
+
+
+# --- the beam guard (lab record, task 134) --------------------------------------------
+
+
+def test_a_row_the_beam_guard_ended_failed_and_stops_even_a_go_on_series():
+    """Not `stopped`: nobody pressed Stop. And not walked past: what failed is the source
+    every later row needs."""
+    from clockwork.owner.wire import example
+
+    reason = "the beam was lost: 5 repetitions in a row read under 2.8e+05 ions (0, 0)"
+    lost = replace(example(Run), stopped_early=reason, beam_lost=reason)
+    queue = runqueue.RunQueue([runqueue.QueueRow(method_path="a.toml", go_on=True),
+                               runqueue.QueueRow(method_path="b.toml")])
+    row = queue.begin()
+    state = runqueue.outcome_of(row, [lost])
+    assert state == runqueue.FAILED
+    assert row.beam_lost == reason and not row.stopped_early
+    assert not queue.finish(state)
+    assert reason in row.outcome and "stopped:" not in row.outcome
+    assert queue.rows[1].state == runqueue.SKIPPED
+    assert queue.rows[1].problem == "the beam guard stopped the series at a"
+    row.reset()
+    assert row.beam_lost == ""
+
+
+def test_the_beam_guard_is_not_saved_with_the_queue(tmp_path):
+    """Its floor is a reading of the day's beam, not part of the plan."""
+    queue = runqueue.RunQueue([runqueue.QueueRow(method_path=str(tmp_path / "a.toml"))])
+    queue.guard = BeamGuard(floor=2.5e5)
+    assert "floor" not in runqueue.dumps(queue)
+    assert runqueue.loads(runqueue.dumps(queue)).guard is None
+
+
+def test_the_guard_dialog_takes_its_floor_from_a_run_or_a_number(qtbot, tmp_path,
+                                                                 monkeypatch):
+    seen: list[str] = []
+
+    def from_run(path, fraction, repetitions):
+        seen.append(path)
+        return BeamGuard(floor=fraction * 2.0e6, repetitions=repetitions,
+                         source="0.1x the median of 261027_BK_330 (2e+06)")
+
+    monkeypatch.setattr("clockwork.app.queuepanel.from_run", from_run)
+    dialog = BeamGuardDialog(None, lambda: "E:/x/261027_BK_330.uimf")
+    qtbot.addWidget(dialog)
+    assert dialog.chosen() is None, "off until armed"
+    dialog.from_run.click()
+    assert seen == ["E:/x/261027_BK_330.uimf"]
+    guard = dialog.chosen()
+    assert guard == BeamGuard(floor=2.0e5, repetitions=5,
+                              source="0.1x the median of 261027_BK_330 (2e+06)")
+    # A number typed over it has no run behind it any more.
+    dialog.floor.setText("3e5")
+    dialog.floor.textEdited.emit("3e5")
+    assert dialog.chosen() == BeamGuard(floor=3e5, repetitions=5)
+    dialog.floor.setText("")
+    with pytest.raises(ValueError, match="type a floor"):
+        dialog.chosen()
+
+
+def test_a_queue_whose_beam_is_lost_mid_row_fails_that_row_and_stops(
+        window, tmp_path, qtbot):
+    """On the fake rack: the beam goes three repetitions into the first row, the guard
+    ends that row after its count, the row fails, the rows after it are skipped, and the
+    run log says why. Then the same queue, guard off, walks on as it always has."""
+    ready_to_acquire(window, qtbot, tmp_path)
+    queued(window, tmp_path, "first", make_method(accumulations=10), go_on=True)
+    queued(window, tmp_path, "second", make_method())
+    guard = BeamGuard(floor=1000.0, repetitions=3, source="a test's floor")
+    window._ask_guard = lambda current: (guard,)
+    window.queue_guard()
+    assert window.queue.guard == guard
+    assert window.queue_panel.guard_button.text() == "Beam guard: armed…"
+    window.worker.console.fake.beam = [1.0, 1.0, 1.0] + [0.0] * 20
+
+    lines: list[str] = []
+    window.run_panel.say = lambda text, **_: lines.append(text)
+    window.start_queue()
+    until(qtbot, lambda: not window.queue.running and idle(window), timeout=300_000)
+
+    first, second = window.queue.rows
+    assert (first.state, second.state) == (runqueue.FAILED, runqueue.SKIPPED)
+    assert first.beam_lost.startswith("the beam was lost: 3 repetitions in a row")
+    assert len(first.stems) == 1
+    assert second.problem == "the beam guard stopped the series at first"
+    assert f"the beam guard is armed: {guard.text}" in lines
+    assert any(line.startswith("queue row 1 (first): failed") and first.beam_lost in line
+               for line in lines)
+    acquired = UimfFile(str(tmp_path / f"{first.stems[0]}.uimf")).global_params()
+    assert (acquired.run_outcome, acquired.repetitions_acquired) == ("failed", 6)
+
+    window._ask_guard = lambda current: (None,)
+    window.queue_guard()
+    assert window.queue.guard is None
+    for row in window.queue.rows:
+        row.reset()
+    window.worker.console.fake.beam = [0.0] * 20
+    window.start_queue()
+    until(qtbot, lambda: not window.queue.running and idle(window), timeout=300_000)
+    assert [row.state for row in window.queue.rows] == [runqueue.DONE, runqueue.DONE]
+    assert "the beam guard is off" in lines

@@ -3705,6 +3705,21 @@ def main() -> int:
         runqueue.outcome_of(halted, [queued_run("260918_QQ_003", stopped="by hand")])
         == runqueue.STOPPED and "stopped: by hand" in halted.outcome,
     )
+    lost_beam = runqueue.RunQueue([
+        runqueue.QueueRow(method_path="a.toml", go_on=True),
+        runqueue.QueueRow(method_path="b.toml")])
+    tripped = lost_beam.begin()
+    reason = "the beam was lost: 5 repetitions in a row read under 2.8e+05 ions"
+    state = runqueue.outcome_of(tripped, [dataclasses.replace(
+        queued_run("260918_QQ_004", stopped=reason), beam_lost=reason)])
+    check_true(
+        "a row the beam guard ended has failed rather than stopped, and ends the series "
+        "even where it says go on, because every later row needs the same source "
+        "(lab record, task 134)",
+        state == runqueue.FAILED and lost_beam.finish(state) is False
+        and lost_beam.rows[1].state == runqueue.SKIPPED
+        and reason in tripped.outcome,
+    )
     shuffled = runqueue.RunQueue(
         [runqueue.QueueRow(method_path="blank.toml", stays_first=True)]
         + [runqueue.QueueRow(method_path=f"{name}.toml") for name in "abcde"])

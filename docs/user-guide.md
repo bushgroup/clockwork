@@ -323,6 +323,35 @@ waiting, because the file is a plan rather than a record; what the rows did is i
 and their files. Each method is stored by its full path and by its path relative to the queue
 file, so a folder of methods copied to another PC with its queue file beside them still opens.
 A row whose method is found by neither path fails when it starts, and says so in the run log.
+The beam guard, below, is not in the file.
+
+To stop the series when the beam is lost, arm the beam guard before pressing **Start the
+queue**. A beam lost at the source leaves every frame counting out and every fold writing, so
+without the guard each remaining row reads **done** and the loss is found only in the files.
+With the guard armed, every repetition of every row counts its ions, i.e., the sum of its scans'
+TIC as the console publishes them, and a run whose repetitions read under a floor several times
+in a row ends after the current repetition and its fold. Its row is marked **failed**, with the
+reason in the outcome and the run log, the rows after it are **skipped**, and the series stops
+even where the row's **go on if it fails** box is ticked, because every later row needs the
+same source. The run's files say `failed`, with the same sentence as the reason, and keep every
+repetition acquired before the stop.
+
+To arm the guard, press **Beam guard: off…**, tick **stop the queue when the beam is lost**,
+and set the floor in total ions a repetition. **From a run…** reads a run's per-repetition
+file, usually the day's gate run on a beam known to be good, and sets the floor to the fraction
+beside it of that run's median, 0.10 by default; a number typed into the field replaces it.
+**In a row** is how many consecutive repetitions under the floor end a run, 5 by default. The
+button then reads **Beam guard: armed…**, and the run log states the floor and where it came
+from each time the queue starts. The window keeps the guard rather than the queue file, so a
+queue opened after arming keeps it, and closing the window turns it off.
+
+The defaults come from the 336 runs of one queued sweep, on which the beam was lost twice. At
+0.10 of the gate run's median and 5 in a row, both losses stopped the row they began in, on its
+5th and 9th repetition without beam, whereas in none of the 277 runs acquired on a good beam did
+5 consecutive repetitions all read under 0.34 of their gate run's median. Note that the count starts again
+with each run, so a row with fewer repetitions than the count cannot trip it, and a row whose
+repetitions gather ions far longer than the gate run's, such as a 40 s hold, can read above the
+floor with no beam at all. In both cases the next ordinary row stops the series.
 
 ## The state panel
 

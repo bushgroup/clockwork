@@ -13,6 +13,7 @@ blocks, so nothing in it may run on the UI thread.
     uimf.py      the files: the two-phase frame parameters and the fold
     loop.py      a whole acquisition from a method: the boxes, the frames,
                  the fold, a replicate
+    guard.py     the beam guard: the floor a repetition's ion count must reach
     process.py   the console as a process: launch it, watch it, restart it
                  after a `config.txt` change, stop it, and its `config.txt`
     fake.py      a console simulated in this process, for tests and the
@@ -87,6 +88,7 @@ from .fake import (
     DEFAULT_SCAN_PERIOD,
     FakeConsole,
 )
+from .guard import GUARD_FRACTION, GUARD_REPETITIONS, BeamGuard, from_run, repetition_totals
 from .loop import (
     ABORT_AFTER_FAILURES,
     ABORT_AFTER_UNWITNESSED,
@@ -110,6 +112,7 @@ from .loop import (
     WHEN_BEFORE,
     AcquisitionRefused,
     BatchSeen,
+    BeamLost,
     BoxLost,
     BoxReady,
     BoxSaid,
@@ -135,6 +138,7 @@ from .loop import (
     Snapshot,
     StateRead,
     Warned,
+    beam_lost_reason,
     cautions,
     check_pusher_period,
     declared_differences,
@@ -234,6 +238,8 @@ __all__ = [
     "AcquisitionRefused",
     "Batch",
     "BatchSeen",
+    "BeamGuard",
+    "BeamLost",
     "BoxLost",
     "BoxReady",
     "BoxSaid",
@@ -287,6 +293,8 @@ __all__ = [
     "FrameRequest",
     "GATE_GRANULARITY_SAMPLES",
     "GATE_PUBLISH_ALLOWANCE_S",
+    "GUARD_FRACTION",
+    "GUARD_REPETITIONS",
     "GateChecked",
     "Geometry",
     "KEYS",
@@ -335,6 +343,7 @@ __all__ = [
     "WHEN_ARMED",
     "WHEN_BEFORE",
     "Warned",
+    "beam_lost_reason",
     "cautions",
     "check_pusher_period",
     "compress",
@@ -348,11 +357,13 @@ __all__ = [
     "encode_tof_width",
     "find_console",
     "fold_scans",
+    "from_run",
     "LeftAsFound",
     "left_as_found",
     "left_as_found_settings",
     "prepare_console",
     "provenance_globals",
+    "repetition_totals",
     "raw_path",
     "read_startup_block",
     "record_size_samples",
