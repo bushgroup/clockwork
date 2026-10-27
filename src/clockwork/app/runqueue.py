@@ -29,7 +29,7 @@ last one's can say `go_on` and be walked past.
 **Six states, not five.** `waiting`, `running`, `done`, `failed` and `skipped` are the
 obvious ones. `stopped` is the sixth and it is not a synonym for any of them: a run the
 operator stopped folded the method frame it was in and closed its files, so what it left
-on disk is a short experiment rather than a broken one (`Run.stopped_early`). Calling
+on disk is a short experiment rather than a broken one (`Run.stop_asked`). Calling
 that `done` would claim the row acquired what it was asked for and calling it `failed`
 would claim the files are no good; neither is true.
 
@@ -224,9 +224,12 @@ def outcome_of(row: QueueRow, runs: Sequence[Run]) -> str:
 
     A run that came back incomplete is a failure even though it wrote files: frames that
     did not acquire, folds that did not write and a run the loop aborted are all the
-    instrument telling the queue that the next eleven rows will go the same way. A run
-    the beam guard ended is one of those, and is told from a run the operator stopped by
-    `Run.beam_lost`, not by `stopped_early`, which both carry.
+    instrument telling the queue that the next eleven rows will go the same way. So is a
+    run the loop ended early for a reason of its own -- three frames failed in a row, a
+    repetition damaged twice, a gate never seen to come down -- whose reason becomes the
+    row's problem; only a run whose caller asked it to stop (`Run.stop_asked`) is
+    `stopped` (lab record, task 134). A run the beam guard ended is one of the loop's own,
+    and keeps its sentence in `beam_lost` because it also ends a series that goes on.
     """
     row.stems = tuple(
         os.path.splitext(os.path.basename(run.raw_path))[0] for run in runs)
@@ -235,12 +238,15 @@ def outcome_of(row: QueueRow, runs: Sequence[Run]) -> str:
     row.retried_frames = sum(len(run.retried) for run in runs)
     row.console_errors = sum(run.console_errors for run in runs)
     row.beam_lost = next((run.beam_lost for run in runs if run.beam_lost), "") or ""
-    row.stopped_early = "" if row.beam_lost else next(
-        (run.stopped_early for run in runs if run.stopped_early), "") or ""
+    ended = next((run for run in runs if run.stopped_early), None)
+    row.stopped_early = (ended.stopped_early or "") if ended and ended.stop_asked else ""
     if not runs or row.beam_lost:
         return FAILED
     if row.stopped_early:
         return STOPPED
+    if ended is not None:
+        row.problem = ended.stopped_early or ""
+        return FAILED
     if any(not run.complete for run in runs):
         return FAILED
     return DONE

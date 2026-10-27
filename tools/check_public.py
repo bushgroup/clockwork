@@ -3679,7 +3679,7 @@ def main() -> int:
             method=queued_method, raw_path=f"{stem}.uimf",
             summed_path=f"{stem}.summed.uimf", frames=frames,
             folds=(acq.FoldRecord(method_frame=1, frames_folded=(1, 2), rows=8),),
-            warnings=(), seconds=1.0, stopped_early=stopped,
+            warnings=(), seconds=1.0, stopped_early=stopped, stop_asked=stopped is not None,
             retried=tuple(dataclasses.replace(frame, ended_by="silence", retry=False)
                           for frame in frames[:retried]),
             console_errors=errors)
@@ -3705,13 +3705,24 @@ def main() -> int:
         runqueue.outcome_of(halted, [queued_run("260918_QQ_003", stopped="by hand")])
         == runqueue.STOPPED and "stopped: by hand" in halted.outcome,
     )
+    gave_up = runqueue.QueueRow(method_path="sample.toml")
+    check_true(
+        "a row whose run the loop ended for a reason of its own has failed with that "
+        "reason, not been stopped: nobody pressed Stop (lab record, task 134)",
+        runqueue.outcome_of(gave_up, [dataclasses.replace(
+            queued_run("260918_QQ_005", stopped="3 frames in a row failed"),
+            stop_asked=False)]) == runqueue.FAILED
+        and gave_up.problem == "3 frames in a row failed"
+        and "stopped:" not in gave_up.outcome,
+    )
     lost_beam = runqueue.RunQueue([
         runqueue.QueueRow(method_path="a.toml", go_on=True),
         runqueue.QueueRow(method_path="b.toml")])
     tripped = lost_beam.begin()
     reason = "the beam was lost: 5 repetitions in a row read under 2.8e+05 ions"
     state = runqueue.outcome_of(tripped, [dataclasses.replace(
-        queued_run("260918_QQ_004", stopped=reason), beam_lost=reason)])
+        queued_run("260918_QQ_004", stopped=reason), stop_asked=False,
+        beam_lost=reason)])
     check_true(
         "a row the beam guard ended has failed rather than stopped, and ends the series "
         "even where it says go on, because every later row needs the same source "

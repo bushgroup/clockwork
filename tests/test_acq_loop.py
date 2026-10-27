@@ -2784,6 +2784,31 @@ def test_a_run_the_operator_stopped_says_stopped_with_what_it_had(rig):
     assert ended(run.summed_path) == ("stopped", "", acquired, 3)
 
 
+def test_a_run_says_whether_its_caller_stopped_it_or_it_ended_itself(rig, batched):
+    """The `Run` carries what the files already say: `stopped` for the caller's stop,
+    `failed` for the loop's own reason (lab record, task 134)."""
+    method = make_method(accumulations=3, stem="260911_TEST_011")
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes, progress=None)
+    stopped = rig.acquire(method, boxes, stop=lambda: "the operator pressed Stop")
+    assert stopped.stopped_early and stopped.stop_asked
+    assert ended(stopped.raw_path)[0] == "stopped"
+
+    method = make_method(stem="260911_TEST_012")
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    whole = rig.acquire(method, boxes)
+    assert whole.stopped_early is None and not whole.stop_asked
+
+    batched.fake.short_frames = [0, 2, 2]
+    method = make_method(stem="260911_TEST_013")
+    boxes = make_boxes(BOX)
+    send_phases(method, boxes)
+    itself = batched.acquire(method, boxes)
+    assert itself.stopped_early and not itself.stop_asked
+    assert ended(itself.raw_path)[0] == "failed"
+
+
 def test_a_lost_box_fails_the_file_with_its_type_and_sentence(rig):
     """The end of `_014` on lab #3: the frames acquired are folded and the file is kept,
     and both files now say the run failed and why."""

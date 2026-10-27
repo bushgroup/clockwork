@@ -208,14 +208,18 @@ repetition's. Every such frame seen so far also came up short, but one that coun
 otherwise have been summed as a second copy of the repetition before it. Its line in the run log
 ends `the previous frame's triggers read again`.
 
-A repetition that comes up short a second time stops the run, as **Stop** does. The repetitions
-before it are summed into the companion and that one is left out of the sum; it stays in the raw
-file, marked unfinished, and a queue moves on to its next row.
+A repetition that comes up short a second time ends the run after it, as **Stop** does, but as a
+failure: the run's files say `failed` with the reason. The repetitions before it are summed into
+the companion and that one is left out of the sum; it stays in the raw file, marked unfinished.
+In the run queue the row is **failed** with the same reason, so the series stops there unless the
+row's **go on if it fails** box is ticked. Every other reason clockwork has to end a run early,
+such as three frames failing in a row, is a failed row in the same way, and only **Stop** makes a
+row **stopped**.
 
 A row of the run queue counts both events in its outcome: `2 repetition(s) acquired again` for
 the repetitions that came up short, and `console reported 3 errors` for the `[error]` lines the
 acquisition console logged while the row's runs were acquiring. Neither makes the row's files
-unusable. A retried repetition is whole, and a run stopped by a second short end is a short
+unusable. A retried repetition is whole, and a run ended by a second short end is a short
 experiment rather than a broken one.
 
 ## Replicates and naming

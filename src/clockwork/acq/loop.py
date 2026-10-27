@@ -1284,6 +1284,13 @@ class Run:
     seconds: float
     replicate: bool = False
     stopped_early: str | None = None
+    stop_asked: bool = False
+    """Whether `stopped_early` is the caller's `stop` -- an operator's Stop -- rather than
+    the loop's own reason to end the run (three failed frames, a repetition damaged
+    twice, the beam guard). The files already tell the two apart, `stopped` against
+    `failed` (`_Loop.outcome`); this is the same fact for whoever reads the `Run`, so a
+    queue does not call a run the instrument ended a run somebody stopped (lab record,
+    task 134)."""
     raw_kept: bool = True
     """Whether the per-repetition file survived the close, which `keep_raw` decides."""
     retried: tuple[FrameRecord, ...] = ()
@@ -2923,6 +2930,7 @@ class _Loop:
             seconds=self.clock() - self.started,
             replicate=replicate,
             stopped_early=self.stopped_early,
+            stop_asked=self._asked,
             beam_lost=self.beam_lost,
         )
 

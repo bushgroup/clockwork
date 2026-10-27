@@ -1846,7 +1846,7 @@ def test_a_box_the_method_names_that_nothing_answered_for_is_still_editable(
 
 
 def a_run(stem: str, *, stopped: str = "", retried: int = 0, complete: bool = True,
-          console_errors: int = 0):
+          console_errors: int = 0, asked: bool = True):
     """A `Run` in the shape the queue reads: a stem, an ending and its frames.
 
     Built rather than acquired, because what is under test here is the sentence a row
@@ -1866,6 +1866,7 @@ def a_run(stem: str, *, stopped: str = "", retried: int = 0, complete: bool = Tr
     return Run(method=method, raw_path=f"/data/{stem}.uimf",
                summed_path=f"/data/{stem}.summed.uimf", frames=frames, folds=folds,
                warnings=(), seconds=1.0, stopped_early=stopped or None,
+               stop_asked=bool(stopped) and asked,
                retried=discarded, console_errors=console_errors)
 
 
@@ -1904,6 +1905,32 @@ def test_a_stopped_run_is_neither_done_nor_failed_because_its_files_are_good():
     state = runqueue.outcome_of(row, [a_run("260918_ZZ_001", stopped="by the operator")])
     assert state == runqueue.STOPPED
     assert "stopped: by the operator" in row.outcome
+
+
+def test_a_run_the_loop_ended_itself_fails_the_row_with_its_reason():
+    """Nobody pressed Stop: the instrument ended it. So the row is `failed` with the
+    loop's sentence, and the rows after it say a row failed, not that an operator
+    stopped them (lab record, task 134)."""
+    reason = "frame 1.2 came up short twice (5 of 32 scans), so the console is losing data"
+    queue = runqueue.RunQueue([runqueue.QueueRow(method_path="clock.toml"),
+                               runqueue.QueueRow(method_path="next.toml")])
+    row = queue.begin()
+    state = runqueue.outcome_of(row, [a_run("260918_ZZ_001", stopped=reason, asked=False)])
+    assert state == runqueue.FAILED
+    assert not row.stopped_early and row.problem == reason
+    assert not queue.finish(state)
+    assert reason in row.outcome and "stopped:" not in row.outcome
+    assert queue.rows[1].problem == "clock failed and the series stops on a failure"
+
+
+def test_a_row_the_loop_ended_that_says_go_on_is_walked_past():
+    queue = runqueue.RunQueue([runqueue.QueueRow(method_path="a.toml", go_on=True),
+                               runqueue.QueueRow(method_path="b.toml")])
+    row = queue.begin()
+    state = runqueue.outcome_of(
+        row, [a_run("260918_ZZ_001", stopped="3 frames in a row failed", asked=False)])
+    assert state == runqueue.FAILED and queue.finish(state)
+    assert queue.advance() is queue.rows[1]
 
 
 def test_a_run_that_came_back_incomplete_fails_the_row():
@@ -2914,7 +2941,7 @@ def test_a_row_the_beam_guard_ended_failed_and_stops_even_a_go_on_series():
     from clockwork.owner.wire import example
 
     reason = "the beam was lost: 5 repetitions in a row read under 2.8e+05 ions (0, 0)"
-    lost = replace(example(Run), stopped_early=reason, beam_lost=reason)
+    lost = replace(example(Run), stopped_early=reason, stop_asked=False, beam_lost=reason)
     queue = runqueue.RunQueue([runqueue.QueueRow(method_path="a.toml", go_on=True),
                                runqueue.QueueRow(method_path="b.toml")])
     row = queue.begin()
