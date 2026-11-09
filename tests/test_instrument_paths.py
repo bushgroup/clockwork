@@ -230,11 +230,11 @@ def test_the_mcp_server_reads_the_instrument_document_by_default(tmp_path, monke
 
 
 @pytest.mark.parametrize(("folder", "project"), [
-    ("D:/repos/slimphony-ubiquitin-dynamics-data/261109-figure5", "slimphony-ubiquitin-dynamics"),
-    ("D:/repos/slimphony-ubiquitin-dynamics-data", "slimphony-ubiquitin-dynamics"),
+    ("D:/repos/slimphony-demo-data/261109-sitting", "slimphony-demo"),
+    ("D:/repos/slimphony-demo-data", "slimphony-demo"),
     ("D:/repos/slimphony-data/261109-beam-check", "slimphony"),
     ("D:/repos/slimphony-x-data/261109-calibration-data", "slimphony-x"),
-    ("D:/data/Bruce/261103", ""),
+    ("D:/data/someone/261103", ""),
     ("D:/repos/-data/261109", ""),
     ("", ""),
 ])

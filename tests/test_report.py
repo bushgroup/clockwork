@@ -223,7 +223,7 @@ def test_clockwork_report_names_the_project_it_is_given_or_finds(capsys, monkeyp
     assert "Project" not in attachments()
     monkeypatch.setattr("clockwork.app._serve_output", lambda: str(day))
     assert "- Project: slimphony-demo" in attachments()
-    elsewhere = tmp_path / "Bruce" / "261109"
+    elsewhere = tmp_path / "someone" / "261109"
     elsewhere.mkdir(parents=True)
     named = write_transcript(elsewhere / "261109_BB_001-2026-11-09.transcript.log", 3)
     assert "Project" not in attachments("--transcript", named)

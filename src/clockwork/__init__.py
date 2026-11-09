@@ -69,8 +69,11 @@ def lab_dir(name: str | None = None) -> str | None:
     (`instrument_dir`). Order: `$CLOCKWORK_LAB`, then this repo's own root (a lab checkout that
     contains the code), then the sibling `../clockwork-lab`. Returns None when
     nothing resolves -- a public clone has no lab material and every public
-    code path must work without it.
+    code path must work without it. An unknown name is refused whether or not a lab
+    repo resolves, so a public clone refuses it as a lab checkout does.
     """
+    if name is not None and name not in _LAB_SUBDIRS:
+        raise ValueError(f"unknown lab directory {name!r}; one of {_LAB_SUBDIRS}")
     candidates = [
         os.environ.get("CLOCKWORK_LAB"),
         ROOT,
@@ -84,8 +87,6 @@ def lab_dir(name: str | None = None) -> str | None:
             continue
         if name is None:
             return root
-        if name not in _LAB_SUBDIRS:
-            raise ValueError(f"unknown lab directory {name!r}; one of {_LAB_SUBDIRS}")
         path = os.path.join(root, name)
         return path if os.path.isdir(path) else None
     return None

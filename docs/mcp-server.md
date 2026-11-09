@@ -58,7 +58,7 @@ An installed clockwork is not beside any checkout, so the sibling never resolves
 instrument PC, set the variable once for the user who runs clockwork:
 
 ```
-setx CLOCKWORK_INSTRUMENT D:\repos\slimphony
+setx CLOCKWORK_INSTRUMENT C:\lab\slimphony
 ```
 
 ### A project's templates beside the instrument's
@@ -67,7 +67,7 @@ To run templates of a project's own, give the library as the instrument's direct
 project's:
 
 ```
-clockwork serve --library "D:\repos\slimphony\golden;D:\repos\slimphony-demo\templates"
+clockwork serve --library "C:\lab\slimphony\golden;C:\lab\slimphony-demo\templates"
 ```
 
 The directories are searched in order. `list_templates` and `list_methods` name each entry's

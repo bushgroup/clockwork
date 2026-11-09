@@ -603,7 +603,7 @@ give: put the new control where it belongs and let the scroll area do its job.
 """
 
 
-def test_the_window_is_shorter_than_the_screen_it_runs_on(qtbot):
+def test_the_window_is_shorter_than_the_screen_it_runs_on(qtbot, scratch_settings):
     """The requirement, pinned (lab record, task 61, and the window note's screen
     bullet).
 
@@ -621,7 +621,8 @@ def test_the_window_is_shorter_than_the_screen_it_runs_on(qtbot):
         made.worker.wait(10_000)
 
 
-def test_the_run_log_and_the_status_bar_are_on_screen_when_maximized(qtbot):
+def test_the_run_log_and_the_status_bar_are_on_screen_when_maximized(qtbot,
+                                                                     scratch_settings):
     """The thing the height is a proxy for, asserted directly.
 
     Not `minimumSizeHint` this time but the laid-out window at the instrument's own
@@ -644,7 +645,7 @@ def test_the_run_log_and_the_status_bar_are_on_screen_when_maximized(qtbot):
         made.worker.wait(10_000)
 
 
-def test_every_control_in_the_side_column_stays_reachable(qtbot):
+def test_every_control_in_the_side_column_stays_reachable(qtbot, scratch_settings):
     """The scroll area is the structural half of task 61's step 1, and this is what it
     buys: on a screen far too small for the column, the controls are still there to be
     scrolled to rather than clipped away."""
