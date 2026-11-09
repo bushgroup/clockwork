@@ -210,18 +210,21 @@ def add_verbs(commands: argparse._SubParsersAction) -> None:
                             help="the daemon's command socket "
                                  "(default: tcp://127.0.0.1:5570)")
         common.add_argument("--library", metavar="DIR", default="",
-                            help="the method and template library (default: the daemon's)")
+                            help="the method and template library, or several "
+                                 f"joined by {os.pathsep!r} (default: the daemon's)")
         common.add_argument("--output", metavar="DIR", default="",
                             help="where runs are written and read back "
                                  "(default: the daemon's)")
         common.add_argument("--instrument", metavar="PATH", default="",
-                            help="the instrument document runs are acquired under")
+                            help="the instrument document runs are acquired under "
+                                 "(default: the window's saved one, then instrument.toml "
+                                 "in $CLOCKWORK_INSTRUMENT or ../slimphony)")
         common.add_argument("--limits", metavar="PATH", default="",
                             help="the instrument's standing limits (default: limits.toml "
                                  "beside --instrument)")
         common.add_argument("--routines", metavar="DIR", default="",
                             help="the instrument's routines (default: routines beside the "
-                                 "library)")
+                                 "library's first directory)")
         parser.set_defaults(verb=verb, verb_parser=parser)
 
 
@@ -403,6 +406,7 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
     program = f"clockwork {verb.name}"
     arguments = _arguments(verb, args, args.verb_parser)
 
+    from .. import instrument_file
     from ..owner import RemoteOwner
     from ..owner.remote import DEFAULT_COMMAND, DaemonError
     from .audit import AuditLog
@@ -439,12 +443,17 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
         except DaemonError as exc:
             _say(err, f"{program}: {exc}")
             return 1
+        defaulted = not instrument_path and not hello.fake
+        if defaulted:
+            # The instrument directory's own document, and so the limits beside it,
+            # unless one was named or saved; never under a rehearsal's simulated boxes.
+            instrument_path = instrument_file() or ""
         try:
             instrument, limits = instrument_and_limits(
                 fake=bool(hello.fake), instrument_path=instrument_path,
                 limits_path=args.limits)
         except ValueError as exc:
-            if instrument_path and not args.instrument:
+            if instrument_path and not args.instrument and not defaulted:
                 # The path was never typed: a trainee reading "could not be read" looks
                 # for a flag they did not give (lab record, task 96).
                 exc = ValueError(f"{exc}. That path is the window's saved instrument "

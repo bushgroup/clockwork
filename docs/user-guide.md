@@ -85,7 +85,8 @@ setup** needs no **Find boxes** first.
 The stack is whichever method the instrument document names under `[standing]`
 ([instrument file](instrument-file-format.md#standing)), and the method library, instrument
 document and output directory are the ones this window last saved, so set those in the window once
-before the first morning.
+before the first morning. Where nothing is saved, the method library and instrument document are
+the [instrument directory](mcp-server.md#the-instrument-directory)'s.
 
 **Stand down** is the last thing to run in the evening. It takes every box out of table mode, ramps
 every DC bias channel, RF drive level and traveling-wave range down to zero in the same steps,
@@ -434,7 +435,8 @@ wire transcript already filled in, so the report needs only what you did, what h
 you expected. The method's strings stay out: every string sent to a box or to the console is
 removed from the transcript first. A transcript too long to fit is named by its path instead, to
 be dragged into the report. `clockwork report` does the same from a terminal
-([command line](command-line.md)).
+([command line](command-line.md)), and there it also names the research project whose data folder
+the run was written to; the window's report names none.
 
 To report a row of the run queue, right-click the row and choose **Report this run...**. The
 report and its kept folder then carry that row's files, every replicate of it, together with the

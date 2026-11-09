@@ -43,7 +43,7 @@ import traceback
 from collections.abc import Callable
 from typing import TextIO
 
-from .. import __version__
+from .. import __version__, instrument_dir, library_dirs, library_setting
 from ..acq import ClockLockRetried, Event, PusherPeriodChecked, Warned
 from ..acq.process import listening_on, stop_listener
 from ..acq.wire import COMMAND_PORT
@@ -143,6 +143,9 @@ def _run(log: logging.Logger, *, fake: bool, output: str, library: str, console:
             log.info("%s%s", prefix, event.text)
 
     output = os.path.abspath(output or os.getcwd())
+    # The instrument's library when none is named: what a client lists unless it names
+    # its own (`hello`), and where the routines beside it are found.
+    library = library_setting(library_dirs(library or instrument_dir("golden") or ""))
     owner = LocalOwner(fake=fake, program=PROGRAM, lock_path=lock_path, on_event=on_event,
                        kept_root=kept_root, errors_log=errors_log,
                        **({"discover": discover} if discover is not None else {}))
@@ -169,6 +172,7 @@ def _run(log: logging.Logger, *, fake: bool, output: str, library: str, console:
              "about a MIPS box or a digitizer" if fake else "")
     log.info("commands on %s, events on %s; files to %s", server.command_endpoint,
              server.events_endpoint, output)
+    log.info("library %s", library or "(none)")
     if status.holder is not None:
         log.info("holding the instrument lock as %s", status.holder.text)
 

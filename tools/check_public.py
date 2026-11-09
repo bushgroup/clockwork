@@ -1540,6 +1540,55 @@ def main() -> int:
     except ValueError:
         check_true("lab_dir rejects an unknown directory name", True)
 
+    section("instrument-directory resolution")
+    instrument = clockwork.instrument_dir()
+    if instrument is None:
+        skip("instrument directory resolves",
+             "no instrument directory beside this clone and $CLOCKWORK_INSTRUMENT unset; a "
+             "public clone is expected to lack it")
+    else:
+        check_true(f"instrument directory resolves to an instrument document ({instrument})",
+                   os.path.isfile(os.path.join(instrument, clockwork.INSTRUMENT_FILE)))
+    try:
+        clockwork.instrument_dir("console")
+        check_true("instrument_dir rejects a directory that is the lab's", False)
+    except ValueError:
+        check_true("instrument_dir rejects a directory that is the lab's", True)
+    saved_instrument = os.environ.get(clockwork.INSTRUMENT_ENV)
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as scratch:
+        made_instrument = os.path.join(scratch, "an-instrument")
+        project = os.path.join(scratch, "a-project")
+        os.makedirs(os.path.join(made_instrument, "golden"))
+        os.makedirs(os.path.join(project, "tasks"))
+        with open(os.path.join(made_instrument, clockwork.INSTRUMENT_FILE), "w",
+                  encoding="utf-8") as handle:
+            handle.write("schema_version = 1\n")
+        with open(os.path.join(project, "tasks", "README.md"), "w",
+                  encoding="utf-8") as handle:
+            handle.write("# tasks\n")
+        try:
+            os.environ[clockwork.INSTRUMENT_ENV] = made_instrument
+            check_true("$CLOCKWORK_INSTRUMENT names the instrument directory and its library",
+                       clockwork.instrument_dir() == os.path.abspath(made_instrument)
+                       and clockwork.instrument_dir("golden")
+                       == os.path.join(os.path.abspath(made_instrument), "golden")
+                       and clockwork.instrument_dir("routines") is None)
+            os.environ[clockwork.INSTRUMENT_ENV] = project
+            check_true("a directory with a task system and no instrument document is not "
+                       "an instrument directory",
+                       clockwork.instrument_dir() != os.path.abspath(project))
+        finally:
+            if saved_instrument is None:
+                os.environ.pop(clockwork.INSTRUMENT_ENV, None)
+            else:
+                os.environ[clockwork.INSTRUMENT_ENV] = saved_instrument
+    first, second = os.path.abspath("one"), os.path.abspath("two")
+    check_true("a library setting names several directories, in order, each once",
+               clockwork.library_dirs(os.pathsep.join(["one", "", "two", "one"]))
+               == (first, second))
+
     section("opaque lab references")
     shipped = shipped_files()
     check_true(f"there are shipped files to scan ({len(shipped)})", len(shipped) > 20)

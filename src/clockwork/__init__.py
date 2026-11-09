@@ -39,14 +39,34 @@ ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
 """The repository root when running from a checkout (the parent of src/)."""
 
 # The lab repo's directories a session may need, by name. Nothing in src/ hard
-# codes a lab-side path; everything goes through lab_dir().
+# codes a lab-side path; everything goes through lab_dir() or instrument_dir().
+# `golden` here is the lab's founding experiments, the fixtures the tests read; the
+# method library the daemon serves is the instrument's `golden` (instrument_dir).
 _LAB_SUBDIRS = ("tasks", "notes", "explorations", "golden", "vendor", "falkor", "console")
+
+INSTRUMENT_ENV = "CLOCKWORK_INSTRUMENT"
+"""An environment variable naming the instrument directory in place of the sibling."""
+
+INSTRUMENT_SIBLING = "slimphony"
+"""The instrument directory's name beside this checkout, when the variable is not set."""
+
+INSTRUMENT_FILE = "instrument.toml"
+"""The instrument document at the instrument directory's root, which is also what
+recognises the directory (`docs/instrument-file-format.md`); the standing limits are
+the `limits.toml` beside it (`clockwork.envelope.default_path`)."""
+
+# The instrument directory's directories, by name: the method library and the routines
+# beside it (`clockwork.routine.default_directory`).
+_INSTRUMENT_SUBDIRS = ("golden", "routines")
 
 
 def lab_dir(name: str | None = None) -> str | None:
     """Resolve the private lab repo, or one of its top-level directories.
 
-    Order: `$CLOCKWORK_LAB`, then this repo's own root (a lab checkout that
+    The lab repo is clockwork's development record: the console build, vendor material
+    and the founding experiments the tests read. What the daemon serves -- the method
+    library, routines, limits and instrument document -- is the instrument's
+    (`instrument_dir`). Order: `$CLOCKWORK_LAB`, then this repo's own root (a lab checkout that
     contains the code), then the sibling `../clockwork-lab`. Returns None when
     nothing resolves -- a public clone has no lab material and every public
     code path must work without it.
@@ -69,6 +89,70 @@ def lab_dir(name: str | None = None) -> str | None:
         path = os.path.join(root, name)
         return path if os.path.isdir(path) else None
     return None
+
+
+def instrument_dir(name: str | None = None) -> str | None:
+    """Resolve the instrument directory, or one of its top-level directories.
+
+    The instrument directory holds what belongs to one instrument rather than to
+    clockwork: the instrument document, the standing limits beside it, the method
+    library (`golden`) and the routines. `$CLOCKWORK_INSTRUMENT` when it is set, and
+    then nothing else: a variable naming the wrong folder resolves nothing rather than
+    quietly serving another instrument's material. Otherwise the sibling
+    `../slimphony` beside this checkout, which an installed clockwork does not have, so
+    an instrument PC sets the variable. Recognised by the instrument document at its
+    root (`INSTRUMENT_FILE`), never by a task system, which a project's repository has
+    too. Returns None when nothing resolves: a public clone has no instrument beside
+    it, and every code path that defaults to one must work without it.
+    """
+    if name is not None and name not in _INSTRUMENT_SUBDIRS:
+        raise ValueError(f"unknown instrument directory {name!r}; one of "
+                         f"{_INSTRUMENT_SUBDIRS}")
+    named = os.environ.get(INSTRUMENT_ENV)
+    candidates = ([named] if named else
+                  [os.path.abspath(os.path.join(ROOT, "..", INSTRUMENT_SIBLING))])
+    for root in candidates:
+        if not root or not os.path.isfile(os.path.join(root, INSTRUMENT_FILE)):
+            continue
+        root = os.path.abspath(root)
+        if name is None:
+            return root
+        path = os.path.join(root, name)
+        return path if os.path.isdir(path) else None
+    return None
+
+
+def instrument_file() -> str | None:
+    """The instrument document at the instrument directory's root, or None."""
+    root = instrument_dir()
+    return os.path.join(root, INSTRUMENT_FILE) if root is not None else None
+
+
+def library_dirs(value: str) -> tuple[str, ...]:
+    """The directories a library setting names, absolute, in the order they are searched.
+
+    A library setting (`--library`, the daemon's `hello`, the window's) is one directory
+    or several joined by `os.pathsep` -- `;` on Windows -- so a project's own templates
+    can sit beside the instrument's library. Empty parts are dropped, and a directory
+    named twice is kept once, where it first appears.
+    """
+    found: list[str] = []
+    seen: set[str] = set()
+    for part in (value or "").split(os.pathsep):
+        part = part.strip()
+        if not part:
+            continue
+        path = os.path.abspath(part)
+        key = os.path.normcase(path)
+        if key not in seen:
+            seen.add(key)
+            found.append(path)
+    return tuple(found)
+
+
+def library_setting(directories: tuple[str, ...] | list[str]) -> str:
+    """`library_dirs`'s inverse: the directories as one setting."""
+    return os.pathsep.join(directories)
 
 
 def commit_of(repo: str) -> str | None:
@@ -110,4 +194,6 @@ def built_commit() -> str | None:
     return commit_of(ROOT) or _built
 
 
-__all__ = ["ROOT", "__version__", "built_commit", "commit_of", "lab_dir"]
+__all__ = ["INSTRUMENT_ENV", "INSTRUMENT_FILE", "INSTRUMENT_SIBLING", "ROOT", "__version__",
+           "built_commit", "commit_of", "instrument_dir", "instrument_file", "lab_dir",
+           "library_dirs", "library_setting"]

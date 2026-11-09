@@ -254,6 +254,11 @@ Three terms carry more than one sense and are given both in one entry: *table*, 
 - **Lab repo.** The private sibling repository holding this project's development record.
   `clockwork.lab_dir()` resolves it when it is present, and every code path here works when it is
   not.
+- **Instrument directory.** The folder holding one instrument's own material: its instrument
+  document as `instrument.toml`, the standing limits beside it, the method library as the
+  `golden` directory, and the routines. `clockwork.instrument_dir()` resolves it from `$CLOCKWORK_INSTRUMENT` or a
+  `slimphony` folder beside the checkout, and the daemon, the MCP server and the verbs default to
+  it ([MCP server](mcp-server.md#the-instrument-directory)).
 - **Layer 1 to Layer 4.** Vocabulary from a superseded four-layer plan: an experiment data model
   (1), a compiler from it to table strings (2), deployment to the boxes (3), and acquisition (4).
   Version 1 has no compiler and no data model, so a reference to Layer 1 in the protocol documents

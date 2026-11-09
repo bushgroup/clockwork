@@ -29,7 +29,11 @@ terminal on the instrument PC. In order, it
 
 `--output` is the directory a run's files go to when a job names none, the working directory by
 default. `--library` is the method library a client may list, reported by `hello` and otherwise
-unused by the daemon. `--fake` runs everything above over simulated boxes and a simulated
+unused by the daemon. It may name several directories joined by `;` (`:` off Windows), searched
+in order, and defaults to the `golden` directory of the
+[instrument directory](mcp-server.md#the-instrument-directory) when that resolves; the daemon
+logs the library it serves when it starts. `--fake` runs everything above over simulated boxes
+and a simulated
 console: it takes no lock, stops nothing, opens no port but its own two, and nothing it reports is
 evidence about a MIPS box or a digitizer. `--kept` is the folder a failed run's files are copied
 into, the `$CLOCKWORK_REPORTS` or per-user default otherwise, and `--errors-log` is a front end's

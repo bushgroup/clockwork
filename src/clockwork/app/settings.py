@@ -94,10 +94,10 @@ class Settings:
     def library_dir(self) -> str:
         """Where the method library browser looks (lab record, task 54).
 
-        No machine-independent default: the lab's own method library is lab material and
+        No machine-independent default: the instrument's method library is lab material and
         a public clone has no opinion about where a trainee's methods live. The window
-        offers `lab_dir`'s `golden` directory as a starting point when it resolves and
-        this is still empty, which is a one-time suggestion rather than a stored default
+        offers `instrument_dir`'s `golden` directory as a starting point when it resolves
+        and this is still empty, which is a one-time suggestion rather than a stored default
         -- once a trainee points the setting anywhere, that choice is what is remembered.
         """
         return str(self._settings.value("library_dir", "") or "")

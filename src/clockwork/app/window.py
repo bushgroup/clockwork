@@ -1087,12 +1087,13 @@ class MainWindow(QMainWindow):
     def open_library(self) -> None:
         """The method browser: open a document into the panes, or run either diff.
 
-        The directory offered the first time is `lab_dir("golden")` where it resolves
-        and nothing has been picked yet -- a one-time suggestion, not a stored default
-        (`Settings.library_dir`), since a public clone has no golden library to suggest
-        and this repo's own is lab material this module never names by path.
+        The directory offered the first time is the instrument's library,
+        `instrument_dir("golden")`, where it resolves and nothing has been picked yet --
+        a one-time suggestion, not a stored default (`Settings.library_dir`), since a
+        public clone has no instrument beside it and the instrument's library is lab
+        material this module never names by path.
         """
-        directory = self.settings.library_dir or clockwork.lab_dir("golden") or ""
+        directory = self.settings.library_dir or clockwork.instrument_dir("golden") or ""
         dialog = LibraryDialog(directory, self.readings, self)
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.chosen_path:
             self.settings.library_dir = dialog.directory()
@@ -2033,7 +2034,8 @@ class MainWindow(QMainWindow):
 
     def report_url(self, *, report_id: str = "", kept: str = "") -> str:
         """The pre-filled bug report for this window: the method's name, and the
-        transcript of the run in flight or else of the last one."""
+        transcript of the run in flight or else of the last one. No project: the window
+        knows none, whatever folder its runs are written to (lab record, task 158)."""
         from ..report import Report
 
         _directory, _stem, transcript = self._report_inputs()

@@ -454,7 +454,8 @@ def _report(args: argparse.Namespace) -> int:
         except OSError as exc:
             print(f"the files could not be kept: {exc}", file=sys.stderr)
     address = Report(method=args.method, transcript=args.transcript,
-                     errors_log=errors_log, report_id=report_id, kept=kept).url()
+                     errors_log=errors_log, report_id=report_id, kept=kept,
+                     project=_report_project(args)).url()
     if kept:
         print(f"files kept in {kept}", file=sys.stderr)
     print(address)
@@ -463,6 +464,34 @@ def _report(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
     return 0
+
+
+def _report_project(args: argparse.Namespace) -> str:
+    """The project `clockwork report` stamps: `--project`, else the one the named
+    transcript's folder belongs to, else the one the running serve writes into
+    (`clockwork.report.project_of`); empty when none of them names one."""
+    from clockwork.report import project_of
+
+    if args.project:
+        return args.project
+    if args.transcript:
+        return project_of(os.path.dirname(os.path.abspath(args.transcript)))
+    return project_of(_serve_output())
+
+
+def _serve_output() -> str:
+    """The running serve's output folder, or empty when none answers within a second:
+    a report is often made because something stopped, and must not wait on it."""
+    from clockwork.owner import RemoteOwner
+    from clockwork.owner.remote import DEFAULT_COMMAND, DaemonError
+
+    owner = RemoteOwner(DEFAULT_COMMAND, origin="clockwork report", timeout=1.0)
+    try:
+        return owner.hello().output
+    except DaemonError:
+        return ""
+    finally:
+        owner.close()
 
 
 def _request(args: argparse.Namespace) -> int:
@@ -528,7 +557,9 @@ def main(argv: list[str] | None = None) -> int:
                        help="where a run's files go when a job names no directory "
                             "(default: the working directory)")
     serve.add_argument("--library", metavar="DIR", default="",
-                       help="the method library clients may list")
+                       help="the method library clients may list, or several directories "
+                            f"joined by {os.pathsep!r}, searched in order (default: golden "
+                            "in $CLOCKWORK_INSTRUMENT, then in ../slimphony)")
     serve.add_argument("--console", metavar="PATH", default="",
                        help="the acquisition console executable, or a directory holding "
                             "it (default: $CLOCKWORK_CONSOLE, then the installer's)")
@@ -552,17 +583,20 @@ def main(argv: list[str] | None = None) -> int:
         help="simulated boxes and console in this process; no daemon needed. Nothing it "
              "reports is evidence about a MIPS box or a digitizer.")
     mcp.add_argument("--library", metavar="DIR", default="",
-                     help="the method and template library (default: the daemon's)")
+                     help="the method and template library, or several directories "
+                          f"joined by {os.pathsep!r} (default: the daemon's)")
     mcp.add_argument("--output", metavar="DIR", default="",
                      help="where runs are written and read back (default: the daemon's)")
     mcp.add_argument("--instrument", metavar="PATH", default="",
-                     help="the instrument document runs are acquired under")
+                     help="the instrument document runs are acquired under (default: "
+                          "instrument.toml in $CLOCKWORK_INSTRUMENT, then in ../slimphony; "
+                          "none under --fake)")
     mcp.add_argument("--limits", metavar="PATH", default="",
                      help="the instrument's standing limits (default: limits.toml beside "
                           "--instrument; docs/instrument-limits.md)")
     mcp.add_argument("--routines", metavar="DIR", default="",
-                     help="the instrument's routines (default: routines beside the library; "
-                          "docs/routines.md)")
+                     help="the instrument's routines (default: routines beside the "
+                          "library's first directory; docs/routines.md)")
     mcp.add_argument("--endpoint", metavar="ADDRESS", default="",
                      help="the daemon's command socket (default: tcp://127.0.0.1:5570)")
     report = commands.add_parser(
@@ -581,6 +615,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="print the address and open no browser")
     report.add_argument("--no-keep", action="store_true",
                         help="copy nothing to the kept-files folder")
+    report.add_argument("--project", metavar="NAME", default="",
+                        help="the research project the report is from (default: read off "
+                             "the transcript's folder, else the running serve's output "
+                             "folder, when either is a project's <project>-data folder)")
     request = commands.add_parser(
         "request", help="open a feature request on the lab's issue tracker",
         description="Open a new feature request in the browser with the version, the "

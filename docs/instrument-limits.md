@@ -95,7 +95,9 @@ reason, and `status` lists every such problem across the library.
 ## Where the document lives
 
 `clockwork mcp --limits PATH` names the document. Without the flag, the server looks for
-`limits.toml` beside the document given to `--instrument`. Against the instrument, a server with no
+`limits.toml` beside the document given to `--instrument`, which is by default the instrument
+directory's own ([MCP server](mcp-server.md#the-instrument-directory)), so an instrument keeps its
+limits beside its document at the directory's root. Against the instrument, a server with no
 limits refuses every send, and says so under `status`. Under `--fake` a server with no limits
 refuses nothing, so that the tools can be exercised on a machine with no instrument, while a
 rehearsal given limits is held to them exactly as the instrument would be.

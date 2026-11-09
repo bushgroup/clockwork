@@ -62,7 +62,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .. import envelope, summary
+from .. import envelope, library_dirs, library_setting, summary
 from .. import manifest as manifest_module
 from .. import method as method_module
 from .. import routine as routine_module
@@ -224,10 +224,15 @@ class Toolbox:
         routines: str = "",
     ) -> None:
         self.owner = owner
-        self.library = os.path.abspath(library) if library else ""
+        self.libraries = library_dirs(library)
+        """The library's directories in the order searched: the instrument's first, then
+        any a project adds (`clockwork.library_dirs`)."""
+        self.library = library_setting(self.libraries)
         self.routines = (os.path.abspath(routines) if routines
-                         else routine_module.default_directory(self.library))
-        """Where the instrument's routines are: `routines` beside the library unless named."""
+                         else routine_module.default_directory(
+                             self.libraries[0] if self.libraries else ""))
+        """Where the instrument's routines are: `routines` beside the library's first
+        directory unless named."""
         self.narrate: Callable[[str], None] | None = None
         """Told each step of a `run_routine` as it happens, for a person watching a
         command line; nothing else reads it."""
@@ -317,21 +322,30 @@ class Toolbox:
         instrument's standing limits are in force, `limits` says whether an agent may
         run the template at all and how far each knob may be turned: narrower than the
         template's own range, or fixed.
+
+        `library` is the directory each template was found in: the library can be
+        several, the instrument's and a project's own, and `path` is relative to it. A
+        path found in two of them is listed from both with `duplicate` naming every
+        copy, and every tool refuses it until one copy is renamed or removed.
         """
         templates = []
-        for path in self._library_files():
-            relative = os.path.relpath(path, self.library).replace(os.sep, "/")
+        duplicates = self._duplicates()
+        for library, path in self._library_files():
+            relative = os.path.relpath(path, library).replace(os.sep, "/")
+            where = {"path": relative, "library": library,
+                     **({"duplicate": duplicates[relative]} if relative in duplicates
+                        else {})}
             try:
                 with open(path, "rb") as handle:
                     if not template_module.is_template(tomllib.load(handle)):
                         continue
                 loaded = template_module.load_template(path)
             except (OSError, tomllib.TOMLDecodeError, TemplateError) as exc:
-                templates.append({"path": relative, "problem": str(exc)})
+                templates.append({**where, "problem": str(exc)})
                 continue
             constants = dict(loaded.constants)
             templates.append({
-                "path": relative,
+                **where,
                 "name": loaded.name,
                 "description": str(loaded.body.get("metadata", {}).get("description", "")),
                 "hash": loaded.hash[:HASH_DIGITS],
@@ -354,14 +368,15 @@ class Toolbox:
         Templates are listed by `list_templates` instead. A method written by
         `render_template` with `to` says which template and knob values it came from, in
         `rendered`. A document that does not load is listed with the problem that stopped
-        it.
+        it. `library` is the directory each was found in, and `path` is relative to it.
         """
         methods = []
         for entry in methodlib.scan_library(self.library):
             if self._is_template(entry.path):
                 continue
             methods.append({
-                "path": os.path.relpath(entry.path, self.library).replace(os.sep, "/"),
+                "path": os.path.relpath(entry.path, entry.library).replace(os.sep, "/"),
+                "library": entry.library,
                 "name": entry.name,
                 "hash": entry.hash,
                 "created": entry.created.isoformat() if entry.created else None,
@@ -1437,10 +1452,19 @@ class Toolbox:
 
     # -- helpers -----------------------------------------------------------------
 
-    def _library_files(self) -> list[str]:
-        if not self.library or not os.path.isdir(self.library):
-            return []
-        return sorted(glob.glob(os.path.join(self.library, "**", "*.toml"), recursive=True))
+    def _library_files(self) -> list[tuple[str, str]]:
+        """Every document in the library, as (its library directory, its path)."""
+        return [(library, path) for library in self.libraries
+                for path in methodlib.library_files(library)]
+
+    def _duplicates(self) -> dict[str, list[str]]:
+        """Each path, relative to its library, that more than one library holds, with
+        the full path of every copy."""
+        copies: dict[str, list[str]] = {}
+        for library, path in self._library_files():
+            relative = os.path.relpath(path, library).replace(os.sep, "/")
+            copies.setdefault(relative, []).append(path)
+        return {relative: paths for relative, paths in copies.items() if len(paths) > 1}
 
     @staticmethod
     def _is_template(path: str) -> bool:
@@ -1451,12 +1475,25 @@ class Toolbox:
             return False
 
     def _in_library(self, path: str) -> str:
+        """A path a tool was given, made absolute against the library.
+
+        Searched in every library directory in order. A path in two of them is refused
+        with both named, never quietly the first: a project's copy of a template and the
+        instrument's are two experiments under one name. A path in none is placed in the
+        last directory, which is a project's own when one adds its templates after the
+        instrument's, so a rendered method a session writes lands there and never in
+        the instrument's library unless that is the only one."""
         if os.path.isabs(path):
             return path
-        if not self.library:
+        if not self.libraries:
             raise ToolFailure(f"{path!r} is not an absolute path and no method library is "
                               "set; start the server with --library")
-        return os.path.join(self.library, path)
+        found = [os.path.join(library, path) for library in self.libraries
+                 if os.path.exists(os.path.join(library, path))]
+        if len(found) > 1:
+            raise ToolFailure(f"{path!r} is in more than one library, " + " and ".join(found)
+                              + "; rename or remove one copy, or name it by its full path")
+        return found[0] if found else os.path.join(self.libraries[-1], path)
 
     def _write_rendered(self, rendered: Rendered, to: str, overwrite: bool) -> str:
         """Save a render with its `[rendered]` table; the absolute path it went to."""
@@ -1581,7 +1618,7 @@ class Toolbox:
 
     def _templates(self) -> list[Template]:
         found = []
-        for path in self._library_files():
+        for _, path in self._library_files():
             if not self._is_template(path):
                 continue
             try:

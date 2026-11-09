@@ -104,3 +104,20 @@ def no_saved_settings(monkeypatch):
     to exercise the fallback patches `saved_settings` itself.
     """
     monkeypatch.setattr("clockwork.app.saved.saved_settings", lambda keys=None: {})
+
+
+@pytest.fixture(autouse=True)
+def no_instrument_directory(tmp_path_factory, monkeypatch):
+    """Point `clockwork.instrument_dir` at an empty folder of this test's own (lab record,
+    task 158).
+
+    The daemon, the MCP server and the verbs default to the instrument directory's
+    library, document and limits, and on an instrument PC the sibling beside this
+    checkout is the real one: a test would list the lab's templates and acquire under
+    its limits. The variable is authoritative once set, so an empty folder resolves
+    nothing, in this process and in every one a test starts. A test that means to
+    exercise the default sets the variable to a tree of its own.
+    """
+    from clockwork import INSTRUMENT_ENV
+
+    monkeypatch.setenv(INSTRUMENT_ENV, str(tmp_path_factory.mktemp("no-instrument")))

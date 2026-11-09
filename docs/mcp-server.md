@@ -25,15 +25,59 @@ exits with one sentence on standard error if no daemon answers. The daemon owns 
 acquisition console; the MCP server owns nothing, and any number of servers, windows and command
 lines can drive one daemon.
 
-`--library` is the directory of method documents and templates the tools list, and `--output` is
-where runs are written and where the data tools read by default. Both default to the daemon's own
-`--library` and `--output`. `--instrument` is the instrument document runs are acquired under
-([instrument file](instrument-file-format.md)); the acquisition loop refuses a document that
+`--library` is the directory of method documents and templates the tools list, or several
+directories joined by `;` (`:` off Windows), and `--output` is where runs are written and where
+the data tools read by default. Both default to the daemon's own `--library` and `--output`.
+`--instrument` is the instrument document runs are acquired under
+([instrument file](instrument-file-format.md)), by default the one in the
+[instrument directory](#the-instrument-directory); the acquisition loop refuses a document that
 states no channel offset, exactly as it does from the window. `--limits` is the instrument's
 [standing limits](instrument-limits.md), by default the `limits.toml` beside the instrument
 document; limits named and not found, or found and not valid, stop the server with the problems
 on standard error. `--routines` is the directory of the instrument's [routines](routines.md), by
-default the `routines` directory beside the library.
+default the `routines` directory beside the library's first directory.
+
+### The instrument directory
+
+An instrument's own material lives in one directory: the instrument document as
+`instrument.toml` at its root, the standing limits as `limits.toml` beside it, the method
+library as the `golden` directory and the routines as the `routines` directory. The directory is
+`$CLOCKWORK_INSTRUMENT` when that variable is set, and otherwise a folder named `slimphony`
+beside the clockwork checkout. The `instrument.toml` at its root is what marks it, so a folder without one is never
+taken for it. A variable that names a folder without one resolves nothing; clockwork does not
+then fall back on the sibling.
+
+With no flags, `clockwork serve` lists the instrument directory's `golden` directory, and the MCP
+server and the command-line verbs acquire under its `instrument.toml` with the `limits.toml`
+beside it in force. A flag, or the window's saved setting where the verbs read one, always wins. A `--fake`
+server takes no instrument document by default. A public clone has no instrument directory, and
+every default then falls back to what it was without one: no library, no instrument document, no
+limits.
+
+An installed clockwork is not beside any checkout, so the sibling never resolves for it. On an
+instrument PC, set the variable once for the user who runs clockwork:
+
+```
+setx CLOCKWORK_INSTRUMENT D:\repos\slimphony
+```
+
+### A project's templates beside the instrument's
+
+To run templates of a project's own, give the library as the instrument's directory and then the
+project's:
+
+```
+clockwork serve --library "D:\repos\slimphony\golden;D:\repos\slimphony-demo\templates"
+```
+
+The directories are searched in order. `list_templates` and `list_methods` name each entry's
+`library`, with `path` relative to it. A path found in two directories is listed from both, each
+with a `duplicate` field naming every copy, and every tool refuses it with both paths named until
+one copy is renamed or removed; a template is never taken quietly from the first. A relative path
+that names a file in none of them, such as `render_template`'s `to`, is placed in the last
+directory, which is the project's. The [standing limits](instrument-limits.md) still name every
+template that may run: a project template they do not list is refused against the instrument as
+any unlisted template is.
 
 `--fake` needs no daemon. The server holds simulated boxes and a simulated acquisition console of
 its own, starts the console at once, and writes its files to
@@ -71,7 +115,8 @@ For the instrument, start `clockwork serve` at a terminal first, then point the 
 ```
 
 Claude Code starts a project's servers in the project directory, which is where `uv run` finds
-this package. The instrument path above is an example; use the document the window uses.
+this package. The instrument path above is an example; use the document the window uses, or
+leave `--instrument` out where the [instrument directory](#the-instrument-directory) resolves.
 
 ## The tools
 

@@ -2548,6 +2548,24 @@ def test_report_a_problem_sits_above_about_and_names_the_last_run(window, tmp_pa
     assert "STBLDAT" not in text
 
 
+def test_a_window_report_names_no_project_whatever_folder_the_run_is_in(window,
+                                                                       tmp_path,
+                                                                       monkeypatch):
+    """The project line is `clockwork report`'s, read off a project's data folder; the
+    window knows no project (lab record, task 158)."""
+    from urllib.parse import parse_qs, urlsplit
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    day = tmp_path / "slimphony-demo-data" / "261109-scout"
+    day.mkdir(parents=True)
+    (day / "ZZ-007-2026-11-09.transcript.log").write_text(
+        "10:00:00.001 acq.loop         FrameDone: frame 1 finished\n", encoding="utf-8")
+    window._last_run_paths = (str(day / "ZZ-007.uimf"), "", "ZZ-007")
+    text = parse_qs(urlsplit(window.report_url()).query)["attachments"][0]
+    assert "FrameDone: frame 1 finished" in text
+    assert "Project" not in text
+
+
 def test_report_a_problem_keeps_the_last_run_off_the_ui_thread(window, tmp_path, qtbot,
                                                                monkeypatch):
     from urllib.parse import parse_qs, urlsplit

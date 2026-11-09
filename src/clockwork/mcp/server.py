@@ -165,9 +165,12 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
     process and the console is started at once, as `clockwork serve --fake` does;
     otherwise the tools drive `clockwork serve` at `endpoint`, and a daemon that does
     not answer is one sentence on stderr and exit code 1. `library` and `output`
-    default to the daemon's own (`hello`), or under `fake` to the lab's golden
-    experiments where a lab checkout is beside this one and to `fake_output()`.
-    `routines` defaults to the `routines` directory beside the library.
+    default to the daemon's own (`hello`), or under `fake` to the instrument's library
+    where an instrument directory resolves (`clockwork.instrument_dir`) and to
+    `fake_output()`. `library` may name several directories (`clockwork.library_dirs`).
+    `routines` defaults to the `routines` directory beside the library's first.
+    `instrument_path` defaults, except under `fake`, to the instrument directory's
+    document (`clockwork.instrument_file`), so the limits beside it are in force.
 
     `limits_path` is the instrument's standing limits (`clockwork.envelope`), by default
     the `limits.toml` beside `instrument_path` if there is one. Limits named and not
@@ -177,10 +180,12 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
     refused nothing.
     """
     say = stream if stream is not None else sys.stderr
-    from .. import lab_dir
+    from .. import instrument_dir, instrument_file
     from ..owner import LocalOwner, RemoteOwner, StartConsole
     from ..owner.remote import DEFAULT_COMMAND, DaemonError
 
+    if not fake and not instrument_path:
+        instrument_path = instrument_file() or ""
     try:
         instrument, limits = instrument_and_limits(
             fake=fake, instrument_path=instrument_path, limits_path=limits_path)
@@ -191,7 +196,7 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
     if fake:
         owner: object = LocalOwner(fake=True, program=f"{PROGRAM} --fake").start()
         owner.submit(StartConsole(label="starting the simulated console"))  # type: ignore[attr-defined]
-        library = library or lab_dir("golden") or ""
+        library = library or instrument_dir("golden") or ""
         output = output or fake_output()
     else:
         owner = RemoteOwner(endpoint or DEFAULT_COMMAND, origin=ORIGIN)

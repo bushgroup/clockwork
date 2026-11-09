@@ -194,3 +194,36 @@ def test_clockwork_report_keeps_the_named_run_unless_told_not_to(capsys, monkeyp
     assert manifest.fields["reason"] == "reported" and manifest.stems() == [stem]
     assert {row.kept for row in manifest.rows if row.status == "copied"} >= {
         f"{stem}.uimf", f"{stem}-2026-09-25.transcript.log"}
+
+
+# --- the project a report is from (lab record, task 158) ------------------------------
+
+
+@pytest.fixture(autouse=True)
+def no_serve_answers(monkeypatch):
+    """No test here asks a real `clockwork serve` for its output folder: on an instrument
+    PC one is running, and the report would carry the project it is writing into."""
+    monkeypatch.setattr("clockwork.app._serve_output", lambda: "")
+
+
+def test_clockwork_report_names_the_project_it_is_given_or_finds(capsys, monkeypatch,
+                                                                 tmp_path):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    day = tmp_path / "slimphony-demo-data" / "261109-scout"
+    day.mkdir(parents=True)
+    transcript = write_transcript(day / "261109_ZZ_001-2026-11-09.transcript.log", 3)
+
+    def attachments(*extra: str) -> str:
+        assert main(["report", "--print-only", "--no-keep", *extra]) == 0
+        return fields(capsys.readouterr().out.strip())["attachments"]
+
+    assert "- Project: slimphony-demo" in attachments("--transcript", transcript)
+    assert "- Project: other" in attachments("--transcript", transcript,
+                                             "--project", "other")
+    assert "Project" not in attachments()
+    monkeypatch.setattr("clockwork.app._serve_output", lambda: str(day))
+    assert "- Project: slimphony-demo" in attachments()
+    elsewhere = tmp_path / "Bruce" / "261109"
+    elsewhere.mkdir(parents=True)
+    named = write_transcript(elsewhere / "261109_BB_001-2026-11-09.transcript.log", 3)
+    assert "Project" not in attachments("--transcript", named)

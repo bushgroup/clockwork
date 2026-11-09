@@ -20,7 +20,9 @@ keeps the instrument, beside the method library, and changed when the instrument
 
 Routines are TOML documents in one directory, by default the `routines` directory beside the
 method library: a library at `C:\lab\golden` has its routines in `C:\lab\routines`. The
-`--routines` option of `clockwork mcp` and of every verb names another. Each document carries
+routines of a library of several directories are beside the first, which is the instrument's
+([instrument directory](mcp-server.md#the-instrument-directory)). The `--routines` option of
+`clockwork mcp` and of every verb names another. Each document carries
 `routine_schema` at its top, which is what distinguishes a routine from a method or a template in
 the same tree; any other document in the directory is ignored.
 

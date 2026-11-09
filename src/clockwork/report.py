@@ -23,6 +23,13 @@ evidence after the trainee has deleted or re-used the run (lab record, task 81).
 `feature.yml` with only the version and the PC filled in: a request is about what
 clockwork should do next, not about a run, so nothing is kept and no log goes in.
 
+**A report from a project names it.** An instrument shared by several research projects
+writes each project's runs under a data folder of its own, `<repo>-data/<day>/`, and a
+report made where that folder is known -- `clockwork report`, from the run's transcript or
+the serve's output -- carries a `Project:` line read off the folder's name
+(`project_of`). The window knows no project and its reports carry none; clockwork reads
+nothing of a project's repository.
+
 One module for every caller, and Qt-free: the window opens the URL with
 `QDesktopServices`, `clockwork report` and `clockwork request` with `webbrowser`.
 """
@@ -37,8 +44,8 @@ import sys
 from collections.abc import Sequence
 from urllib.parse import urlencode
 
-__all__ = ["BUDGET", "ISSUES", "Report", "outbound", "request_url", "tail",
-           "transcript_beside", "url"]
+__all__ = ["BUDGET", "DATA_SUFFIX", "ISSUES", "Report", "outbound", "project_of",
+           "request_url", "tail", "transcript_beside", "url"]
 
 ISSUES = "https://github.com/bushgroup/clockwork-lab/issues/new"
 """The lab's issue tracker. `$CLOCKWORK_ISSUES` points a report elsewhere, for a group
@@ -56,6 +63,9 @@ TAIL_LINES = 40
 
 MIN_TRANSCRIPT_LINES = 5
 """Fewer transcript lines than this are not worth sending; the path is sent instead."""
+
+DATA_SUFFIX = "-data"
+"""What ends the name of a project's data folder, beside the project's repository."""
 
 _TIMESTAMPED = re.compile(r"^\d\d:\d\d:\d\d\.\d{3} (\S+)\s+(.*)$")
 
@@ -105,6 +115,23 @@ def tail(path: str | os.PathLike[str] | None, lines: int = TAIL_LINES, *,
     return found[-lines:] if lines > 0 else []
 
 
+def project_of(directory: str) -> str:
+    """The project a run's folder belongs to, read off its name, else the empty string.
+
+    A project's runs are written to `<project>-data/<day>/`, so the project is the day
+    folder's parent with `-data` taken off; a folder that is itself `<project>-data` is
+    read the same way. Anything else -- a person's folder, the working directory -- names
+    no project and gives the empty string, never a guess.
+    """
+    if not directory:
+        return ""
+    path = os.path.normpath(os.path.abspath(directory))
+    for name in (os.path.basename(os.path.dirname(path)), os.path.basename(path)):
+        if name.lower().endswith(DATA_SUFFIX) and len(name) > len(DATA_SUFFIX):
+            return name[:-len(DATA_SUFFIX)]
+    return ""
+
+
 def transcript_beside(directory: str, stem: str) -> str:
     """The newest `<stem>-<date>.transcript.log` in `directory`, else the empty string.
 
@@ -126,7 +153,7 @@ class Report:
     def __init__(self, *, version: str = "", commit: str | None = "", pc: str = "",
                  system: str = "", method: str = "", errors_log: str = "",
                  transcript: str = "", issues: str = "", report_id: str = "",
-                 kept: str = "") -> None:
+                 kept: str = "", project: str = "") -> None:
         import clockwork
 
         self.version = version or clockwork.__version__
@@ -141,6 +168,9 @@ class Report:
         """The kept folder's report id (`clockwork.keep`), or empty where none was kept."""
         self.kept = kept
         """The kept folder's path on this PC, or empty."""
+        self.project = project
+        """The research project the run belongs to (`project_of`), or empty: always empty
+        from the window, which knows no project."""
 
     def url(self, budget: int = BUDGET) -> str:
         """The pre-filled form's URL, no longer than `budget` characters."""
@@ -165,6 +195,8 @@ class Report:
              cut_transcript: bool) -> str:
         version = _version_line(self.version, self.commit)
         block = ["Filled in by clockwork:", "", f"- Operating system: {self.system}"]
+        if self.project:
+            block.append(f"- Project: {self.project}")
         if self.report_id:
             block.append(f"- Report id: {self.report_id}")
         if self.kept:

@@ -23,6 +23,7 @@ the library rather than the one open in the panes.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as _dt
 import difflib
 import glob
@@ -32,6 +33,7 @@ import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
+from .. import library_dirs
 from .. import method as method_module
 from ..method import Method
 from ..method import template as templates
@@ -49,6 +51,7 @@ __all__ = [
     "LineDiff",
     "MethodDiff",
     "instrument_diff",
+    "library_files",
     "method_diff",
     "open_entry",
     "scan_library",
@@ -100,6 +103,9 @@ class LibraryEntry:
     """For a method rendered from a template, `rendered from <name> at <knobs>`, and
     empty for one written by hand. Read off the file's `[rendered]` table; whether it
     still reproduces is decided when the file is opened, not when it is listed."""
+    library: str = ""
+    """The library directory the document was found in, one of the setting's
+    (`clockwork.library_dirs`)."""
 
     @property
     def ok(self) -> bool:
@@ -113,6 +119,10 @@ class LibraryEntry:
 def scan_library(directory: str) -> list[LibraryEntry]:
     """Every `.toml` document under `directory`, named, hashed, dated and described.
 
+    `directory` is a library setting: one directory or several joined by `os.pathsep`
+    (`clockwork.library_dirs`), each scanned and each entry carrying the one it came
+    from, so a project's templates list beside the instrument's.
+
     Recursive, because a golden experiment's method sits beside its `.uimf` files and its
     own `README.md` in a directory of its own, not flat in the library root (lab record,
     task 54's `golden` directory is one such library). An empty or missing directory is
@@ -123,14 +133,21 @@ def scan_library(directory: str) -> list[LibraryEntry]:
     that declare the same name sort next to each other by path, so a stale copy is easy to
     spot beside the one still in use.
     """
+    entries = [dataclasses.replace(_entry(path), library=library)
+               for library in library_dirs(directory)
+               for path in library_files(library)]
+    return sorted(entries, key=lambda entry: (entry.name or entry.path, entry.path))
+
+
+def library_files(directory: str) -> list[str]:
+    """Every `.toml` document under one library directory, sorted; none for a directory
+    that does not exist. A saved run queue is TOML too and is not a method
+    (`runqueue.QUEUE_SUFFIX`)."""
     if not directory or not os.path.isdir(directory):
         return []
-    # A saved run queue is TOML too and is not a method (`runqueue.QUEUE_SUFFIX`).
-    paths = sorted(path for path in glob.glob(
-        os.path.join(directory, "**", "*.toml"), recursive=True)
+    return sorted(path for path in glob.glob(
+        os.path.join(glob.escape(directory), "**", "*.toml"), recursive=True)
         if not path.endswith(".queue.toml"))
-    entries = [_entry(path) for path in paths]
-    return sorted(entries, key=lambda entry: (entry.name or entry.path, entry.path))
 
 
 def _entry(path: str) -> LibraryEntry:
