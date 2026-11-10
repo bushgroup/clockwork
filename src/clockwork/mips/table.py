@@ -25,7 +25,7 @@ from __future__ import annotations
 import enum
 import struct
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 TABLE_HEADER_BYTES = 13
 """`TableHeader`: name, repeat count, max count, entry count. §2."""
@@ -93,6 +93,12 @@ class Entry:
     """The stored 32-bit value, or None for a DAC frame no host can predict."""
 
     kind: ValueKind
+
+    written: float | None = field(default=None, compare=False)
+    """The number as the string wrote it, for a numeric channel: DC bias volts, RF
+    drive, ARB volts. Kept because a DC bias value is stored as a DAC frame no host
+    can predict, so the stored value says nothing of the volts asked for. Not part of
+    the layout, so a decoded dump, which has no string, compares equal without it."""
 
     def describe(self) -> str:
         return f"{channel_token(self.chan)}={self.render_value()}"
@@ -449,8 +455,9 @@ class _Compiler:
         self.expect(":", 9)
         value = self.token_float()
         if _is_dc_bias(number):
-            return Entry((number - 1) & 0xFF, None, ValueKind.DAC)
-        return Entry(number & 0xFF, _float_bits(value), ValueKind.FLOAT)
+            return Entry((number - 1) & 0xFF, None, ValueKind.DAC, written=value)
+        return Entry(number & 0xFF, _float_bits(value), ValueKind.FLOAT, written=value)
+
 
 def _is_dc_bias(number: int) -> bool:
     """The firmware's own test for "convert this to DAC counts".
@@ -480,6 +487,46 @@ def compile_table(command: str) -> Compiled:
     """
     compiler = _Compiler(_payload(command))
     return compiler.run()
+
+
+def run_order(compiled: Compiled, *, passes: int = 2) -> Iterator[tuple[int, TimePoint]]:
+    """The time points of a compiled table in the order the box runs them, as
+    (table index, point), every loop run at most `passes` times.
+
+    A named table opens a loop on the run-time stack (`MAX_NESTING` deep), and
+    the `]` that ends a later table closes the innermost one: back to its first
+    point while passes remain, on to the next table once they are spent. A count
+    of 0 is the firmware's "repeat forever", and is `passes` here like any count
+    above it.
+
+    Two passes are enough to see every state the outputs reach, which is what this
+    exists for. A table event sets a channel to a value; it never adds to one (the
+    `STBLVDLT` ramps aside, which this does not model), so a loop body's effect on
+    the outputs is the same whatever state it starts from once it has run once, and
+    a third pass repeats the second point for point. Timing is not modelled: `d`,
+    `p` and the tick counts are the caller's to read off the points.
+    """
+    tables = compiled.tables
+    stack: list[list[int]] = []
+    index = 0
+    fresh = True
+    while index < len(tables):
+        table = tables[index]
+        if fresh and table.name != UNNAMED:
+            stack.append([index, max(1, min(table.repeat or passes, passes))])
+        fresh = True
+        jumped = False
+        for point in table.points:
+            yield index, point
+            if any(entry.chan == _LOOP_END for entry in point.entries) and stack:
+                stack[-1][1] -= 1
+                if stack[-1][1] > 0:
+                    index, fresh, jumped = stack[-1][0], False, True
+                else:
+                    stack.pop()
+                break
+        if not jumped:
+            index += 1
 
 
 # --------------------------------------------------------------------------

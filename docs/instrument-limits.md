@@ -5,8 +5,8 @@ The standing limits bound what an agent may send to one instrument through
 kept beside the [instrument file](instrument-file-format.md) and written once by whoever is
 responsible for the instrument. For each [method template](template-file-format.md) an agent may
 run, the document narrows the ranges its knobs may take and fixes the knobs that should not move.
-It also lists the boxes an agent may address and sets a budget for work done without a person
-present. Before `arm` or `acquire` puts anything on the wire, the server checks the method
+It also lists the boxes an agent may address, sets a budget for work done without a person
+present, and bounds the potential difference any method may put between two electrodes. Before `arm` or `acquire` puts anything on the wire, the server checks the method
 against these limits and against what the boxes currently hold. A method outside either is
 refused, in one sentence, before any string is sent.
 
@@ -50,6 +50,15 @@ amplitude_v = { min = 20.0, max = 45.0 }
 
 [templates.clock.fixed]
 bias_hold_v = 10.0
+
+[electrodes]
+max_v = 150.0
+nets = [
+  { name = "GUARD", dc = { box = "box1", channel = 16 } },
+  { name = "RF1", volts = 0.0, rf = { box = "box1", channel = 1 }, rf_peak_v_per_pct = 2.0 },
+  { name = "TW 1", dc = { box = "box1", channel = 15 }, arb = { box = "box2", module = 1 } },
+  { name = "TW 2", dc = { box = "box1", channel = 15 }, arb = { box = "box2", module = 2 } },
+]
 ```
 
 - `schema_version` pins the document to the shape this section describes.
@@ -85,6 +94,13 @@ bias_hold_v = 10.0
   whatever its count.
 - `templates.<key>.fixed` holds a knob at one value, which must lie within the template's range.
   A render at any other value is refused.
+- `electrodes`, optional, names the nets that share the instrument's ion-optical volume and the
+  largest potential difference allowed between any two of them, `max_v`, in volts. Each net has
+  a `name` and one base, a DC bias channel (`dc`, by box and channel) or a fixed potential
+  (`volts`, 0 for ground). At most one wave rides on the base: an ARB module's travelling wave
+  (`arb`, by box and module) or an RF head's (`rf`, by box and channel, with
+  `rf_peak_v_per_pct`, the head's peak volts per percent of drive). [The electrodes](#the-electrodes)
+  below says how the check uses them.
 
 `clockwork.envelope.load()` collects every problem in a document before raising, so a document
 with several mistakes reports all of them at once, and `clockwork mcp` exits with those problems
@@ -112,10 +128,12 @@ Before `arm` or `acquire` submits a job, the server refuses:
 3. a template the limits do not list;
 4. a knob outside its narrowed range, and a fixed knob at any value but its own;
 5. a method that addresses a box outside `allow.boxes`;
-6. any send once the session has made `max_runs` acquisitions or `max_hours` have passed since
+6. a method, rendered or hand-written, that would put two nets of `electrodes` more than `max_v`
+   apart at any moment, or whose table the check cannot read;
+7. any send once the session has made `max_runs` acquisitions or `max_hours` have passed since
    the daemon started, and an acquisition asking for more than `max_replicates_per_run` files.
 
-`render_template` and `validate_method` report items 3 to 5 under `limits` rather than clamping a
+`render_template` and `validate_method` report items 3 to 6 under `limits` rather than clamping a
 value into range, so an agent learns why a choice would be refused before it tries to send it.
 
 The budget is counted from the audit log in the output directory: the `acquire` calls it accepted
@@ -127,6 +145,37 @@ instrument PC in the middle of an agent's series takes one acquisition from the 
 `status` reports the count by surface under `acquisitions_by`, `mcp` for the MCP server and `cli`
 for the command line. Note that two servers writing to different output directories keep separate
 logs, and so separate counts.
+
+## The electrodes
+
+The one irreversible harm a method can do through the boxes is electrical: two electrodes far
+enough apart in potential to break down across the gap between them at the operating pressure.
+Knob ranges bound only the knobs a template exposes, so the electrode check reads the method
+itself, the setpoints its strings would send, whether it was rendered from a template or written
+by hand. Every pair of nets counts as neighbours, under one maximum.
+
+A net's potential is its base plus whatever rides on it. An ARB module adds plus or minus half its
+peak-to-peak range, taken at the widest range the method sets anywhere: `SWFVRNG`, `SALTRNG`
+where `SALTRENA` enables it, and the `V`, `v`, `L` and `l` levels of a compression table, with
+modules 1 and 2 sharing their levels under `M1` or `M2`. Its offsets, `SWFVOFF`, `SARBOFFA`,
+`SARBOFFB` and table channels 105 to 108, count at every value the method gives them, and as 0 V
+where it gives none. An RF head adds plus or minus `rf_peak_v_per_pct` times the highest drive the
+method sets, through `[boxes.rf.<n>]`, `SRFDRV` or table channels 33 to 36.
+
+The DC bias channels are where timing matters, so the check follows them moment by moment. Each
+setter a box is sent makes a moment, and so does each table event that moves a channel, with every
+loop run twice; a third pass sets nothing a second did not. A one-tick pulse therefore counts as
+much as a ten-second hold. At each moment the highest potential any net reaches is compared with
+the lowest any net reaches, and a method whose widest moment exceeds `max_v` is refused in one
+sentence that names the two nets, their potentials and the moment, for example
+
+> GUARD reaches 120 V and TW 1 2.5 V at tick 806 of box1's table, 117.5 V apart, more than the
+> 60 V the standing limits allow between any two electrodes
+
+A net whose DC channel, ARB range or RF drive the method never sets is left out, since what the
+box holds there is the [cold-start check](#the-cold-start-check)'s to find. A table that will not
+compile, or that ramps a DC channel with `STBLVDLT`, is refused, because a difference that cannot
+be computed cannot be shown to be within the limit.
 
 ## The cold-start check
 

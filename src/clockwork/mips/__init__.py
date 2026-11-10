@@ -55,6 +55,7 @@ from .compressor import (
     COMPRESSION_COMMAND,
     compression_passes,
     compression_table,
+    compression_voltages,
 )
 from .discovery import (
     DISCOVERY_TIMEOUT_S,
@@ -100,6 +101,7 @@ from .table import (
     digital_events,
     encode,
     parse_report,
+    run_order,
 )
 from .transport import FakeBox, SerialTransport, Transport, open_serial
 from .wire import (
@@ -173,6 +175,7 @@ __all__ = [
     "compile_table",
     "compression_passes",
     "compression_table",
+    "compression_voltages",
     "decode",
     "arb_frequency",
     "arb_points_per_period",
@@ -189,5 +192,6 @@ __all__ = [
     "parse_report",
     "read_sequencer",
     "read_state",
+    "run_order",
     "table_event",
 ]

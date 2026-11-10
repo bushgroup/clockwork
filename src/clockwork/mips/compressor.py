@@ -1,11 +1,13 @@
-"""The ARB compression table, read only as far as its loop counts.
+"""The ARB compression table, read only as far as its loop counts and module levels.
 
 `SARBCTBL` carries a program for the compressor's own state machine, in the
 mini-language `docs/mips-wire-format.md` §6.6 documents. A golden method's two
 compression tables end `]100`, which is the same accumulation count AUKLET's
 `STBLDAT` table loops and `[acquisition]` states, and nothing has ever checked
-that the three agree (lab record, task 31). That check is all anything here
-needs off the string, so this reads the loop counts and stops.
+that the three agree (lab record, task 31). The other thing read off the string is
+the output range the table sets on a module, `V`, `v`, `L` and `l`, which the
+standing limits need to bound the potential on a TW electrode (lab record, task
+159). Those two are all anything here needs, so this reads them and stops.
 
 **It is not a parser of the language and must not become one.** §6.6 is explicit
 that the box skips a character it does not know and syntax-checks nothing on
@@ -21,6 +23,8 @@ No Qt, no hardware, no I/O.
 """
 
 from __future__ import annotations
+
+from collections.abc import Iterator
 
 COMPRESSION_COMMAND = "SARBCTBL"
 """The command whose argument is a compression table. §6.6."""
@@ -67,22 +71,65 @@ def compression_passes(command: str) -> tuple[int, ...]:
     table = compression_table(command)
     counts: list[int] = []
     depth = 0
+    for op, value, _ in _ops(table):
+        if op == "[":
+            depth += 1
+        elif op == "]":
+            depth -= 1
+            if depth < 0:
+                raise ValueError(f"a ']' with no '[' before it in {table!r}")
+            if depth == 0:
+                counts.append(DEFAULT_VALUE if value is None else value)
+    if depth:
+        raise ValueError(f"{depth} unclosed '[' in {table!r}")
+    return tuple(counts)
+
+
+RANGE_OPS = {"V": 1, "v": 2, "L": 3, "l": 4}
+"""The ops that set a module's output range, p-p volts, and the module each sets
+(`ARBcompressor.cpp`, `ARBarray[0]` to `[3]`). §6.6."""
+
+SWAPPING_MODES = (1, 2)
+"""`M1` and `M2`: the compressor sets module 2's range, and under `M2` module 1's
+too, to module 1's level in a normal pass and module 2's while compressing, so
+either module may run at either level (`ARBcompressor.cpp`, `C_NormAmpMode`)."""
+
+
+def compression_voltages(command: str) -> tuple[dict[int, tuple[float, ...]], bool]:
+    """Every output range the table sets, by module, and whether it swaps modules
+    1 and 2 between their levels (`SWAPPING_MODES`).
+
+    The ranges are in the order written and are each a p-p volts the module runs
+    at once the op has run. A level the firmware ignores, outside 0 to 100, is
+    still returned: it is in the string, and what reads this bounds a potential.
+    Brackets are not balanced here; a string `compression_passes` cannot read
+    still says what levels it sets.
+    """
+    levels: dict[int, list[float]] = {}
+    swaps = False
+    for op, value, number in _ops(compression_table(command)):
+        if op in RANGE_OPS and number is not None:
+            levels.setdefault(RANGE_OPS[op], []).append(number)
+        elif op == "M" and value in SWAPPING_MODES:
+            swaps = True
+    return {module: tuple(values) for module, values in levels.items()}, swaps
+
+
+def _ops(table: str) -> Iterator[tuple[str, int | None, float | None]]:
+    """Each op with its value, as the integer the firmware counts with and as the
+    number it was written as, `None` for both where no digits followed.
+
+    The raw character five of the ops take is stepped over, not returned: it is
+    the scan this exists to get right, and nothing read here needs the character.
+    """
     at = 0
     while at < len(table):
         op = table[at]
         at += 1
+        start = at
         value, at = _value(table, at)
-        if op == "[":
-            depth += 1
-            continue
-        if op == "]":
-            depth -= 1
-            if depth < 0:
-                raise ValueError(
-                    f"a ']' with no '[' before it, at character {at - 1} of {table!r}"
-                )
-            if depth == 0:
-                counts.append(DEFAULT_VALUE if value is None else value)
+        yield op, value, (float(table[start:at]) if value is not None else None)
+        if op in "[]":
             continue
         if (op in _ALWAYS_TAKES_A_CHARACTER
                 or (op in _TAKES_A_CHARACTER_WITH_A_VALUE and value is not None)
@@ -90,9 +137,6 @@ def compression_passes(command: str) -> tuple[int, ...]:
             at += 1
             if op in _TAKES_A_CHARACTER_WITHOUT_A_VALUE:
                 _, at = _value(table, at)
-    if depth:
-        raise ValueError(f"{depth} unclosed '[' in {table!r}")
-    return tuple(counts)
 
 
 DEFAULT_VALUE = 1
@@ -121,5 +165,5 @@ def _value(table: str, at: int) -> tuple[int | None, int]:
     return whole, at
 
 
-__all__ = ["COMPRESSION_COMMAND", "DEFAULT_VALUE", "compression_passes",
-           "compression_table"]
+__all__ = ["COMPRESSION_COMMAND", "DEFAULT_VALUE", "RANGE_OPS", "SWAPPING_MODES",
+           "compression_passes", "compression_table", "compression_voltages"]

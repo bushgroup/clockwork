@@ -13,7 +13,8 @@ LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method",
                 "clockwork.acq.standing", "clockwork.app.saved", "clockwork.app.serving",
                 "clockwork.owner.remote", "clockwork.owner.daemon", "clockwork.summary",
                 "clockwork.mcp", "clockwork.mcp.server", "clockwork.mcp.cli",
-                "clockwork.envelope", "clockwork.record", "clockwork.routine",
+                "clockwork.envelope", "clockwork.electrodes", "clockwork.record",
+                "clockwork.routine",
                 "clockwork.report", "clockwork.keep", "clockwork.series")
 
 PROBE = """

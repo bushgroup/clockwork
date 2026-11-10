@@ -31,6 +31,12 @@ found; which of them refuse depends on the family, by the decision of record (Ma
 frequency or range refuses, and the rest of an ARB module's settings caution. The person
 at the instrument still owns the sample and the source; nothing here reads either.
 
+**The electrodes are bounded on the method, not the knobs.** An `[electrodes]` table
+names the nets that share the instrument's ion-optical volume and the largest
+difference allowed between any two; every method, rendered or hand-written, is refused
+if at any moment of its strings two nets would be further apart (`clockwork.electrodes`;
+lab record, task 159).
+
 No Qt, like the layers beneath it.
 """
 
@@ -43,6 +49,7 @@ import tomllib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
+from . import electrodes as _electrodes
 from .acq.loop import declared_differences, left_as_found_settings
 from .method import BoxMethod, Method, declared_commands, is_comment
 from .method.template import Rendered, Template
@@ -210,6 +217,9 @@ class Limits:
     path: str = ""
     hand_written: bool = False
     """Whether a hand-written method may be sent to the instrument (`allow.hand_written`)."""
+    electrodes: _electrodes.Electrodes | None = None
+    """The nets that share the volume and the largest difference between them, or None
+    where the limits bound no potentials."""
 
     def entry_for(self, template_hash: str) -> TemplateLimits | None:
         return next((entry for entry in self.templates if entry.matches(template_hash)),
@@ -332,7 +342,7 @@ def from_dict(data: Mapping, path: str = "") -> Limits:
     """Validate a parsed limits document; `LimitsError` with every problem found."""
     problems: list[str] = []
     _unknown(data, "limits", ("schema_version", "description", "cold_start", "allow",
-                              "budget", "templates"), problems)
+                              "budget", "templates", "electrodes"), problems)
     if data.get("schema_version") != SCHEMA_VERSION:
         problems.append(f"schema_version must be {SCHEMA_VERSION}, not "
                         f"{data.get('schema_version')!r}")
@@ -398,10 +408,13 @@ def from_dict(data: Mapping, path: str = "") -> Limits:
                 problems.append(f"templates.{first.key} and templates.{second.key} name "
                                 "hashes one of which begins the other, so one template "
                                 "would match both")
+    electrodes = (_electrodes.from_dict(data["electrodes"], problems)
+                  if "electrodes" in data else None)
     if problems:
         raise LimitsError(problems)
     return Limits(boxes=boxes, budget=budget, templates=tuple(templates), cold_start=mode,
-                  description=description, path=path, hand_written=hand_written)
+                  description=description, path=path, hand_written=hand_written,
+                  electrodes=electrodes)
 
 
 def loads(text: str, path: str = "") -> Limits:
@@ -467,6 +480,8 @@ def check(method: Method | None, rendered: Rendered | None, limits: Limits | Non
             problems.append(
                 f"the standing limits do not allow {', '.join(outside)}: an agent may "
                 f"address {', '.join(limits.boxes)}")
+        if limits.electrodes is not None:
+            problems += _electrodes.refusals(method, limits.electrodes)
     budget = limits.budget
     if ledger.runs >= budget.max_runs:
         problems.append(
