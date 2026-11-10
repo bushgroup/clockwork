@@ -40,9 +40,11 @@ From a source checkout, run each verb as `uv run clockwork <verb>`.
 | `--output DIR` | Where runs are written and read back, by default the daemon's `--output` |
 | `--instrument PATH` | The [instrument file](instrument-file-format.md) runs are acquired under, by default the window's saved one where the verb reads it, then the `instrument.toml` of the [instrument directory](mcp-server.md#the-instrument-directory) |
 | `--limits PATH` | The standing limits, by default the `limits.toml` beside `--instrument` |
+| `--project-limits PATH` | A project's limits, which admit its own templates and narrow the standing ones ([standing limits](instrument-limits.md#a-projects-limits)); none by default |
 | `--routines DIR` | The instrument's [routines](routines.md), by default the `routines` directory beside the library's first directory |
 
-`--instrument` and `--limits` matter to `arm` and `acquire` and are accepted by every verb, so a
+`--instrument`, `--limits` and `--project-limits` matter to `arm` and `acquire` and are accepted
+by every verb, so a
 shell alias or a script can pass them once for a whole session. Against the instrument, a verb
 given no limits is refused every send, as the MCP server is.
 
@@ -147,8 +149,7 @@ To acquire a grid or a set of coupled points in shuffled order, write them as a
 series sends each point itself, and a point the boxes already hold is acquired without a send.
 The verb answers the seed and the order drawn, then waits for the last file as `acquire` does and
 prints each point's line on standard error as it begins. The plan is refused whole, with nothing
-sent, if any point lies outside the standing limits or the series would spend more of the budget
-than is left. With `--check` the verb checks the plan the same way and stops before the boxes
+sent, if any point lies outside the limits. With `--check` the verb checks the plan the same way and stops before the boxes
 are read back: it sends nothing and prints each point's repetitions and minutes and the totals,
 so that how long a plan will take is known before it is run.
 
@@ -317,7 +318,7 @@ Each verb is its tool, described in full by `clockwork <verb> --help` and in the
 - `series`: acquire a whole [series plan](series-file-format.md), `clockwork series PLAN`, sending each point itself, and wait for the last file unless `--no-wait`.
 - `progress`: what a job has done since an event number, or with `--follow` until it ends.
 - `stop`: end the acquisition in flight after its current repetition and its fold.
-- `status`: the daemon, the console, the boxes, the job running, what was last armed, the limits and the budget.
+- `status`: the daemon, the console, the boxes, the job running, what was last armed, the limits in force and the acquisitions the daemon session has made.
 - `note`: add a note to a request's run record.
 - `verdict`: record a person's verdict on one run in its run record: `worked`, `no_signal`, `saturated`, `wrong_sample` or `other` with words.
 

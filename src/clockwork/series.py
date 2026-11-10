@@ -260,8 +260,8 @@ def order(points: Sequence[Point], seed: int | None) -> list[Point]:
 
 
 def acquisitions(points: Sequence[Point]) -> int:
-    """What the series spends of the standing budget: one per point, as one `acquire`
-    of its replicates would."""
+    """How many acquisitions the series makes: one per point, as one `acquire` of its
+    replicates would."""
     return len(points)
 
 

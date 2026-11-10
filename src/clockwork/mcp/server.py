@@ -128,15 +128,18 @@ def fake_output() -> str:
     return os.path.join(base, "clockwork", "fake-runs")
 
 
-def instrument_and_limits(*, fake: bool, instrument_path: str = "",
-                          limits_path: str = "") -> tuple[Instrument, Limits | None]:
-    """The instrument document runs are acquired under, and the standing limits in force.
+def instrument_and_limits(*, fake: bool, instrument_path: str = "", limits_path: str = "",
+                          project_limits_path: str = "") -> tuple[Instrument, Limits | None]:
+    """The instrument document runs are acquired under, and the limits in force.
 
     `SIMULATED` under `fake` and `UNCALIBRATED` otherwise when no document is named.
-    `limits_path` defaults to the `limits.toml` beside `instrument_path` if there is one.
-    `ValueError` with one sentence for a document or limits that were named or found and
-    could not be read: a server that quietly ran without the limits it was pointed at
-    would refuse every send and not say why. Shared by `clockwork mcp` and the verbs."""
+    `limits_path` defaults to the `limits.toml` beside `instrument_path` if there is one;
+    `project_limits_path`, never defaulted, is a project's limits, combined into those
+    (`clockwork.envelope.combine`). `ValueError` with one sentence for a document or
+    limits that were named or found and could not be read, and for a project's limits
+    with no standing limits to narrow: a server that quietly ran without the limits it
+    was pointed at would refuse every send and not say why. Shared by `clockwork mcp`
+    and the verbs."""
     from .. import envelope
     from .. import instrument as instrument_module
 
@@ -149,16 +152,32 @@ def instrument_and_limits(*, fake: bool, instrument_path: str = "",
                              f"read: {exc}") from exc
     chosen = limits_path or envelope.default_path(instrument_path)
     if not chosen or not (limits_path or os.path.isfile(chosen)):
+        if project_limits_path:
+            raise ValueError(f"the project's limits {project_limits_path} narrow the "
+                             "instrument's standing limits, and none were found: give "
+                             "--limits, or --instrument with a limits.toml beside it")
         return instrument, None
     try:
-        return instrument, envelope.load(chosen)
+        standing = envelope.load(chosen)
     except (OSError, envelope.LimitsError) as exc:
         raise ValueError(f"the standing limits {chosen} could not be read: {exc}") from exc
+    if not project_limits_path:
+        return instrument, standing
+    try:
+        project = envelope.load(project_limits_path, project=True)
+    except (OSError, envelope.LimitsError) as exc:
+        raise ValueError(f"the project's limits {project_limits_path} could not be read: "
+                         f"{exc}") from exc
+    try:
+        return instrument, envelope.combine(standing, project)
+    except envelope.LimitsError as exc:
+        raise ValueError(f"the project's limits {project_limits_path} would widen the "
+                         f"standing limits {chosen}: {exc}") from exc
 
 
 def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: str = "",
         instrument_path: str = "", limits_path: str = "", routines: str = "",
-        stream: TextIO | None = None) -> int:
+        project_limits_path: str = "", stream: TextIO | None = None) -> int:
     """Serve the tools on stdio until the client closes. Returns the exit code.
 
     Under `fake` an owner of simulated boxes and a simulated console lives in this
@@ -175,8 +194,10 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
     said on the line after the first (`clockwork.instrument_unresolved`).
 
     `limits_path` is the instrument's standing limits (`clockwork.envelope`), by default
-    the `limits.toml` beside `instrument_path` if there is one. Limits named and not
-    found, or found and not valid, are one sentence and exit code 1: a server that
+    the `limits.toml` beside `instrument_path` if there is one, and
+    `project_limits_path` a project's, combined into them. Limits named and not found,
+    found and not valid, or a project's that would widen the standing ones, are one
+    sentence and exit code 1: a server that
     quietly ran without the limits it was pointed at would refuse every send and not
     say why. With none, every send to the instrument is refused, and a rehearsal is
     refused nothing.
@@ -193,7 +214,8 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
         instrument_path = instrument_file() or ""
     try:
         instrument, limits = instrument_and_limits(
-            fake=fake, instrument_path=instrument_path, limits_path=limits_path)
+            fake=fake, instrument_path=instrument_path, limits_path=limits_path,
+            project_limits_path=project_limits_path)
     except ValueError as exc:
         print(f"{PROGRAM}: {exc}", file=say)
         return 1
@@ -222,7 +244,8 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
             instrument_path = ""
             try:
                 instrument, limits = instrument_and_limits(
-                    fake=True, instrument_path="", limits_path=limits_path)
+                    fake=True, instrument_path="", limits_path=limits_path,
+                    project_limits_path=project_limits_path)
             except ValueError as exc:
                 print(f"{PROGRAM}: {exc}", file=say)
                 owner.close()  # type: ignore[attr-defined]
@@ -234,7 +257,9 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
     print(f"{PROGRAM} {__version__}{' --fake' if fake else ''}: library "
           f"{library or '(none)'}, files to {output}, calls logged to "
           f"{AuditLog.beside(output).path}, limits "
-          f"{limits.path if limits is not None else '(none)'}", file=say)
+          f"{limits.path if limits is not None else '(none)'}"
+          f"{' with ' + limits.project if limits is not None and limits.project else ''}",
+          file=say)
     # A variable that names nothing is said whatever else was given; no instrument
     # directory at all only where it has left this server without a library or, against
     # the instrument, without limits.

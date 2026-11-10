@@ -546,8 +546,10 @@ def check_envelope() -> None:
 
     A limits document loaded and held against a template: a render inside it passes,
     and each refusal is its own sentence -- a knob outside the range, a fixed knob
-    moved, a box not allowed, the budget's next acquisition, a hand-written method
-    against the instrument unless the limits set `allow.hand_written`. Then the cold-start check over stand-in boxes read back
+    moved, a box not allowed, a hand-written method against the instrument unless the
+    limits bound the electrodes and the RF. A project's limits narrow the standing
+    entry and are refused where they would widen it (lab record, task 159). Then the
+    cold-start check over stand-in boxes read back
     with getters, as a send reads them: the one DC bias channel the method leaves
     undeclared is a refusal, and an ARB stand-in's two RF heads at 0 % drive are not.
     Last, the tools over a `--fake` owner given the limits refuse that method's `arm`
@@ -558,7 +560,7 @@ def check_envelope() -> None:
     import tempfile
 
     from clockwork import envelope
-    from clockwork.envelope import HAND_WRITTEN, Ledger, check, cold_start, judge
+    from clockwork.envelope import HAND_WRITTEN, LimitsError, check, cold_start, judge
     from clockwork.mcp import Toolbox, ToolFailure
     from clockwork.mcp.server import SIMULATED
     from clockwork.method import template as template_module
@@ -602,8 +604,7 @@ arm = ["SMOD,TBL"]
                 f"[templates.{key}.knobs]\nb_ticks = {{ min = 200, max = 450 }}\n"
                 f"[templates.{key}.fixed]\nlevel_v = 5.0\n")
 
-    head = ('schema_version = 1\n[allow]\nboxes = ["box1"]\n[budget]\nmax_runs = 1\n'
-            "max_replicates_per_run = 2\nmax_hours = 8\n")
+    head = 'schema_version = 2\n[allow]\nboxes = ["box1"]\n'
     limits = envelope.loads(head + entry("fifteen", loaded.hash))
     check_true("a limits document loads and applies to the template it names",
                limits.against([loaded]) == [])
@@ -622,7 +623,7 @@ arm = ["SMOD,TBL"]
 
     def refused(**knobs: float) -> list[str]:
         rendered = template_module.render(loaded, knobs, {})
-        return check(rendered.method, rendered, limits, Ledger(), real=True)
+        return check(rendered.method, rendered, limits, real=True)
 
     check_true("a render inside the standing limits is refused nothing",
                refused(b_ticks=300) == [])
@@ -635,22 +636,43 @@ arm = ["SMOD,TBL"]
     rendered = template_module.render(loaded, {"b_ticks": 300}, {})
     renamed = dataclasses.replace(rendered.method, boxes=(dataclasses.replace(
         rendered.method.boxes[0], name="box9"),))
-    boxed = check(renamed, rendered, limits, Ledger(), real=True)
+    boxed = check(renamed, rendered, limits, real=True)
     check_true("a box the limits do not allow is refused",
                any("do not allow box9" in line for line in boxed))
-    spent = check(rendered.method, rendered, limits, Ledger(runs=1), real=True)
-    check_true("the budget refuses the acquisition after its last",
-               len(spent) == 1 and "made its 1 acquisitions" in spent[0])
-    check_true("a hand-written method is refused against the instrument, not in a "
-               "rehearsal",
-               check(rendered.method, None, limits, Ledger(), real=True) == [HAND_WRITTEN]
-               and check(rendered.method, None, limits, Ledger(), real=False) == [])
-    switched = dataclasses.replace(limits, hand_written=True)
-    check_true("allow.hand_written lets a hand-written method through, still held to the "
-               "boxes it may address",
-               check(rendered.method, None, switched, Ledger(), real=True) == []
+    check_true("a hand-written method is refused against the instrument where the limits "
+               "do not bound the potentials, and not in a rehearsal",
+               check(rendered.method, None, limits, real=True) == [HAND_WRITTEN]
+               and check(rendered.method, None, limits, real=False) == [])
+    bounded = envelope.loads(
+        head + entry("fifteen", loaded.hash) + '[electrodes]\nmax_v = 10.0\nnets = [\n'
+        '  { name = "LEVEL", dc = { box = "box1", channel = 16 } },\n'
+        '  { name = "GROUND", volts = 0.0 },\n]\n'
+        '[[rf_drive]]\nbox = "box1"\nchannel = 1\nmax_pct = 50.0\n')
+    high = template_module.render(loaded, {"b_ticks": 300, "level_v": 12.0}, {}).method
+    spread = check(high, None, bounded, real=True)
+    check_true("bounded potentials let a hand-written method through, held to the boxes "
+               f"and the electrodes ({spread[:1]})",
+               check(rendered.method, None, bounded, real=True) == []
                and any("do not allow box9" in line
-                       for line in check(renamed, None, switched, Ledger(), real=True)))
+                       for line in check(renamed, None, bounded, real=True))
+               and len(spread) == 1 and spread[0].startswith("LEVEL reaches 12 V"))
+    narrowed = envelope.combine(limits, envelope.loads(
+        f'schema_version = 2\n[templates.mine]\nhash = "{loaded.hash[:12]}"\n'
+        "[templates.mine.knobs]\nb_ticks = { max = 300 }\n", project=True))
+    over = template_module.render(loaded, {"b_ticks": 350}, {})
+    check_true("a project's limits narrow the standing entry",
+               refused(b_ticks=350) == []
+               and any("outside the project's limits" in line
+                       for line in check(over.method, over, narrowed, real=True)))
+    try:
+        envelope.combine(limits, envelope.loads(
+            f'schema_version = 2\n[templates.mine]\nhash = "{loaded.hash[:12]}"\n'
+            "[templates.mine.knobs]\nb_ticks = { max = 500 }\n", project=True))
+        widened = []
+    except LimitsError as exc:
+        widened = exc.problems
+    check_true("a project's limits that would widen the standing entry are refused",
+               len(widened) == 1 and "never widens" in widened[0])
 
     sequencer = Box(transport=FakeBox(rf_channels=2), name="box1")
     arb = Box(transport=FakeBox(arb_modules=4, rf_channels=2, dcb_channels=0), name="box2")
@@ -1267,15 +1289,13 @@ at_most = 0
                        and written["request"]["text"].startswith("routine fixture-check"))
             limited = Toolbox(owner, library=library, output=output, instrument=SIMULATED,
                               limits=envelope.loads(
-                                  'schema_version = 1\n[allow]\nboxes = ["box1"]\n'
-                                  "[budget]\nmax_runs = 5\nmax_replicates_per_run = 2\n"
-                                  "max_hours = 8\n"))
+                                  'schema_version = 2\n[allow]\nboxes = ["box1"]\n'))
             report = limited.call("run_routine", {"name": "fixture-check", "initials": "sc"})
             check_true(
                 "limits that do not list the template make the routine could-not-judge, "
                 "with the refused arm as the reason",
                 report["verdict"] == "could not judge"
-                and "not in the standing limits" in report["reason"])
+                and "not in the limits in force" in report["reason"])
             try:
                 toolbox.call("run_routine", {"name": "no-such-routine", "initials": "sc"})
                 unknown = ""

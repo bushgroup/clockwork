@@ -414,13 +414,12 @@ def test_an_audit_routine_reads_the_boxes_back_and_acquires_nothing(fake_owner, 
 def test_a_refused_arm_is_a_routine_that_could_not_judge(fake_owner, library,
                                                          tmp_path) -> None:
     output = str(tmp_path / "runs")
-    limits = envelope.loads('schema_version = 1\n[allow]\nboxes = ["box1"]\n[budget]\n'
-                            "max_runs = 5\nmax_replicates_per_run = 2\nmax_hours = 8\n")
+    limits = envelope.loads('schema_version = 2\n[allow]\nboxes = ["box1"]\n')
     box = toolbox(fake_owner, library, output, limits=limits)
     report = box.call("run_routine", {"name": "fixture-check", "initials": "rt"})
     assert report["verdict"] == "could not judge"
     assert report["reason"].startswith("the arm was refused")
-    assert "not in the standing limits" in report["reason"]
+    assert "not in the limits in force" in report["reason"]
     with open(report["record"], encoding="utf-8") as handle:
         assert json.load(handle)["routines"][0]["verdict"] == "could not judge"
 

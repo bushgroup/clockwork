@@ -8,12 +8,13 @@ agent's judgement (lab record, task 69). Two rules:
   the request is stamped into the file as its series and written into the run's log, and
   a file that cannot say what it was for is the one thing this surface exists to prevent.
 - **Every send is inside the standing envelope** (`clockwork.envelope.check`): a
-  template the instrument's limits list, at knob values inside their ranges, on boxes
-  they allow, inside the daemon session's budget. Against the instrument, no limits
-  refuses everything and a hand-written method is refused outright unless the limits
-  set `allow.hand_written` (lab record, task 108); a rehearsal with no
-  limits is refused nothing, and one given limits is held to them exactly as the
-  instrument would be (lab record, task 71).
+  template the instrument's limits or the project's list, at knob values inside their
+  ranges and the standing caps, on boxes they allow, with no two electrodes further
+  apart than they allow. Against the instrument, no limits refuses everything and a
+  hand-written method is refused unless the standing limits bound the electrodes and
+  the RF (lab record, task 159); a rehearsal with no limits is refused nothing, and
+  one given limits is held to them exactly as the instrument would be (lab record,
+  task 71).
 
 The cold-start check is the other half of the envelope and is not here: it needs the
 boxes read back, which is a job, so the tools run it themselves once this has passed.
@@ -21,7 +22,7 @@ boxes read back, which is a job, so the tools run it themselves once this has pa
 
 from __future__ import annotations
 
-from ..envelope import Ledger, Limits, check
+from ..envelope import Limits, check
 from ..method import Method
 from ..method.template import Rendered
 
@@ -29,9 +30,8 @@ __all__ = ["guard_acquisition"]
 
 
 def guard_acquisition(owner: object, rendered: Rendered | None, request: str, *,
-                      method: Method | None = None, limits: Limits | None = None,
-                      ledger: Ledger | None = None,
-                      replicates: int | None = None) -> list[str]:
+                      method: Method | None = None,
+                      limits: Limits | None = None) -> list[str]:
     """Why this method may not go to `owner`'s boxes for `request`; empty if it may.
 
     `owner` is anything with the owner protocol's `status()`; `rendered` is the render
@@ -47,6 +47,5 @@ def guard_acquisition(owner: object, rendered: Rendered | None, request: str, *,
     if method is None and rendered is not None:
         method = rendered.method
     real = not owner.status().fake  # type: ignore[attr-defined]
-    problems += check(method, rendered, limits, ledger or Ledger(), real=real,
-                      replicates=replicates)
+    problems += check(method, rendered, limits, real=real)
     return problems

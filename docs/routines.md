@@ -8,7 +8,7 @@ files, or a set of documents to read the boxes back against; the summary functio
 it produces; the criteria that turn those numbers into a verdict; and what else its report shows.
 A routine is a request with no free parameters, so it is sent through the same `arm` and `acquire`
 as any other request ([MCP server](mcp-server.md)): the [standing limits](instrument-limits.md),
-the cold-start check, the budget, the audit log and the run record all apply to it unchanged. The
+the cold-start check, the audit log and the run record all apply to it unchanged. The
 one thing a routine adds is the judgement at the end, which is `pass`, `fail`, or `could not
 judge` with the reason.
 
@@ -194,7 +194,7 @@ every routine with its criteria in words.
 The routine's run is a request of its own, worded `routine NAME: DESCRIPTION (run TIME)`, so every
 run mints a new request id. It is armed with a plan that states the template, the knob values, the
 number of files and every criterion, and each file stamps the request's id as its series exactly as
-any request's files do. Its acquisitions count against the daemon session's budget. A routine that
+any request's files do. A routine that
 acquires answers once its files are written and judged, which for a run of several minutes means
 the call takes several minutes; `progress` on the job it names follows it meanwhile.
 

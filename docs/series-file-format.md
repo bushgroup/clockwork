@@ -29,9 +29,8 @@ duration_ms = [100, 200, 300]
 ```
 
 This plan is eight points: the start reference, the six points of the grid, and the end
-reference. At two files a point it is 16 files, and it spends eight acquisitions of the standing
-budget ([instrument limits](instrument-limits.md)), one for each point, as eight `acquire` calls
-of two replicates each would.
+reference. At two files a point it is 16 files in eight acquisitions, one for each point, as
+eight `acquire` calls of two replicates each would make.
 
 ## Coupled points
 
@@ -137,8 +136,7 @@ table and mode change alone when it does not.
 A series is refused whole or acquired, never cut off by a refusal part of the way through. Every
 point is rendered and checked against the template's ranges, the acquisition loop's refusals and
 the standing limits before the first string goes to a box, and a plan with one point outside them
-is refused naming that point. The budget is counted the same way: a series of eight points on a
-session with five acquisitions left is refused, not stopped after the fifth. The boxes are then
+is refused naming that point. The boxes are then
 read back once, and every distinct method in the plan is compared with what they hold, as `arm`
 compares one ([MCP server](mcp-server.md#the-interlock)).
 

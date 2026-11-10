@@ -37,7 +37,7 @@ as `ClockworkSeriesIndex`), and the words go into each run's log header and the 
 log. Passing `request_id` back continues a request across calls and sessions.
 
 **A planned series is one job, not a loop of calls.** `series` checks a whole plan
-(`clockwork.series`) against the ranges, the limits, the budget and the boxes before
+(`clockwork.series`) against the ranges, the limits and the boxes before
 anything is sent, shuffles it under a recorded seed, and submits a `SeriesJob`, which the
 owner arms and acquires point by point: a session that ends mid-series does not end the
 series, and every file stamps its planned index, its executed position and the seed
@@ -78,7 +78,7 @@ from ..acq import BatchSeen, Event, Run, Snapshot, Warned, cautions, refusals
 from ..acq.standing import RampStepped, StandDownDone
 from ..acq.uimf import RAW_SUFFIX, SUMMED_SUFFIX
 from ..app import methodlib
-from ..envelope import Ledger, Limits
+from ..envelope import Limits
 from ..instrument import UNCALIBRATED, Instrument
 from ..method import Method, MethodError
 from ..method import template as template_module
@@ -252,7 +252,7 @@ class Toolbox:
         instrument, nothing refused in a rehearsal (`clockwork.envelope.check`)."""
         self._guard = threading.Lock()
         self._session: tuple[str, _dt.datetime] | None = None
-        """The daemon session's id and start, asked for once: the budget's window."""
+        """The daemon session's id and start, asked for once."""
         self._handles: dict[int, Handle] = {}
         self._words: dict[str, str] = {}
         """Request id to the words it was minted for."""
@@ -569,10 +569,11 @@ class Toolbox:
         stated it to the person: which knob values, how many acquisitions, what you
         will report; it goes in the request's run record.
 
-        Refused, before anything is sent, outside the instrument's standing limits:
-        a template they do not list, a knob outside their range, a box they do not
-        allow, a spent budget, or on the instrument a hand-written method unless they
-        set `allow.hand_written`. Then the
+        Refused, before anything is sent, outside the instrument's standing limits and
+        the project's: a template they do not list, a knob outside their range or the
+        standing caps, a box they do not allow, two electrodes further apart or an RF
+        head driven harder than they allow, or on the instrument a hand-written method
+        where they do not bound the electrodes and the RF. Then the
         boxes are read back and compared with what the method declares: what a box
         holds that the method leaves as found is refused or cautioned by the limits'
         cold-start rule, and the cautions come back under `cold_start` for you to
@@ -642,15 +643,14 @@ class Toolbox:
         replicates. The conditions given to `arm` are stamped into every file. Every
         file also stamps the request id and its place in the request. Follow the job
         with `progress` until `done`; stop it with `stop`. Refused as `arm` is outside
-        the standing limits, and for more replicates than they allow in one acquisition
-        or once the budget is spent; the cold-start comparison is repeated against what
+        the limits; the cold-start comparison is repeated against what
         the boxes read back when `arm` sent the method, including any declared value a
         box does not hold, and its cautions come back under `cold_start`.
         """
         if replicates < 1:
             raise ToolFailure("replicates counts files, from 1")
         loaded, rendered, path = self._method(method, template, knobs, labels)
-        self._refuse_unless_allowed(loaded, rendered, request, replicates=replicates)
+        self._refuse_unless_allowed(loaded, rendered, request)
         who = self._initials(initials)
         armed = self.owner.status().armed  # type: ignore[attr-defined]
         snapshot = self.owner.snapshot()  # type: ignore[attr-defined]
@@ -719,9 +719,8 @@ class Toolbox:
         from the point before is acquired without a send.
 
         Refused whole, before anything is sent, for a point outside the template's
-        ranges or the standing limits, naming the point; for more acquisitions than the
-        budget has left, counting one per point however many replicates each has; or
-        for a cold-start refusal on any point, after one read-back of the boxes. The
+        ranges or the limits, naming the point; or for a cold-start refusal on any
+        point, after one read-back of the boxes. The
         points between the references are shuffled under the seed, drawn when the plan
         gives none; every file stamps the request id, the point's planned index, its
         own position in the order acquired and the seed. Answers the job number, the
@@ -759,8 +758,7 @@ class Toolbox:
                 refused.append(f"{name}: {exc}")
                 continue
             found = refusals(rendered.method) + envelope.check(
-                rendered.method, rendered, self.limits, Ledger(), real=real,
-                replicates=point.replicates)
+                rendered.method, rendered, self.limits, real=real)
             if found:
                 refused.append(f"{name}: " + "; ".join(found))
             renders.append(rendered)
@@ -768,14 +766,6 @@ class Toolbox:
             raise ToolFailure("the series was refused whole and nothing was sent: "
                               + "; ".join(refused))
         spent = series_module.acquisitions(points)
-        if self.limits is not None:
-            left = self.limits.budget.max_runs - self._ledger().runs
-            if spent > left:
-                raise ToolFailure(
-                    f"the series is {spent} acquisitions ({series_module.files(points)} "
-                    f"files) and this daemon session's budget has {left} of "
-                    f"{self.limits.budget.max_runs} left, so nothing was sent: shorten the "
-                    "plan")
         costs = [self._point_entry(point, rendered)
                  for point, rendered in zip(points, renders, strict=True)]
         seconds = [self._point_seconds(point, rendered)
@@ -948,38 +938,41 @@ class Toolbox:
         """The instrument as the server sees it: simulated or real, the console, the
         boxes, the job running and those queued, the method the boxes were last armed
         with and the stem that arming named, whether sends through this server are refused and why,
-        the standing limits in force, and how much of this daemon session's budget is
-        left. The budget is the daemon session's, not this server's: `acquisitions_by`
-        says how many each surface spent, `cli` being the command line's. Under
-        `limits`, `problems` are entries that cannot be applied to the template they
-        name in this library, each a mistake to put right; `not_served` are entries
-        whose template this library does not hold, which is ordinary where the limits
-        name several projects' templates and one project's are served."""
+        the limits in force, and how many acquisitions this daemon session has made.
+        The count is the daemon session's, not this server's: `acquisitions_by` says
+        how many each surface made, `cli` being the command line's. Under `limits`,
+        `project` is the project's limits combined into the standing ones, and
+        `project_templates` the entries they added or narrowed; `hand_written` is
+        whether a hand-written method may be sent, which it may where the limits bound
+        the electrodes and the RF; `problems` are entries that cannot be applied to the
+        template they name in this library, each a mistake to put right; `not_served`
+        are entries whose template this library does not hold, which is ordinary where
+        the standing limits name several projects' templates and one project's are
+        served."""
         state = self.owner.status()  # type: ignore[attr-defined]
         armed = ({"method": state.armed.method, "stem": state.armed.stem}
                  if state.armed is not None else None)
-        ledger = self._ledger()
-        refused = guard_acquisition(self.owner, None, "status", limits=self.limits,
-                                    ledger=ledger)
+        refused = guard_acquisition(self.owner, None, "status", limits=self.limits)
         limits = self.limits
         served = self._templates() if limits is not None else []
+        session = self._session_of()[0]
         return {
             "limits": None if limits is None else {
                 "path": limits.path, "description": limits.description,
+                "project": limits.project or None,
+                "project_description": limits.project_description or None,
                 "cold_start": limits.cold_start, "boxes": list(limits.boxes),
                 "hand_written": limits.hand_written,
+                "caps": {cap.name: {"min": cap.min, "max": cap.max} for cap in limits.caps},
                 "templates": [entry.key for entry in limits.templates],
+                "project_templates": [entry.key for entry in limits.templates
+                                      if entry.origin == "project"],
                 "problems": limits.against(served, unmatched=False),
                 "not_served": limits.unmatched(served),
             },
-            "budget": None if limits is None else {
-                "acquisitions_made": ledger.runs,
-                "acquisitions_by": self.log.acquisitions_by(self._session_of()[0]),
-                "max_acquisitions": limits.budget.max_runs,
-                "hours_since_start": round(ledger.hours, 2),
-                "max_hours": limits.budget.max_hours,
-                "max_replicates_per_acquisition": limits.budget.max_replicates_per_run,
-                "daemon_session": self._session_of()[0],
+            "session": {
+                "daemon_session": session,
+                "acquisitions_by": self.log.acquisitions_by(session),
             },
             "fake": state.fake,
             "program": state.program,
@@ -1265,7 +1258,7 @@ class Toolbox:
         free text about the sample and source, stamped into every file beside the
         routine's own; empty is allowed. A routine is a request with no free
         parameters: it is armed and acquired through `arm` and `acquire`, so the
-        standing limits, the cold-start check and the budget apply to it exactly, and it
+        limits and the cold-start check apply to it exactly, and it
         leaves a run record and stamped files like any request. A routine that reads
         the boxes back acquires nothing.
 
@@ -1632,11 +1625,10 @@ class Toolbox:
                 "replicates": point.replicates, "reference": point.reference,
                 "minutes": None if seconds is None else round(seconds / 60, 1)}
 
-    def _refuse_unless_allowed(self, loaded: Method, rendered: Rendered | None, request: str,
-                               *, replicates: int | None = None) -> None:
+    def _refuse_unless_allowed(self, loaded: Method, rendered: Rendered | None,
+                               request: str) -> None:
         problems = guard_acquisition(self.owner, rendered, request, method=loaded,
-                                     limits=self.limits, ledger=self._ledger(),
-                                     replicates=replicates)
+                                     limits=self.limits)
         if problems:
             raise ToolFailure("; ".join(problems))
 
@@ -1646,8 +1638,8 @@ class Toolbox:
         """The daemon session this server works in, and when it began.
 
         A daemon's own, from `hello`, so every server and every restart of one over
-        the same daemon spends one budget; an owner in this process is a session of
-        its own, begun when this toolbox first asked."""
+        the same daemon writes under one session; an owner in this process is a
+        session of its own, begun when this toolbox first asked."""
         with self._guard:
             if self._session is not None:
                 return self._session
@@ -1667,24 +1659,17 @@ class Toolbox:
                 self._session = session
             return self._session
 
-    def _ledger(self) -> Ledger:
-        """What this daemon session has spent, off the audit log."""
-        if self.limits is None:
-            return Ledger()
-        session, began = self._session_of()
-        return Ledger(runs=self.log.acquisitions(session), started=began)
-
     def _cold_start_mode(self, rendered: Rendered | None) -> str:
         """The limits' rule for this method, or `caution` with none: a real owner with
         no limits never gets this far, and a rehearsal with none refuses nothing."""
         return self.limits.mode_for(rendered) if self.limits is not None else "caution"
 
     def _outside_limits(self, loaded: Method, rendered: Rendered | None) -> list[str]:
-        """What the limits say about this method itself, leaving the budget out."""
+        """What the limits say about this method itself."""
         if self.limits is None:
             return []
         real = not self.owner.status().fake  # type: ignore[attr-defined]
-        return envelope.check(loaded, rendered, self.limits, Ledger(), real=real)
+        return envelope.check(loaded, rendered, self.limits, real=real)
 
     def _limits_of(self, template: Template) -> dict | None:
         if self.limits is None:
@@ -1692,10 +1677,14 @@ class Toolbox:
         entry = self.limits.entry_for(template.hash)
         if entry is None:
             return {"allowed": False, "problems": []}
+        own = {knob.name for knob in template.knobs}
         return {
             "allowed": True,
+            "origin": entry.origin,
             "knobs": {limit.name: {"min": limit.min, "max": limit.max}
                       for limit in entry.knobs},
+            "caps": {cap.name: {"min": cap.min, "max": cap.max}
+                     for cap in self.limits.caps if cap.name in own},
             "fixed": dict(entry.fixed),
             "cold_start": entry.cold_start or self.limits.cold_start,
             "problems": entry.problems_against(template),

@@ -5,10 +5,11 @@ tool, its arguments, the request it served, a summary of what it answered, how l
 took, the error sentence if it failed, the daemon session it was made in, and the
 surface that made it (`mcp` or `cli`; lab record, task 73). A person
 who was away reads what was done from it, `list_files` reads the words of each request
-back from it, since a file stamps only the request's id (lab record, task 69), and the
-standing envelope's budget is counted from it: the accepted `acquire` lines of one
-daemon session, and each accepted `series` line's count of acquisitions (lab record,
-tasks 71 and 91).
+back from it, since a file stamps only the request's id (lab record, task 69), and
+`status` counts a daemon session's acquisitions from it: the accepted `acquire` lines,
+and each accepted `series` line's count of acquisitions (lab record, tasks 71 and 91).
+A send the limits refuse is a failed call, and its line carries the refusal verbatim as
+its error.
 
 **A long text argument is hashed, never quoted.** A method's or a template's text is
 kilobytes, and what an auditor needs is whether two calls were given the same one; the
@@ -110,9 +111,9 @@ class AuditLog:
     def acquisitions_by(self, session: str) -> dict[str, int]:
         """`acquisitions`, by the surface that made them (`mcp`, `cli`, or `in process`).
 
-        The budget is the daemon session's, whichever surface spends it (Matt,
-        2026-09-24); a session reading 6 spent of its own 5 had no way to see that the
-        sixth was a `clockwork routine` at a terminal (lab record, task 96)."""
+        The count is the daemon session's, whichever surface made them: an agent's
+        session reading its own count had no way to see that one was a
+        `clockwork routine` at a terminal (lab record, task 96)."""
         counts: dict[str, int] = {}
         if not session or not self.path or not os.path.isfile(self.path):
             return counts

@@ -60,7 +60,8 @@ from .tools import PROGRESS_WAIT_MAX_S, TOOLS, Tool, Toolbox, ToolFailure
 __all__ = ["COMMON", "RECORD_WAIT_S", "Flag", "Verb", "add_verbs", "is_verb", "run",
            "verb_name", "verbs"]
 
-COMMON = ("endpoint", "library", "output", "instrument", "limits", "routines")
+COMMON = ("endpoint", "library", "output", "instrument", "limits", "project_limits",
+          "routines")
 """The options every verb takes, which say where the tools are pointed rather than what
 a tool is asked; no tool may take an argument of one of these names."""
 
@@ -232,6 +233,10 @@ def add_verbs(commands: argparse._SubParsersAction) -> None:
         common.add_argument("--limits", metavar="PATH", default="",
                             help="the instrument's standing limits (default: limits.toml "
                                  "beside --instrument)")
+        common.add_argument("--project-limits", metavar="PATH", default="",
+                            help="a project's limits, which admit its own templates and "
+                                 "narrow the standing ones but never widen them "
+                                 "(default: none)")
         common.add_argument("--routines", metavar="DIR", default="",
                             help="the instrument's routines (default: routines beside the "
                                  "library's first directory)")
@@ -475,7 +480,7 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
         try:
             instrument, limits = instrument_and_limits(
                 fake=bool(hello.fake), instrument_path=instrument_path,
-                limits_path=args.limits)
+                limits_path=args.limits, project_limits_path=args.project_limits)
         except ValueError as exc:
             if instrument_path and not args.instrument and not defaulted:
                 # The path was never typed: a trainee reading "could not be read" looks

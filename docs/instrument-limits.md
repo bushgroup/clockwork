@@ -3,17 +3,20 @@
 The standing limits bound what an agent may send to one instrument through
 [`clockwork mcp`](mcp-server.md). They are a flat [TOML](https://toml.io) document, `limits.toml`,
 kept beside the [instrument file](instrument-file-format.md) and written once by whoever is
-responsible for the instrument. For each [method template](template-file-format.md) an agent may
-run, the document narrows the ranges its knobs may take and fixes the knobs that should not move.
-It also lists the boxes an agent may address, sets a budget for work done without a person
-present, and bounds the potential difference any method may put between two electrodes. Before `arm` or `acquire` puts anything on the wire, the server checks the method
-against these limits and against what the boxes currently hold. A method outside either is
-refused, in one sentence, before any string is sent.
+responsible for the instrument. Their first job is physical: no method, rendered from a
+[method template](template-file-format.md) or written by hand, may put two electrodes far enough
+apart in potential to break down across the gap between them, or drive an RF head past what the
+instrument has been run at. Their second is to say which templates an agent may run, how far each
+knob may be turned and which knobs stay where they are, and which boxes an agent may address. A
+research project may add a file of its own, given beside the standing one, that admits the
+project's own templates and narrows the standing entries but never widens them. Before `arm` or
+`acquire` puts anything on the wire, the server checks the method against the limits and against
+what the boxes currently hold. A method outside either is refused, in one sentence, before any
+string is sent.
 
-Nothing here asks for approval. Starting `clockwork serve` at a terminal is the authorization:
-the daemon holds the instrument lock, nothing reaches a box without it, and the budget is counted
-from the moment it started. A budget that has been spent is renewed by a person restarting the
-daemon, and by nothing else.
+Nothing here asks for approval, and nothing counts what is done. Starting `clockwork serve` at a
+terminal is the authorization: the daemon holds the instrument lock, nothing reaches a box
+without it, and it runs until the person who started it stops it.
 
 ## Why a separate document
 
@@ -27,18 +30,15 @@ acquiring if a mistake in them were a mistake in the instrument file.
 ## Document
 
 ```toml
-schema_version = 1
+schema_version = 2
 description = "Standing limits for agent-driven runs on the instrument."
 cold_start = "refuse"
 
 [allow]
 boxes = ["box1", "box2", "box3"]
-hand_written = false
 
-[budget]
-max_runs = 20
-max_replicates_per_run = 5
-max_hours = 8
+[caps]
+amplitude_v = { max = 70.0 }
 
 [templates.clock]
 hash = "3fa2c1d49b07"
@@ -66,24 +66,19 @@ channel = 1
 max_pct = 50.0
 ```
 
-- `schema_version` pins the document to the shape this section describes.
+- `schema_version` pins the document to the shape this section describes, which is 2. A
+  document at version 1, the shape that carried a `[budget]` and `allow.hand_written`, is refused
+  with what to change.
 - `description` is free text, shown by `status`.
 - `cold_start` is the rule for the cold-start check below: `refuse`, the default, `strict` or
   `caution`. A template entry may carry its own.
 - `allow.boxes` lists the boxes, by the names a method uses, that an agent may address. A method
   that names any other box is refused.
-- `allow.hand_written`, `false` by default, admits hand-written methods, i.e., methods not
-  rendered from a template, to the instrument. A hand-written method has no knobs, so the
-  limits cannot narrow it: with the key `true`, an agent may send any hand-written method to the
-  boxes `allow.boxes` lists, and only those boxes, the budget and the cold-start check below
-  stand between its strings and the instrument. Set it for a sitting that needs a method no
-  template renders, in a document of its own given with `--limits`, and leave the standing
-  document without it.
-- `budget` is what one daemon session may do unattended. `max_runs` counts acquisitions, i.e.,
-  `acquire` calls, however many files each makes, and the points of a
-  [series](series-file-format.md), one acquisition each; `max_replicates_per_run` bounds the files
-  one acquisition or one point may ask for; and `max_hours` is the time from the daemon's start
-  after which nothing more is sent. All three are required.
+- `caps` bounds a knob by its name in every template that has it, with `min`, `max` or both. An
+  entry, standing or a project's, whose bound or fixed value passes a cap is an error in the
+  limits, and a render whose value passes a cap is refused wherever its entry leaves the knob
+  open. A cap is a cheap check on the knobs templates share, such as an amplitude in volts; the
+  electrodes below are the check on the potentials themselves.
 - `templates.<key>` is one template an agent may run. The key is a free name for the entry.
   `hash` is at least 8 hex digits of the template's hash, as `list_templates` shows it, and a
   template whose hash does not begin with these digits does not match the entry. Editing a
@@ -95,8 +90,7 @@ max_pct = 50.0
   it. A knob the entry does not name keeps the template's own range. Where a template makes its
   repetition count a knob ([template file](template-file-format.md#holes)), the entry bounds it
   as any other, so `repetitions = { min = 10, max = 100 }` lets a series run fewer repetitions
-  than the default and none more. Every acquisition still counts once against `max_runs`,
-  whatever its count.
+  than the default and none more.
 - `templates.<key>.fixed` holds a knob at one value, which must lie within the template's range.
   A render at any other value is refused.
 - `electrodes`, optional, names the nets that share the instrument's ion-optical volume and the
@@ -113,51 +107,86 @@ max_pct = 50.0
   `electrodes`; set them at the drives the instrument has run at. Write them as `[[rf_drive]]`
   blocks, which TOML accepts after any other table.
 
+**A hand-written method is admitted where both `electrodes` and `rf_drive` are given.** It has no
+knobs for an entry to narrow, so what bounds it is the check on the potentials its strings set.
+Where the standing limits carry both tables, an agent may send a hand-written method to the boxes
+`allow.boxes` lists, held to the electrodes, the RF caps and the cold-start check below. Where
+either table is missing, a hand-written method is refused against the instrument and run from the
+window instead.
+
 `clockwork.envelope.load()` collects every problem in a document before raising, so a document
 with several mistakes reports all of them at once, and `clockwork mcp` exits with those problems
 rather than run without the limits it was pointed at. An entry that does not fit its template, a
 bound on a knob the template lacks or a range wider than its own, refuses that template with the
 reason, and `status` lists every such problem across the library.
 
+## A project's limits
+
+A project with templates of its own keeps a limits file of its own, in its repository, and the
+standing document is not edited for it. The file is the same TOML with three keys only:
+
+```toml
+schema_version = 2
+description = "Limits for the cold-hold project's sittings."
+
+[templates.cold-hold]
+hash = "9be0417c22d1"
+name = "tandem-clock-crimp-cold"
+
+[templates.cold-hold.knobs]
+hold_ms = { min = 100.0, max = 600000.0 }
+
+[templates.clock-narrower]
+hash = "3fa2c1d49b07"
+
+[templates.clock-narrower.knobs]
+amplitude_v = { max = 40.0 }
+```
+
+An entry whose hash matches a standing entry narrows it. Its bounds must lie inside the standing
+ones, a side it leaves open keeps the standing bound, a knob the standing entry fixes stays fixed
+at the same value, and a knob the standing entry bounds may be fixed at a value inside that range.
+An entry for any other template admits that template. Either way the standing `caps` hold, and an
+entry's `cold_start` may be stricter than the standing rule but not looser. Everything else is
+the instrument's: a project file that carries `allow`, `caps`, `cold_start`, `electrodes` or
+`rf_drive` is refused, as is a file with any entry that would widen a standing one, and in either
+case the server does not start. The two files are read together with `--project-limits PATH`, next to `--limits` or the
+standing document found beside the instrument file; a project file with no standing limits to
+narrow is refused. A refusal names whose limits refused, the standing or the project's.
+
 ## Where the document lives
 
 `clockwork mcp --limits PATH` names the document. Without the flag, the server looks for
 `limits.toml` beside the document given to `--instrument`, which is by default the instrument
 directory's own ([MCP server](mcp-server.md#the-instrument-directory)), so an instrument keeps its
-limits beside its document at the directory's root. Against the instrument, a server with no
-limits refuses every send, and says so under `status`. Under `--fake` a server with no limits
-refuses nothing, so that the tools can be exercised on a machine with no instrument, while a
-rehearsal given limits is held to them exactly as the instrument would be.
+limits beside its document at the directory's root. `--project-limits PATH` adds a project's, and
+has no default. The [command line](command-line.md)'s verbs take both flags. Against the
+instrument, a server with no limits refuses every send, and says so under `status`. Under `--fake`
+a server with no limits refuses nothing, so that the tools can be exercised on a machine with no
+instrument, while a rehearsal given limits is held to them exactly as the instrument would be.
 
 ## What is checked
 
 Before `arm` or `acquire` submits a job, the server refuses:
 
 1. a request with no words, i.e., a send that cannot say what it is for;
-2. against the instrument, a hand-written method, which has no knobs for the limits to bound
-   and is run from the window instead, unless `allow.hand_written` is `true`;
-3. a template the limits do not list;
-4. a knob outside its narrowed range, and a fixed knob at any value but its own;
+2. against the instrument, a hand-written method where the standing limits do not carry both
+   `electrodes` and `rf_drive`;
+3. a template neither the standing limits nor the project's list;
+4. a knob outside its narrowed range or past a cap, and a fixed knob at any value but its own;
 5. a method that addresses a box outside `allow.boxes`;
 6. a method, rendered or hand-written, that would put two nets of `electrodes` more than `max_v`
    apart at any moment, or whose table the check cannot read, and one that would drive an RF
    head past its `rf_drive` cap, drive a head the caps do not name, or put a capped head in
-   `AUTO`;
-7. any send once the session has made `max_runs` acquisitions or `max_hours` have passed since
-   the daemon started, and an acquisition asking for more than `max_replicates_per_run` files.
+   `AUTO`.
 
 `render_template` and `validate_method` report items 3 to 6 under `limits` rather than clamping a
-value into range, so an agent learns why a choice would be refused before it tries to send it.
-
-The budget is counted from the audit log in the output directory: the `acquire` calls it accepted
-under the daemon's session identifier, and the points of each `series` call it accepted. A series
-is counted whole before its first send, so a series that would not fit is refused rather than
-stopped part way. Every server and every restart of a server over the same daemon therefore spends
-one budget, and so does the [command line](command-line.md): a `clockwork routine` typed at the
-instrument PC in the middle of an agent's series takes one acquisition from the same count.
-`status` reports the count by surface under `acquisitions_by`, `mcp` for the MCP server and `cli`
-for the command line. Note that two servers writing to different output directories keep separate
-logs, and so separate counts.
+value into range, so an agent learns why a choice would be refused before it tries to send it. A
+refused `arm` or `acquire` is a failed call, and the audit log in the output directory records
+the refusal word for word as its error. `status` reports how many acquisitions the daemon session
+has made, by surface, under `session`: `mcp` for the MCP server and `cli` for the command line,
+so a `clockwork routine` typed at the instrument PC during an agent's series is told apart. The
+count bounds nothing.
 
 ## The electrodes
 

@@ -15,7 +15,7 @@ the instrument. Every tool is also a subcommand of `clockwork` for a terminal or
 
 ```
 clockwork mcp [--fake] [--library DIR] [--output DIR] [--instrument PATH] [--limits PATH]
-              [--routines DIR] [--endpoint ADDRESS]
+              [--project-limits PATH] [--routines DIR] [--endpoint ADDRESS]
 ```
 
 The server speaks MCP over its standard input and output, so it is started by the MCP client
@@ -34,7 +34,10 @@ the data tools read by default. Both default to the daemon's own `--library` and
 states no channel offset, exactly as it does from the window. `--limits` is the instrument's
 [standing limits](instrument-limits.md), by default the `limits.toml` beside the instrument
 document; limits named and not found, or found and not valid, stop the server with the problems
-on standard error. `--routines` is the directory of the instrument's [routines](routines.md), by
+on standard error. `--project-limits` is a research project's own
+[limits](instrument-limits.md#a-projects-limits), which admit the project's templates and narrow
+the standing ones, and a project file that would widen them stops the server in the same way.
+`--routines` is the directory of the instrument's [routines](routines.md), by
 default the `routines` directory beside the library's first directory.
 
 ### The instrument directory
@@ -163,7 +166,7 @@ relative to the output directory, unless it is absolute.
 | | `series` | `request`, `initials`, `plan`, `conditions`, `setup`, `request_id`, `check` | A job number, at once, with the seed, the order drawn, the counts and the minutes; the daemon arms and acquires every point of the [series plan](series-file-format.md). With `check`, each point's repetitions and minutes and nothing sent |
 | | `progress` | `job`, `after`, `wait_s` | The job's events since number `after`, how many files are done of how many were asked for, and whether it is done |
 | | `stop` | `reason` | Whether a run was in flight; it ends after its current repetition and fold |
-| | `status` | none | Simulated or real, the console, the boxes, the running and queued jobs, the method the boxes were last armed with, why sends are refused if they are, the standing limits in force and the budget left |
+| | `status` | none | Simulated or real, the console, the boxes, the running and queued jobs, the method the boxes were last armed with, why sends are refused if they are, the limits in force and the acquisitions the daemon session has made |
 | | `note` | `request_id`, `text` | Adds one note to the request's run record |
 | | `verdict` | `path`, `verdict`, `initials`, `words` | Records a person's verdict on one run (`worked`, `no_signal`, `saturated`, `wrong_sample` or `other`) in its run record, beginning a record for a run that has none |
 | Data | `list_files` | `directory` (optional) | Each run's files with sizes and times, its logs, the request it served, and whether its summed file was written |
@@ -218,8 +221,8 @@ only where it differs from the one last sent; `setup` applies to the first point
 `arm`.
 
 The series is checked whole before anything is sent: every point against the template's ranges,
-the acquisition loop's refusals and the standing limits, the count of its acquisitions, one per
-point, against the budget left, and every distinct method against the boxes read back once. One
+the acquisition loop's refusals and the limits, and every distinct method against the boxes read
+back once. One
 point outside is enough to refuse the plan, and the refusal names the point. The points between
 the references are then shuffled under the plan's seed, or one drawn for it, and `series` answers
 the job number, the seed, the planned indices in the order they will be acquired and about how
@@ -268,11 +271,12 @@ and the marks, exactly as a render made in the window does.
 
 Before `arm` or `acquire` submits anything, the server decides whether the method may be sent.
 Every send must carry a request, under `--fake` as well. Every send must also lie inside the
-instrument's [standing limits](instrument-limits.md): a template they list, at knob values inside
-their ranges, on boxes they allow, inside the budget of the daemon session. Against the
-instrument, a server with no limits refuses every send, and a hand-written method is refused
-outright unless the limits set `allow.hand_written`; the window is the surface for those. `status` reports a refusal that applies to every
-send under `sends_refused`, and the budget left under `budget`.
+instrument's [standing limits](instrument-limits.md) and the project's, if given: a template they
+list, at knob values inside their ranges and the standing caps, on boxes they allow, with no two
+electrodes further apart and no RF head driven harder than they allow. Against the instrument, a
+server with no limits refuses every send, and a hand-written method is refused where the
+standing limits do not bound both the electrodes and the RF; the window is the surface for
+those. `status` reports a refusal that applies to every send under `sends_refused`.
 
 `arm` then reads back every box the method names, with getters only, and compares what each box
 holds with what the method declares. A setting the method leaves as found is refused or returned
@@ -359,8 +363,8 @@ than zeros, and a run with no record has no note count rather than a count of ze
 
 Every call is one line of `mcp-calls.log` in the output directory, appended: the time, the tool,
 its arguments, the request it served, a summary of what it answered, how long it took, the
-error sentence if it failed, the daemon session it was made in, which is what the standing
-budget is counted from, and `via`, which is `mcp` for this server's calls and `cli` for the
+error sentence if it failed, which for a refused send is the refusal word for word, the daemon
+session it was made in, and `via`, which is `mcp` for this server's calls and `cli` for the
 command line's. A long text argument, such as a method's text, is recorded as its
 SHA-256 and length rather than quoted, and a result is summarised to its numbers and the lengths
 of its lists. The files and their logs hold everything else, so a person who was away can read

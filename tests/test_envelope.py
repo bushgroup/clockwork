@@ -6,7 +6,6 @@ record, task 71). The same checks driven through the tools over `--fake` are in
 from __future__ import annotations
 
 import dataclasses
-import datetime as dt
 import json
 
 import pytest
@@ -15,10 +14,10 @@ from clockwork import envelope, record
 from clockwork.envelope import (
     HAND_WRITTEN,
     NO_LIMITS,
-    Ledger,
     LimitsError,
     check,
     cold_start,
+    combine,
     judge,
 )
 from clockwork.method import BoxMethod, RfChannel
@@ -59,17 +58,13 @@ arm = ["SMOD,TBL"]
 TEMPLATE_OBJECT = template_module.loads_template(TEMPLATE)
 
 
-def limits_text(**budget: object) -> str:
-    spend = {"max_runs": 3, "max_replicates_per_run": 2, "max_hours": 8, **budget}
+def limits_text() -> str:
     return f"""\
-schema_version = 1
+schema_version = 2
 description = "a test instrument"
 
 [allow]
 boxes = ["box1"]
-
-[budget]
-{chr(10).join(f"{key} = {value}" for key, value in spend.items())}
 
 [templates.line-b]
 hash = "{TEMPLATE_OBJECT.hash[:12]}"
@@ -98,18 +93,15 @@ def test_a_limits_document_loads_and_names_its_template_by_hash():
     assert entry is not None and entry.key == "line-b"
     assert entry.fixed == (("level_v", 5.0),)
     assert LIMITS.cold_start == "refuse" and LIMITS.boxes == ("box1",)
-    assert LIMITS.budget == envelope.Budget(3, 2, 8.0)
+    assert entry.origin == "standing" and LIMITS.project == ""
     assert LIMITS.against([TEMPLATE_OBJECT]) == []
 
 
 def test_a_bad_limits_document_reports_every_problem_at_once():
     with pytest.raises(LimitsError) as caught:
         envelope.loads("""\
-schema_version = 2
+schema_version = 3
 cold_start = "sometimes"
-[budget]
-max_runs = 0
-max_replicates_per_run = 2
 [templates.x]
 hash = "abc"
 [templates.x.knobs]
@@ -117,9 +109,21 @@ k = { min = 3, max = 1 }
 """)
     problems = caught.value.problems
     joined = " | ".join(problems)
-    for expected in ("schema_version", "cold_start", "[allow] is required", "max_runs",
-                     "max_hours", "hash must be at least", "min 3 above max 1"):
+    for expected in ("schema_version must be 2", "cold_start", "[allow] is required",
+                     "hash must be at least", "min 3 above max 1"):
         assert expected in joined, expected
+
+
+def test_a_schema_1_file_is_refused_with_why_its_budget_and_switch_went():
+    old = limits_text().replace("schema_version = 2", "schema_version = 1").replace(
+        'boxes = ["box1"]\n', 'boxes = ["box1"]\nhand_written = true\n\n[budget]\n'
+        "max_runs = 3\nmax_replicates_per_run = 2\nmax_hours = 8\n")
+    with pytest.raises(LimitsError) as caught:
+        envelope.loads(old)
+    [budget, version, switch] = caught.value.problems
+    assert version.startswith("schema_version is 1, the shape with a [budget]")
+    assert switch == envelope.RETIRED["hand_written"]
+    assert budget == envelope.RETIRED["budget"]
 
 
 def test_limits_narrow_a_template_and_never_widen_it():
@@ -129,8 +133,7 @@ def test_limits_narrow_a_template_and_never_widen_it():
     assert any("below the template's own 100" in line for line in problems)
     assert any("fix level_v at 30.0, outside" in line for line in problems)
     assert any("'ghost' the template does not have" in line for line in problems)
-    refused = check(render(b_ticks=300).method, render(b_ticks=300), wide, Ledger(),
-                    real=True)
+    refused = check(render(b_ticks=300).method, render(b_ticks=300), wide, real=True)
     assert len(refused) == 1 and "cannot be applied" in refused[0]
 
 
@@ -139,33 +142,34 @@ def test_limits_narrow_a_template_and_never_widen_it():
 
 def test_a_render_inside_the_limits_is_refused_nothing():
     rendered = render(b_ticks=300)
-    assert check(rendered.method, rendered, LIMITS, Ledger(), real=True, replicates=2) == []
+    assert check(rendered.method, rendered, LIMITS, real=True) == []
 
 
 def test_no_limits_refuses_the_instrument_and_nothing_in_a_rehearsal():
     rendered = render()
-    assert check(rendered.method, rendered, None, Ledger(), real=True) == [NO_LIMITS]
-    assert check(rendered.method, rendered, None, Ledger(), real=False) == []
-    assert check(None, None, None, Ledger(), real=True) == [NO_LIMITS]
+    assert check(rendered.method, rendered, None, real=True) == [NO_LIMITS]
+    assert check(rendered.method, rendered, None, real=False) == []
+    assert check(None, None, None, real=True) == [NO_LIMITS]
+    assert check(None, None, LIMITS, real=True) == []
 
 
 def test_a_template_the_limits_do_not_list_is_refused():
     other = template_module.loads_template(TEMPLATE.replace("envelope-test", "other"))
     rendered = template_module.render(other, {}, {})
-    [refusal] = check(rendered.method, rendered, LIMITS, Ledger(), real=True)
-    assert "other" in refusal and "is not in the standing limits" in refusal
+    [refusal] = check(rendered.method, rendered, LIMITS, real=True)
+    assert "other" in refusal and "is not in the limits in force" in refusal
 
 
 def test_a_knob_outside_its_range_is_refused():
     rendered = render(b_ticks=500)
-    [refusal] = check(rendered.method, rendered, LIMITS, Ledger(), real=True)
+    [refusal] = check(rendered.method, rendered, LIMITS, real=True)
     assert refusal.startswith("b_ticks = 500 ticks is outside the standing limits")
     assert "200 to 450 ticks" in refusal
 
 
 def test_a_fixed_knob_moved_is_refused():
     rendered = render(b_ticks=300, level_v=6.0)
-    [refusal] = check(rendered.method, rendered, LIMITS, Ledger(), real=True)
+    [refusal] = check(rendered.method, rendered, LIMITS, real=True)
     assert "level_v is fixed at 5.0 V" in refusal and "asked for 6.0" in refusal
 
 
@@ -193,12 +197,12 @@ def line_limits(fixed: str = "squeeze_ms = 16") -> envelope.Limits:
 def test_the_compress_line_knobs_are_bounded_and_fixed_like_any_other():
     limits = line_limits()
     inside = template_module.render(LINE_OBJECT, {"compress_order": 4, "b_ticks": 300}, {})
-    assert check(inside.method, inside, limits, Ledger(), real=True) == []
+    assert check(inside.method, inside, limits, real=True) == []
     order = template_module.render(LINE_OBJECT, {"compress_order": 64, "b_ticks": 300}, {})
-    [refusal] = check(order.method, order, limits, Ledger(), real=True)
+    [refusal] = check(order.method, order, limits, real=True)
     assert "compress_order = 64 is outside the standing" in refusal and "1 to 16" in refusal
     window = template_module.render(LINE_OBJECT, {"squeeze_ms": 20, "b_ticks": 300}, {})
-    [refusal] = check(window.method, window, limits, Ledger(), real=True)
+    [refusal] = check(window.method, window, limits, real=True)
     assert "squeeze_ms is fixed at 16 ms" in refusal and "asked for 20" in refusal
 
 
@@ -211,59 +215,191 @@ def test_a_box_the_limits_do_not_allow_is_refused():
     rendered = render(b_ticks=300)
     moved = dataclasses.replace(rendered.method, boxes=(
         *rendered.method.boxes, BoxMethod(name="box9", port="COM9")))
-    [refusal] = check(moved, rendered, LIMITS, Ledger(), real=True)
+    [refusal] = check(moved, rendered, LIMITS, real=True)
     assert "do not allow box9" in refusal
 
 
-def test_the_budget_refuses_run_n_plus_one_too_many_replicates_and_too_long():
-    rendered = render(b_ticks=300)
-    began = dt.datetime(2026, 9, 24, 8, 0)
-    assert check(rendered.method, rendered, LIMITS, Ledger(runs=2), real=True) == []
-    [runs] = check(rendered.method, rendered, LIMITS, Ledger(runs=3), real=True)
-    assert "made its 3 acquisitions" in runs and "restarting clockwork serve" in runs
-    [many] = check(rendered.method, rendered, LIMITS, Ledger(), real=True, replicates=3)
-    assert "3 replicates is more than the 2" in many
-    late = Ledger(started=began, now=began + dt.timedelta(hours=8, minutes=6))
-    [hours] = check(rendered.method, rendered, LIMITS, late, real=True)
-    assert "started 8.1 h ago" in hours
-    assert check(None, None, LIMITS, Ledger(runs=3), real=True) == [runs]
+BOUNDED = """
+[electrodes]
+max_v = 100.0
+nets = [
+  { name = "LEVEL", dc = { box = "box1", channel = 2 } },
+  { name = "GROUND", volts = 0.0 },
+]
+
+[[rf_drive]]
+box = "box1"
+channel = 1
+max_pct = 50.0
+"""
+"""The potentials bounded: what admits a hand-written method against the instrument."""
 
 
-def test_a_hand_written_method_is_refused_against_the_instrument_only():
+def test_a_hand_written_method_is_refused_where_the_potentials_are_not_bounded():
     method = render(b_ticks=300).method
     assert not LIMITS.hand_written
-    assert check(method, None, LIMITS, Ledger(), real=True) == [HAND_WRITTEN]
-    assert check(method, None, LIMITS, Ledger(), real=False) == []
+    assert check(method, None, LIMITS, real=True) == [HAND_WRITTEN]
+    assert check(method, None, LIMITS, real=False) == []
 
 
-def switched(value: str) -> str:
-    """The test limits with `allow.hand_written` set to `value`, as TOML."""
-    return limits_text().replace('boxes = ["box1"]\n',
-                                 f'boxes = ["box1"]\nhand_written = {value}\n')
-
-
-def test_allow_hand_written_lets_a_hand_written_method_through_whole():
-    limits = envelope.loads(switched("true"))
+def test_bounded_potentials_let_a_hand_written_method_through_held_to_them():
+    limits = envelope.loads(limits_text() + BOUNDED)
     assert limits.hand_written
     method = render(b_ticks=500).method
     # b_ticks 500 is outside the template entry's range: a hand-written method is not
-    # held to any template's knobs, only to the boxes and the budget.
-    assert check(method, None, limits, Ledger(), real=True) == []
-    assert envelope.loads(switched("false")).hand_written is False
+    # held to any template's knobs, only to the boxes and the potentials.
+    assert check(method, None, limits, real=True) == []
     renamed = dataclasses.replace(method, boxes=(dataclasses.replace(
         method.boxes[0], name="box9"),))
-    [boxed] = check(renamed, None, limits, Ledger(), real=True)
+    [boxed] = check(renamed, None, limits, real=True)
     assert "do not allow box9" in boxed
-    [spent] = check(method, None, limits, Ledger(runs=3), real=True)
-    assert "made its 3 acquisitions" in spent
-    [many] = check(method, None, limits, Ledger(), real=True, replicates=3)
-    assert "3 replicates is more than the 2" in many
+    tight = envelope.loads(limits_text() + BOUNDED.replace("max_v = 100.0", "max_v = 10.0"))
+    [spread] = check(render(level_v=20.0).method, None, tight, real=True)
+    assert spread.startswith("LEVEL reaches 20 V and GROUND 0 V")
 
 
-def test_allow_hand_written_must_be_true_or_false():
+def test_allow_hand_written_is_refused_with_why_it_went():
     with pytest.raises(LimitsError) as caught:
-        envelope.loads(switched('"yes"'))
-    assert caught.value.problems == ["allow.hand_written must be true or false"]
+        envelope.loads(limits_text().replace('boxes = ["box1"]\n',
+                                             'boxes = ["box1"]\nhand_written = true\n'))
+    assert caught.value.problems == [envelope.RETIRED["hand_written"]]
+
+
+# --- the caps ---------------------------------------------------------------------------
+
+CAPS = """
+[caps]
+level_v = { max = 10.0 }
+b_ticks = { min = 150 }
+"""
+
+
+def test_a_cap_refuses_a_render_its_entry_leaves_open():
+    limits = envelope.loads(limits_text().replace("[templates.line-b.fixed]\nlevel_v = 5.0\n",
+                                                  "") + CAPS)
+    assert [cap.name for cap in limits.caps] == ["level_v", "b_ticks"]
+    inside = render(b_ticks=300, level_v=10.0)
+    assert check(inside.method, inside, limits, real=True) == []
+    rendered = render(b_ticks=300, level_v=12.0)
+    [refusal] = check(rendered.method, rendered, limits, real=True)
+    assert refusal == ("level_v = 12.0 V is outside the standing cap on level_v, at most "
+                       "10.0 V, which holds for every template")
+    # A knob its entry already refuses is not refused twice.
+    [once] = check(render(b_ticks=120).method, render(b_ticks=120), limits, real=True)
+    assert "outside the standing limits for envelope-test" in once
+
+
+def test_an_entry_past_a_cap_is_a_problem_in_the_limits():
+    with pytest.raises(LimitsError) as caught:
+        envelope.loads(limits_text().replace("level_v = 5.0", "level_v = 15.0")
+                       + CAPS.replace("b_ticks = { min = 150 }", "b_ticks = { min = 250 }"))
+    assert caught.value.problems == [
+        "limits for template 'line-b' fix level_v at 15.0, outside the standing cap of at "
+        "most 10.0",
+        "limits for template 'line-b' put b_ticks's minimum at 200, below the standing cap "
+        "of 250"]
+
+
+# --- a project's limits ------------------------------------------------------------------
+
+OTHER = template_module.loads_template(TEMPLATE.replace("envelope-test", "project-own"))
+
+
+def project_text(body: str) -> str:
+    return f'schema_version = 2\ndescription = "a project"\n{body}'
+
+
+def narrowing(knobs: str = "", fixed: str = "", extra: str = "") -> str:
+    text = f'[templates.mine]\nhash = "{TEMPLATE_OBJECT.hash[:12]}"\n{extra}'
+    if knobs:
+        text += f"[templates.mine.knobs]\n{knobs}\n"
+    if fixed:
+        text += f"[templates.mine.fixed]\n{fixed}\n"
+    return project_text(text)
+
+
+def test_a_project_admits_its_own_template_without_touching_the_standing_file():
+    rendered = template_module.render(OTHER, {"b_ticks": 300}, {})
+    [absent] = check(rendered.method, rendered, LIMITS, real=True)
+    assert "is not in the limits in force" in absent
+    project = envelope.loads(project_text(
+        f'[templates.own]\nhash = "{OTHER.hash[:12]}"\n'
+        "[templates.own.knobs]\nb_ticks = { max = 400 }\n"), "p.toml", project=True)
+    combined = combine(LIMITS, project)
+    assert combined.project == "p.toml" and combined.project_description == "a project"
+    assert combined.boxes == LIMITS.boxes
+    assert combined.entry_for(OTHER.hash).origin == "project"
+    assert check(rendered.method, rendered, combined, real=True) == []
+    over = template_module.render(OTHER, {"b_ticks": 450}, {})
+    [refusal] = check(over.method, over, combined, real=True)
+    assert refusal.startswith("b_ticks = 450 ticks is outside the project's limits for "
+                              "project-own, at most 400 ticks")
+    # The standing entry is untouched.
+    assert check(render(b_ticks=300).method, render(b_ticks=300), combined, real=True) == []
+
+
+def test_a_project_narrows_a_standing_entry_and_keeps_what_it_leaves_open():
+    combined = combine(LIMITS, envelope.loads(
+        narrowing("b_ticks = { max = 300 }"), project=True))
+    entry = combined.entry_for(TEMPLATE_OBJECT.hash)
+    assert entry.origin == "project" and entry.key == "mine"
+    assert [(limit.min, limit.max) for limit in entry.knobs] == [(200, 300)]
+    assert entry.fixed == (("level_v", 5.0),)
+    [refusal] = check(render(b_ticks=350).method, render(b_ticks=350), combined, real=True)
+    assert "outside the project's limits" in refusal and "200 to 300 ticks" in refusal
+    fixed = combine(LIMITS, envelope.loads(narrowing(fixed="b_ticks = 250"), project=True))
+    assert dict(fixed.entry_for(TEMPLATE_OBJECT.hash).fixed) == {"level_v": 5.0,
+                                                                  "b_ticks": 250}
+    assert fixed.entry_for(TEMPLATE_OBJECT.hash).knobs == ()
+
+
+def test_a_project_that_would_widen_the_standing_limits_is_refused_whole():
+    with pytest.raises(LimitsError) as caught:
+        combine(LIMITS, envelope.loads(narrowing(
+            "b_ticks = { min = 100, max = 500 }", "", 'cold_start = "caution"\n'),
+            project=True))
+    assert caught.value.problems == [
+        "the project's limits for template 'mine' set cold_start 'caution', looser than "
+        "the standing 'refuse'",
+        "the project's limits for template 'mine' put b_ticks's minimum at 100, below the "
+        "standing 200: a project narrows and never widens",
+        "the project's limits for template 'mine' put b_ticks's maximum at 500, above the "
+        "standing 450: a project narrows and never widens"]
+    with pytest.raises(LimitsError) as caught:
+        combine(LIMITS, envelope.loads(narrowing("level_v = { max = 6.0 }"), project=True))
+    assert "bound level_v, which the standing limits fix at 5.0" in caught.value.problems[0]
+    with pytest.raises(LimitsError) as caught:
+        combine(LIMITS, envelope.loads(narrowing(fixed="level_v = 6.0"), project=True))
+    assert caught.value.problems == [
+        "the project's limits for template 'mine' fix level_v at 6.0 and the standing "
+        "limits fix it at 5.0"]
+    with pytest.raises(LimitsError) as caught:
+        combine(LIMITS, envelope.loads(narrowing(fixed="b_ticks = 500"), project=True))
+    assert "fix b_ticks at 500, outside the standing 200 to 450" in caught.value.problems[0]
+
+
+def test_a_project_is_held_to_the_standing_caps():
+    capped = envelope.loads(limits_text() + CAPS)
+    with pytest.raises(LimitsError) as caught:
+        combine(capped, envelope.loads(project_text(
+            f'[templates.own]\nhash = "{OTHER.hash[:12]}"\n'
+            "[templates.own.fixed]\nlevel_v = 12.0\n"), project=True))
+    assert caught.value.problems == [
+        "the project's limits for template 'own' fix level_v at 12.0, outside the standing "
+        "cap of at most 10.0"]
+
+
+def test_a_project_file_carries_nothing_of_the_instruments():
+    with pytest.raises(LimitsError) as caught:
+        envelope.loads(project_text(
+            'cold_start = "strict"\n[allow]\nboxes = ["box9"]\n[caps]\nk = { max = 1 }\n'
+            "[budget]\nmax_runs = 9\n[electrodes]\nmax_v = 1\n"), project=True)
+    problems = caught.value.problems
+    assert envelope.RETIRED["budget"] in problems
+    carried = [line for line in problems if "a project's limits may not carry it" in line]
+    assert [line.split(" ")[0] for line in carried] == [
+        "cold_start", "allow", "caps", "electrodes"]
+    assert len(problems) == 5
 
 
 # --- the cold-start check --------------------------------------------------------------

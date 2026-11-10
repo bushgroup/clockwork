@@ -72,11 +72,10 @@ def plan_text(*, middle: str, replicates: int = 1, references: str = '["start", 
             f"\n{middle}")
 
 
-def limits(library: str, *, max_runs: int, low: int = 100, high: int = 520) -> envelope.Limits:
+def limits(library: str, *, low: int = 100, high: int = 520) -> envelope.Limits:
     loaded = template_module.load_template(os.path.join(library, "two-knob.toml"))
     return envelope.loads(
-        'schema_version = 1\ncold_start = "caution"\n[allow]\nboxes = ["box1"]\n'
-        f"[budget]\nmax_runs = {max_runs}\nmax_replicates_per_run = 2\nmax_hours = 8\n"
+        'schema_version = 2\ncold_start = "caution"\n[allow]\nboxes = ["box1"]\n'
         f'[templates.two]\nhash = "{loaded.hash[:12]}"\n'
         f"[templates.two.knobs]\nb_ticks = {{ min = {low}, max = {high} }}\n")
 
@@ -312,11 +311,11 @@ def test_two_points_that_differ_only_in_the_count_are_acquired_without_a_second_
 # --- refused whole ------------------------------------------------------------------
 
 
-def test_a_point_outside_the_limits_or_the_budget_refuses_the_whole_plan(fake_owner,  # noqa: F811
-                                                                           library, tmp_path):
+def test_a_point_outside_the_limits_refuses_the_whole_plan(fake_owner,  # noqa: F811
+                                                            library, tmp_path):
     output = str(tmp_path / "runs")
     narrow = Toolbox(fake_owner, library=library, output=output, instrument=SIMULATED,
-                     limits=limits(library, max_runs=5, high=450))
+                     limits=limits(library, high=450))
     asked = {"request": REQUEST, "initials": "zz"}
     issued = fake_owner.status().issued
     with pytest.raises(ToolFailure) as caught:
@@ -326,25 +325,19 @@ def test_a_point_outside_the_limits_or_the_budget_refuses_the_whole_plan(fake_ow
     assert said.startswith("the series was refused whole and nothing was sent")
     assert "the start reference (point 1, the defaults): b_ticks = 500" in said
     assert "point 3 (b_ticks = 500): b_ticks = 500" in said
-    assert "point 2 (b_ticks = 300): 3 replicates is more than the 2" in said
+    # Three replicates of a point inside the limits are no reason to refuse: nothing
+    # counts files or acquisitions any more.
+    assert "point 2" not in said
     assert fake_owner.status().issued == issued, "nothing reached the owner"
 
     toolbox = Toolbox(fake_owner, library=library, output=output, instrument=SIMULATED,
-                      limits=limits(library, max_runs=5))
-    with pytest.raises(ToolFailure, match=r"the series is 8 acquisitions \(16 files\) and "
-                                          r"this daemon session's budget has 5 of 5 left"):
-        toolbox.call("series", {**asked, "plan": GRID})
-    assert fake_owner.status().issued == issued
-
+                      limits=limits(library))
     toolbox.call("discover_boxes", {"template": "two-knob.toml", "labels": LABELS})
     small = plan_text(references="[]", middle="[grid]\nb_ticks = [300, 450]")
     started = toolbox.call("series", {**asked, "plan": small})
     assert (started["acquisitions"], started["files"]) == (2, 2)
     assert len(followed(toolbox, started["job"])["runs"]) == 2
-    assert toolbox.call("status")["budget"]["acquisitions_made"] == 2
-    with pytest.raises(ToolFailure, match="4 acquisitions .* has 3 of 5 left"):
-        toolbox.call("series", {**asked, "plan": plan_text(
-            middle="[grid]\nb_ticks = [300, 450]")})
+    assert sum(toolbox.call("status")["session"]["acquisitions_by"].values()) == 2
 
 
 # --- acquired -----------------------------------------------------------------------

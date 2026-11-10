@@ -20,6 +20,7 @@ import clockwork
 from clockwork import envelope
 from clockwork.app.methodlib import scan_library
 from clockwork.mcp import Toolbox, ToolFailure, cli, server
+from clockwork.method import template as template_module
 from clockwork.owner import RemoteOwner
 from clockwork.report import Report, project_of
 from test_daemon import Daemon
@@ -184,7 +185,42 @@ def test_a_project_template_the_limits_do_not_name_is_refused_as_any_unlisted_on
     checked = toolbox.call("validate_method", {"template": "kv/template.toml",
                                                "labels": LABELS})
     assert not checked["ok"]
-    assert any("not in the standing limits" in line for line in checked["limits"])
+    assert any("not in the limits in force" in line for line in checked["limits"])
+
+
+def test_a_project_template_runs_under_the_projects_own_limits(
+        two_libraries, tmp_path, fake_owner):  # noqa: F811
+    """The project's file admits its own template with no edit to the standing one, and
+    a project's file that would widen the standing limits stops the server starting."""
+    instrument_and_limits = server.instrument_and_limits
+    golden, templates, setting = two_libraries
+    standing = tmp_path / "limits.toml"
+    standing.write_text(limits_text(golden), encoding="utf-8")
+    before = standing.read_bytes()
+    own = template_module.load_template(os.path.join(templates, "kv", "template.toml"))
+    project = tmp_path / "project-limits.toml"
+    project.write_text(f'schema_version = 2\n[templates.kv]\nhash = "{own.hash[:12]}"\n',
+                       encoding="utf-8")
+    _, limits = instrument_and_limits(fake=True, limits_path=str(standing),
+                                      project_limits_path=str(project))
+    assert limits is not None and limits.project == str(project)
+    toolbox = Toolbox(fake_owner, library=setting, output=str(tmp_path / "runs"),
+                      limits=limits)
+    checked = toolbox.call("validate_method", {"template": "kv/template.toml",
+                                               "labels": LABELS})
+    assert checked["limits"] == [], checked["limits"]
+    found = toolbox.call("status")["limits"]
+    assert found["project"] == str(project) and found["project_templates"] == ["kv"]
+    assert standing.read_bytes() == before
+
+    wider = project.read_text(encoding="utf-8") + "\n[allow]\nboxes = [\"box9\"]\n"
+    project.write_text(wider, encoding="utf-8")
+    with pytest.raises(ValueError, match="a project's limits may not carry it"):
+        instrument_and_limits(fake=True, limits_path=str(standing),
+                              project_limits_path=str(project))
+    with pytest.raises(ValueError, match="narrow the instrument's standing limits, and "
+                                         "none were found"):
+        instrument_and_limits(fake=True, project_limits_path=str(project))
 
 
 # --- the defaults ------------------------------------------------------------------------
@@ -555,8 +591,8 @@ def test_an_unlisted_template_is_told_who_admits_it(two_libraries, tmp_path,
                       limits=envelope.load(str(path)))
     [line] = toolbox.call("validate_method", {"template": "kv/template.toml",
                                               "labels": LABELS})["limits"]
-    assert "not in the standing limits" in line and str(path) in line
-    assert "[templates] entry" in line and "never by a session" in line
+    assert "not in the limits in force" in line and str(path) in line
+    assert "[templates] entry" in line and "never by the session" in line
 
 
 # --- the help ------------------------------------------------------------------------------

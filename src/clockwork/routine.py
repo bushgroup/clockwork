@@ -5,7 +5,7 @@ replicate count, or a list of documents to read the boxes back against; the summ
 to run on each file and their arguments; the criteria that turn the numbers into a verdict;
 and what else the report shows. It is **a request with no free parameters** (lab record,
 task 76): it is sent through the same tools as any other request, so the interlock, the
-standing limits, the cold-start check, the budget, the audit log and the run record all apply
+limits, the cold-start check, the audit log and the run record all apply
 to it unchanged, and the only thing a routine adds is the judgement at the end.
 
 This module is the half that needs no owner: loading and checking a routine, comparing what

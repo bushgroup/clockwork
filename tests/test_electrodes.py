@@ -10,7 +10,7 @@ import pytest
 from clockwork import electrodes, envelope
 from clockwork import method as method_module
 from clockwork.electrodes import Unreadable, refusals, worst
-from clockwork.envelope import Ledger, LimitsError, check
+from clockwork.envelope import HAND_WRITTEN, LimitsError, check
 from clockwork.mips import compile_table, compression_voltages, run_order
 
 # A CLOCK-shaped method: box1 holds the guard on channel 16 and the TW bias on 15 and
@@ -228,16 +228,10 @@ def test_a_table_the_check_cannot_read_or_model_is_refused():
 # --- through the standing limits ---------------------------------------------------
 
 LIMITS = """\
-schema_version = 1
+schema_version = 2
 
 [allow]
 boxes = ["box1", "box2"]
-hand_written = true
-
-[budget]
-max_runs = 3
-max_replicates_per_run = 2
-max_hours = 8
 
 [electrodes]
 max_v = 60.0
@@ -249,13 +243,23 @@ nets = [
 
 
 def test_the_standing_limits_refuse_an_unsafe_hand_written_method():
-    limits = envelope.loads(LIMITS)
+    limits = envelope.loads(LIMITS + RF_CAPS)
     assert limits.electrodes is not None and limits.electrodes.max_v == 60.0
     safe = load(method_text())
-    assert check(safe, None, limits, Ledger(), real=True) == []
+    assert check(safe, None, limits, real=True) == []
     unsafe = load(method_text(CLOCK_TABLE.replace("806:16:37", "806:16:120")))
-    found = check(unsafe, None, limits, Ledger(), real=True)
+    found = check(unsafe, None, limits, real=True)
     assert len(found) == 1 and found[0].startswith("GUARD reaches 120 V and TW 1 2.5 V")
+
+
+def test_a_hand_written_method_needs_both_the_electrodes_and_the_rf_bounded():
+    safe = load(method_text())
+    assert envelope.loads(LIMITS + RF_CAPS).hand_written
+    for partial in (LIMITS, LIMITS.split("[electrodes]")[0] + RF_CAPS):
+        limits = envelope.loads(partial)
+        assert not limits.hand_written
+        assert check(safe, None, limits, real=True) == [HAND_WRITTEN]
+        assert check(safe, None, limits, real=False) == []
 
 
 def test_a_bad_electrodes_table_is_a_problem_in_the_limits():
@@ -288,37 +292,37 @@ def test_rf_heads_at_the_drives_the_limits_name_are_sent():
     limits = envelope.loads(LIMITS + RF_CAPS)
     assert [(cap.channel, cap.max_pct) for cap in limits.rf_drive] == [(1, 50.0), (2, 30.0)]
     tested = load(method_text(rf=rf_bank((1, 50.0, "MANUAL"), (2, 30.0, "MANUAL"))))
-    assert check(tested, None, limits, Ledger(), real=True) == []
+    assert check(tested, None, limits, real=True) == []
     # Below the cap is within it, and a method that sets no drive is the cold-start
     # check's to judge.
     lower = load(method_text(rf=rf_bank((1, 20.0, "MANUAL"))))
-    assert check(lower, None, limits, Ledger(), real=True) == []
-    assert check(load(method_text()), None, limits, Ledger(), real=True) == []
+    assert check(lower, None, limits, real=True) == []
+    assert check(load(method_text()), None, limits, real=True) == []
 
 
 def test_an_rf_drive_past_its_cap_is_refused_wherever_the_method_sets_it():
     limits = envelope.loads(LIMITS + RF_CAPS)
     declared = load(method_text(rf=rf_bank((1, 60.0, "MANUAL"))))
-    assert check(declared, None, limits, Ledger(), real=True) == [
+    assert check(declared, None, limits, real=True) == [
         "the method drives box1 RF 1 at 60%, more than the 50% the standing limits allow"]
     # A setter string and a table event (channel 34 is RF 2) count the same.
     by_string = method_text().replace('setup = ["STBLCLK,EXT"]',
                                       'setup = ["STBLCLK,EXT", "SRFDRV,2,45"]')
-    assert "box1 RF 2 at 45%" in check(load(by_string), None, limits, Ledger(), real=True)[0]
+    assert "box1 RF 2 at 45%" in check(load(by_string), None, limits, real=True)[0]
     by_table = CLOCK_TABLE.replace("806:16:37", "806:16:37:34:31")
-    assert "box1 RF 2 at 31%" in check(load(method_text(by_table)), None, limits, Ledger(),
+    assert "box1 RF 2 at 31%" in check(load(method_text(by_table)), None, limits,
                                        real=True)[0]
 
 
 def test_auto_mode_and_a_head_the_caps_do_not_name_are_refused():
     limits = envelope.loads(LIMITS + RF_CAPS)
     auto = load(method_text(rf=rf_bank((1, 50.0, "AUTO"))))
-    assert check(auto, None, limits, Ledger(), real=True) == [
+    assert check(auto, None, limits, real=True) == [
         "the method puts box1 RF 1 in AUTO, where the box chooses the drive, and the "
         "standing limits hold it at 50% or less"]
     unnamed = load(method_text(rf=rf_bank((3, 10.0, "MANUAL"))))
     assert "box1 RF 3, which the standing limits' rf_drive does not name" in check(
-        unnamed, None, limits, Ledger(), real=True)[0]
+        unnamed, None, limits, real=True)[0]
 
 
 def test_a_bad_rf_drive_list_reports_every_problem_at_once():

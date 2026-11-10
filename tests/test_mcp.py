@@ -138,19 +138,22 @@ def audit_lines(output: str) -> list[dict]:
 
 
 def limits_text(library: str, *, templates: tuple[str, ...] = ("line-b.toml",),
-                cold_start: str = "caution", max_runs: int = 1,
-                hand_written: bool = False) -> str:
-    """Limits over the library's templates: `b_ticks` 200 to 450, box1 only."""
+                cold_start: str = "caution", hand_written: bool = False) -> str:
+    """Limits over the library's templates: `b_ticks` 200 to 450, box1 only; with
+    `hand_written`, the electrodes and the RF bounded, which admits a hand-written
+    method."""
     entries = []
     for name in templates:
         loaded = template_module.load_template(os.path.join(library, name))
         key = name.removesuffix(".toml")
         entries.append(f'[templates.{key}]\nhash = "{loaded.hash[:12]}"\n'
                        f"[templates.{key}.knobs]\nb_ticks = {{ min = 200, max = 450 }}\n")
-    return (f'schema_version = 1\ncold_start = "{cold_start}"\n[allow]\nboxes = ["box1"]\n'
-            f"hand_written = {str(hand_written).lower()}\n"
-            f"[budget]\nmax_runs = {max_runs}\nmax_replicates_per_run = 2\nmax_hours = 8\n"
-            + "".join(entries))
+    bounded = ('[electrodes]\nmax_v = 1000.0\nnets = [\n'
+               '  { name = "GUARD", dc = { box = "box1", channel = 16 } },\n'
+               '  { name = "GROUND", volts = 0.0 },\n]\n'
+               '[[rf_drive]]\nbox = "box1"\nchannel = 1\nmax_pct = 100.0\n')
+    return (f'schema_version = 2\ncold_start = "{cold_start}"\n[allow]\nboxes = ["box1"]\n'
+            + "".join(entries) + (bounded if hand_written else ""))
 
 
 def followed(toolbox: Toolbox, job: int, timeout: float = 120.0) -> dict:
@@ -352,7 +355,7 @@ def test_the_interlock_refuses_a_real_owner_and_an_empty_request(fake_owner, lib
         fake.call("arm", {"request": REQUEST, **{**chosen, "initials": "-"}})
 
 
-def test_inside_the_standing_limits_a_request_proceeds_until_the_budget_ends_it(
+def test_inside_the_standing_limits_a_request_proceeds_and_nothing_counts_it_down(
         fake_owner, library, tmp_path):
     output = str(tmp_path / "runs")
     toolbox = Toolbox(fake_owner, library=library, output=output, instrument=SIMULATED,
@@ -375,29 +378,28 @@ def test_inside_the_standing_limits_a_request_proceeds_until_the_budget_ends_it(
     armed = toolbox.call("arm", {**asked, "plan": "one run at 400 ticks, then report"})
     assert any("box1 DC bias channels are not declared" in line
                for line in armed["cold_start"]), armed["cold_start"]
-    with pytest.raises(ToolFailure, match="3 replicates is more than the 2"):
-        toolbox.call("acquire", {**asked, "replicates": 3})
     started = toolbox.call("acquire", asked)
     assert started["record"] == armed["record"]
     assert followed(toolbox, started["job"])["runs"][0]["complete"]
 
-    for name in ("acquire", "arm"):
-        with pytest.raises(ToolFailure, match="made its 1 acquisitions"):
-            toolbox.call(name, asked)
     status = toolbox.call("status")
-    assert status["budget"]["acquisitions_made"] == 1
-    assert sum(status["budget"]["acquisitions_by"].values()) == 1
-    assert "made its 1 acquisitions" in status["sends_refused"]
+    assert "budget" not in status and status["sends_refused"] is None
+    assert sum(status["session"]["acquisitions_by"].values()) == 1
 
     noted = toolbox.call("note", {"request_id": armed["request_id"],
-                                  "text": "the budget ended the request after one run"})
+                                  "text": "one run was enough for the request"})
     assert noted["record"] == armed["record"] and noted["notes"] == 1
     with pytest.raises(ToolFailure, match="has no run record"):
         toolbox.call("note", {"request_id": "no-such-request", "text": "hello"})
     deadline = time.monotonic() + 30
+    written: dict = {"files": []}
     while True:
-        with open(armed["record"], encoding="utf-8") as handle:
-            written = json.load(handle)
+        try:
+            with open(armed["record"], encoding="utf-8") as handle:
+                written = json.load(handle)
+        except PermissionError:
+            # Windows refuses the open while the record's writer is replacing the file.
+            pass
         if written["files"] or time.monotonic() > deadline:
             break
         time.sleep(0.1)
@@ -410,11 +412,11 @@ def test_inside_the_standing_limits_a_request_proceeds_until_the_budget_ends_it(
     [made] = written["files"]
     assert made["stem"] == armed["stem"] and made["complete"]
     assert made["summary"]["frames"] >= 1
-    assert written["notes"][0]["text"].startswith("the budget ended")
+    assert written["notes"][0]["text"].startswith("one run was enough")
     [run] = toolbox.call("list_files")["runs"]
     assert run["record"] == os.path.basename(armed["record"])
     assert [line["session"] for line in audit_lines(output)
-            if line["tool"] == "acquire"] == [status["budget"]["daemon_session"]] * 3
+            if line["tool"] == "acquire"] == [status["session"]["daemon_session"]]
 
 
 def test_the_cold_start_check_refuses_an_undeclared_dc_bias_before_anything_is_sent(
@@ -523,10 +525,11 @@ def test_the_audit_log_hashes_long_text_and_records_every_error(fake_owner, libr
     assert AuditLog("").requests() == {}
 
 
-def test_the_budget_is_the_daemon_sessions_and_says_which_surface_spent_it(tmp_path):
+def test_the_acquisition_count_is_the_daemon_sessions_and_says_which_surface_made_it(
+        tmp_path):
     """A `clockwork routine` at the terminal during an agent's five-acquisition series
-    left the agent reading 6 spent (on the rack, 2026-09-28; lab record, task 96). Every
-    surface spends the one budget, by design, and the count says which spent what."""
+    left the agent reading 6 made (on the rack, 2026-09-28; lab record, task 96). Every
+    surface counts in the one daemon session, and the count says which made what."""
     path = str(tmp_path / "mcp-calls.log")
     for via, tool, result in (("mcp", "series", {"acquisitions": 5}),
                               ("cli", "acquire", {"job": 34}),

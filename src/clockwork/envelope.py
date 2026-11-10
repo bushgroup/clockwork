@@ -2,25 +2,26 @@
 
 A `limits.toml` beside the instrument document says, for the instrument as a whole,
 which templates an agent may run and how far each knob may be turned, which knobs stay
-where they are, which boxes may be addressed, and how much may be done unattended in one
-daemon session. `check` answers why a render may not be sent under those limits, and
-`cold_start` what the boxes hold that the method does not declare. The MCP server calls
-both before anything reaches `send_phases`, so the refusal is the server's and never the
-driving agent's judgement (lab record, task 71). The format is
-`docs/instrument-limits.md`.
+where they are, the caps no template's knob may pass, which boxes may be addressed, and
+how far apart any two electrodes may be. A project may add a file of its own, given
+beside the standing one, that admits its own templates and narrows the standing entries
+but never widens them (`combine`; lab record, task 159). `check` answers why a render
+may not be sent under those limits, and `cold_start` what the boxes hold that the
+method does not declare. The MCP server calls both before anything reaches
+`send_phases`, so the refusal is the server's and never the driving agent's judgement
+(lab record, task 71). The format is `docs/instrument-limits.md`.
 
 **The authorization is that a person started the daemon at a terminal.** Nothing here
-asks for approval; the limits are what that act authorizes, and the budget is counted
-from it, so a budget spent is renewed by a person restarting the daemon and by nothing
-else (Matt, 2026-09-24).
+asks for approval, and nothing counts what is done under it: schema 1's budget of runs,
+replicates and hours per daemon session refused only work that was wanted, and is gone
+(Matt, 2026-11-09).
 
-**Templates, and hand-written methods only by a switch.** The limits narrow a
-template's own knob ranges and never widen them; a hand-written method has no knobs to
-narrow, so against the instrument it is refused outright unless the limits set
-`allow.hand_written`, and the window is the surface for one (lab record, task 71). The
-switch admits a hand-written method whole, with nothing bounding its strings; the boxes it
-may address, the budget and the cold-start check still apply (Matt, 2026-10-13; lab
-record, task 108).
+**Templates, and hand-written methods where the potentials are bounded.** The limits
+narrow a template's own knob ranges and never widen them; a hand-written method has no
+knobs to narrow, so against the instrument it is admitted only where the standing limits
+bound every method's potentials, with `[electrodes]` and `[[rf_drive]]`, and refused
+where they do not (Matt, 2026-11-10). The boxes it may address and the cold-start check
+apply as to any method.
 
 **The cold-start check is about the boxes.** A method that declares only what its
 experiment varies runs on whatever the last experiment left behind, and a cold instrument
@@ -43,7 +44,7 @@ No Qt, like the layers beneath it.
 
 from __future__ import annotations
 
-import datetime as _dt
+import dataclasses
 import os
 import re
 import tomllib
@@ -63,23 +64,48 @@ __all__ = [
     "HAND_WRITTEN",
     "LIMITS_NAME",
     "NO_LIMITS",
+    "PROJECT_KEYS",
     "SCHEMA_VERSION",
-    "Budget",
+    "STANDING_KEYS",
     "Finding",
     "KnobLimit",
-    "Ledger",
     "Limits",
     "LimitsError",
     "TemplateLimits",
     "check",
     "cold_start",
+    "combine",
     "default_path",
     "judge",
     "load",
     "loads",
 ]
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+"""Schema 1 had a `[budget]` and `allow.hand_written`; schema 2 has neither, and adds
+`[caps]` and the project file."""
+
+STANDING_KEYS = ("schema_version", "description", "cold_start", "allow", "caps",
+                 "templates", "electrodes", "rf_drive")
+"""The tables and keys of the standing limits, the instrument's."""
+
+PROJECT_KEYS = ("schema_version", "description", "templates")
+"""The tables and keys of a project's limits: its own templates' entries and the
+standing entries it narrows, nothing about the boxes or the electrodes."""
+
+RETIRED = {
+    "budget": ("[budget] was removed in schema 2: nothing counts the runs, replicates or "
+               "hours of a daemon session, since a person starting clockwork serve is the "
+               "authorization; delete the table"),
+    "hand_written": ("allow.hand_written was removed in schema 2: a hand-written method "
+                     "is admitted where the standing limits carry [electrodes] and "
+                     "[[rf_drive]], which bound every method, and refused where they do "
+                     "not; delete the key"),
+}
+"""Schema 1's keys, each refused with why, so that an old file fails loudly rather than
+being read for less than its author meant."""
+
+_MODE_ORDER = {"caution": 0, "refuse": 1, "strict": 2}
 
 LIMITS_NAME = "limits.toml"
 """The file name the limits take beside the instrument document, which is where
@@ -106,9 +132,10 @@ variable because the commonest cause is an instrument directory that did not res
 (`clockwork.instrument_unresolved`), which nothing else says at the moment of refusal."""
 
 HAND_WRITTEN = (
-    "a hand-written method has no knobs for the standing limits to bound, so an agent "
-    "may send only templates to the instrument unless the limits set "
-    "allow.hand_written; run this method from the window")
+    "a hand-written method has no knobs for the limits to bound, so an agent may send "
+    "one to the instrument only where the standing limits bound every method's "
+    "potentials with [electrodes] and [[rf_drive]], and these do not; run this method "
+    "from the window")
 
 _HEX = re.compile(r"[0-9a-f]+\Z")
 
@@ -134,6 +161,10 @@ class KnobLimit:
     min: Number | None = None
     max: Number | None = None
 
+    def holds(self, value: Number) -> bool:
+        return ((self.min is None or value >= self.min)
+                and (self.max is None or value <= self.max))
+
     def text(self, unit: str = "") -> str:
         suffix = f" {unit}" if unit else ""
         if self.min is not None and self.max is not None:
@@ -155,6 +186,13 @@ class TemplateLimits:
     fixed: tuple[tuple[str, Number], ...] = ()
     cold_start: str = ""
     """This template's own cold-start mode, or empty for the document's."""
+    origin: str = "standing"
+    """`standing`, or `project` for an entry a project's limits added or narrowed."""
+
+    @property
+    def whose(self) -> str:
+        """The limits this entry speaks for, as a refusal names them."""
+        return "the project's limits" if self.origin == "project" else "the standing limits"
 
     def matches(self, template_hash: str) -> bool:
         return template_hash.lower().startswith(self.hash)
@@ -194,36 +232,36 @@ class TemplateLimits:
         return problems
 
 
-@dataclass(frozen=True, slots=True)
-class Budget:
-    """What one daemon session may do unattended."""
-
-    max_runs: int
-    """Acquisitions accepted, each one `acquire` call however many files it makes, or one
-    point of a `series`."""
-    max_replicates_per_run: int
-    max_hours: float
-    """Hours from the daemon's start after which nothing more is sent."""
-
-
 @dataclass(frozen=True)
 class Limits:
-    """A loaded limits document."""
+    """A loaded limits document: the standing limits, with a project's combined in
+    where one was given (`combine`), or a project's file alone as `load` reads it."""
 
     boxes: tuple[str, ...]
-    budget: Budget
     templates: tuple[TemplateLimits, ...] = ()
     cold_start: str = "refuse"
     description: str = ""
     path: str = ""
-    hand_written: bool = False
-    """Whether a hand-written method may be sent to the instrument (`allow.hand_written`)."""
+    caps: tuple[KnobLimit, ...] = ()
+    """The range no template's knob of that name may leave, whatever its entry says."""
     electrodes: _electrodes.Electrodes | None = None
     """The nets that share the volume and the largest difference between them, or None
     where the limits bound no potentials."""
     rf_drive: tuple[_electrodes.RfCap, ...] | None = None
     """The highest drive each RF head may be set to, or None where the limits bound no
     RF drive. Where given, a head it does not name may not be driven at all."""
+    project: str = ""
+    """The project's limits combined into these, by path, or empty for none."""
+    project_description: str = ""
+
+    @property
+    def hand_written(self) -> bool:
+        """Whether a hand-written method may be sent to the instrument: where the
+        limits bound every method's potentials, electrodes and RF both."""
+        return self.electrodes is not None and self.rf_drive is not None
+
+    def cap_for(self, knob: str) -> KnobLimit | None:
+        return next((cap for cap in self.caps if cap.name == knob), None)
 
     def entry_for(self, template_hash: str) -> TemplateLimits | None:
         return next((entry for entry in self.templates if entry.matches(template_hash)),
@@ -285,29 +323,15 @@ def _mode(value: object, where: str, problems: list[str]) -> str:
     return str(value)
 
 
-def _template(key: str, raw: object, problems: list[str]) -> TemplateLimits | None:
-    where = f"templates.{key}"
+def _bounds(where: str, raw: object, problems: list[str]) -> list[KnobLimit]:
+    """A table of knob names, each with `min`, `max` or both: an entry's `knobs`, or
+    the standing `caps`."""
     if not isinstance(raw, dict):
         problems.append(f"{where} must be a table")
-        return None
-    _unknown(raw, where, ("hash", "name", "knobs", "fixed", "cold_start"), problems)
-    digest = raw.get("hash")
-    if not isinstance(digest, str) or not _HEX.match(digest.lower()) \
-            or len(digest) < HASH_PREFIX_MIN:
-        problems.append(f"{where}.hash must be at least {HASH_PREFIX_MIN} hex digits of the "
-                        "template's hash, as list_templates shows it")
-        digest = ""
-    name = raw.get("name", "")
-    if not isinstance(name, str):
-        problems.append(f"{where}.name must be text")
-        name = ""
+        return []
     knobs: list[KnobLimit] = []
-    raw_knobs = raw.get("knobs", {})
-    if not isinstance(raw_knobs, dict):
-        problems.append(f"{where}.knobs must be a table")
-        raw_knobs = {}
-    for knob, bounds in raw_knobs.items():
-        here = f"{where}.knobs.{knob}"
+    for knob, bounds in raw.items():
+        here = f"{where}.{knob}"
         if not isinstance(bounds, dict):
             problems.append(f"{here} must be a table with min, max or both")
             continue
@@ -323,6 +347,27 @@ def _template(key: str, raw: object, problems: list[str]) -> TemplateLimits | No
             problems.append(f"{here} has min {low} above max {high}")
             continue
         knobs.append(KnobLimit(name=knob, min=low, max=high))
+    return knobs
+
+
+def _template(key: str, raw: object, problems: list[str],
+              origin: str = "standing") -> TemplateLimits | None:
+    where = f"templates.{key}"
+    if not isinstance(raw, dict):
+        problems.append(f"{where} must be a table")
+        return None
+    _unknown(raw, where, ("hash", "name", "knobs", "fixed", "cold_start"), problems)
+    digest = raw.get("hash")
+    if not isinstance(digest, str) or not _HEX.match(digest.lower()) \
+            or len(digest) < HASH_PREFIX_MIN:
+        problems.append(f"{where}.hash must be at least {HASH_PREFIX_MIN} hex digits of the "
+                        "template's hash, as list_templates shows it")
+        digest = ""
+    name = raw.get("name", "")
+    if not isinstance(name, str):
+        problems.append(f"{where}.name must be text")
+        name = ""
+    knobs = _bounds(f"{where}.knobs", raw.get("knobs", {}), problems)
     fixed: list[tuple[str, Number]] = []
     raw_fixed = raw.get("fixed", {})
     if not isinstance(raw_fixed, dict):
@@ -339,62 +384,89 @@ def _template(key: str, raw: object, problems: list[str]) -> TemplateLimits | No
     mode = _mode(raw["cold_start"], f"{where}.cold_start", problems) \
         if "cold_start" in raw else ""
     return TemplateLimits(key=key, hash=digest.lower(), name=name, knobs=tuple(knobs),
-                          fixed=tuple(fixed), cold_start=mode)
+                          fixed=tuple(fixed), cold_start=mode, origin=origin)
 
 
-def from_dict(data: Mapping, path: str = "") -> Limits:
-    """Validate a parsed limits document; `LimitsError` with every problem found."""
+def _overlap(first: str, second: str) -> bool:
+    """Whether two hash prefixes could name one template."""
+    return bool(first and second and (first.startswith(second) or second.startswith(first)))
+
+
+def _beyond_caps(entry: TemplateLimits, caps: Sequence[KnobLimit]) -> list[str]:
+    """Where an entry's own bounds or fixed values pass a cap. A side the entry leaves
+    open is the template's own, and a render past the cap there is refused instead."""
     problems: list[str] = []
-    _unknown(data, "limits", ("schema_version", "description", "cold_start", "allow",
-                              "budget", "templates", "electrodes", "rf_drive"), problems)
-    if data.get("schema_version") != SCHEMA_VERSION:
-        problems.append(f"schema_version must be {SCHEMA_VERSION}, not "
-                        f"{data.get('schema_version')!r}")
+    where = f"limits for template {entry.key!r}"
+    for cap in caps:
+        for limit in entry.knobs:
+            if limit.name != cap.name:
+                continue
+            if cap.min is not None and limit.min is not None and limit.min < cap.min:
+                problems.append(f"{where} put {cap.name}'s minimum at {limit.min}, below the "
+                                f"standing cap of {cap.min}")
+            if cap.max is not None and limit.max is not None and limit.max > cap.max:
+                problems.append(f"{where} put {cap.name}'s maximum at {limit.max}, above the "
+                                f"standing cap of {cap.max}")
+        for name, value in entry.fixed:
+            if name == cap.name and not cap.holds(value):
+                problems.append(f"{where} fix {name} at {value}, outside the standing cap "
+                                f"of {cap.text()}")
+    return problems
+
+
+def from_dict(data: Mapping, path: str = "", *, project: bool = False) -> Limits:
+    """Validate a parsed limits document; `LimitsError` with every problem found.
+
+    `project` reads it as a project's file, which carries only `PROJECT_KEYS`; it is
+    then combined into the standing limits with `combine`, and on its own bounds no
+    box and admits nothing."""
+    problems: list[str] = []
+    known = PROJECT_KEYS if project else STANDING_KEYS
+    for key in data:
+        if key in RETIRED:
+            problems.append(RETIRED[key])
+        elif project and key in STANDING_KEYS and key not in known:
+            problems.append(f"{key} is the instrument's, so a project's limits may not "
+                            "carry it: they admit the project's own templates and narrow "
+                            "the standing entries, and nothing else")
+        elif key not in known:
+            problems.append(f"limits.{key} is not a key the limits define "
+                            f"({', '.join(known)})")
+    version = data.get("schema_version")
+    if version == 1:
+        problems.append("schema_version is 1, the shape with a [budget] and "
+                        f"allow.hand_written: these limits are schema {SCHEMA_VERSION}")
+    elif version != SCHEMA_VERSION:
+        problems.append(f"schema_version must be {SCHEMA_VERSION}, not {version!r}")
     description = data.get("description", "")
     if not isinstance(description, str):
         problems.append("description must be text")
         description = ""
-    mode = _mode(data.get("cold_start", "refuse"), "cold_start", problems) or "refuse"
+    mode = "refuse"
+    if not project:
+        mode = _mode(data.get("cold_start", "refuse"), "cold_start", problems) or "refuse"
 
     boxes: tuple[str, ...] = ()
-    hand_written = False
     allow = data.get("allow")
-    if not isinstance(allow, dict):
+    if project:
+        pass
+    elif not isinstance(allow, dict):
         problems.append("[allow] is required, with boxes = the boxes an agent may address")
     else:
-        _unknown(allow, "allow", ("boxes", "hand_written"), problems)
+        for key in allow:
+            if key in RETIRED:
+                problems.append(RETIRED[key])
+            elif key != "boxes":
+                problems.append(f"allow.{key} is not a key the limits define (boxes)")
         raw = allow.get("boxes")
         if not isinstance(raw, list) or not raw \
                 or not all(isinstance(name, str) and name for name in raw):
             problems.append("allow.boxes must be a list of box names, at least one")
         else:
             boxes = tuple(raw)
-        raw = allow.get("hand_written", False)
-        if not isinstance(raw, bool):
-            problems.append("allow.hand_written must be true or false")
-        else:
-            hand_written = raw
 
-    budget = Budget(0, 0, 0.0)
-    raw_budget = data.get("budget")
-    if not isinstance(raw_budget, dict):
-        problems.append("[budget] is required, with max_runs, max_replicates_per_run and "
-                        "max_hours")
-    else:
-        _unknown(raw_budget, "budget", ("max_runs", "max_replicates_per_run", "max_hours"),
-                 problems)
-        values: dict[str, Number] = {}
-        for key, whole in (("max_runs", True), ("max_replicates_per_run", True),
-                           ("max_hours", False)):
-            value = raw_budget.get(key)
-            if not _number(value) or value <= 0 or (whole and not isinstance(value, int)):
-                problems.append(f"budget.{key} must be a positive "
-                                f"{'whole number' if whole else 'number'}")
-            else:
-                values[key] = value
-        if len(values) == 3:
-            budget = Budget(int(values["max_runs"]), int(values["max_replicates_per_run"]),
-                            float(values["max_hours"]))
+    caps = (tuple(_bounds("caps", data["caps"], problems))
+            if "caps" in data and not project else ())
 
     templates: list[TemplateLimits] = []
     raw_templates = data.get("templates", {})
@@ -402,38 +474,131 @@ def from_dict(data: Mapping, path: str = "") -> Limits:
         problems.append("[templates] must be a table of tables, one per template")
         raw_templates = {}
     for key, raw in raw_templates.items():
-        entry = _template(key, raw, problems)
+        entry = _template(key, raw, problems, "project" if project else "standing")
         if entry is not None:
             templates.append(entry)
+            problems += _beyond_caps(entry, caps)
     for index, first in enumerate(templates):
         for second in templates[index + 1:]:
-            if first.hash and second.hash and (first.hash.startswith(second.hash)
-                                               or second.hash.startswith(first.hash)):
+            if _overlap(first.hash, second.hash):
                 problems.append(f"templates.{first.key} and templates.{second.key} name "
                                 "hashes one of which begins the other, so one template "
                                 "would match both")
     electrodes = (_electrodes.from_dict(data["electrodes"], problems)
-                  if "electrodes" in data else None)
+                  if "electrodes" in data and not project else None)
     rf_drive = (_electrodes.rf_drive_from_list(data["rf_drive"], problems)
-                if "rf_drive" in data else None)
+                if "rf_drive" in data and not project else None)
     if problems:
         raise LimitsError(problems)
-    return Limits(boxes=boxes, budget=budget, templates=tuple(templates), cold_start=mode,
-                  description=description, path=path, hand_written=hand_written,
-                  electrodes=electrodes, rf_drive=rf_drive)
+    return Limits(boxes=boxes, templates=tuple(templates), cold_start=mode,
+                  description=description, path=path, caps=caps, electrodes=electrodes,
+                  rf_drive=rf_drive)
 
 
-def loads(text: str, path: str = "") -> Limits:
+def _narrow(base: TemplateLimits, entry: TemplateLimits) -> tuple[TemplateLimits, list[str]]:
+    """A standing entry narrowed by a project's entry for the same template, and every
+    way the project's entry would widen it instead."""
+    problems: list[str] = []
+    where = f"the project's limits for template {entry.key!r}"
+    if entry.name and base.name and entry.name != base.name:
+        problems.append(f"{where} name it {entry.name!r} and the standing entry "
+                        f"{base.key!r} for the same hash names it {base.name!r}")
+    held = dict(base.fixed)
+    bounds = {limit.name: limit for limit in base.knobs}
+    for limit in entry.knobs:
+        if limit.name in held:
+            problems.append(f"{where} bound {limit.name}, which the standing limits fix at "
+                            f"{held[limit.name]}: a project narrows and never widens")
+            continue
+        own = bounds.get(limit.name)
+        low, high = limit.min, limit.max
+        if own is not None and own.min is not None:
+            if low is None:
+                low = own.min
+            elif low < own.min:
+                problems.append(f"{where} put {limit.name}'s minimum at {low}, below the "
+                                f"standing {own.min}: a project narrows and never widens")
+        if own is not None and own.max is not None:
+            if high is None:
+                high = own.max
+            elif high > own.max:
+                problems.append(f"{where} put {limit.name}'s maximum at {high}, above the "
+                                f"standing {own.max}: a project narrows and never widens")
+        bounds[limit.name] = KnobLimit(limit.name, low, high)
+    fixed = dict(base.fixed)
+    for name, value in entry.fixed:
+        if name in held:
+            if value != held[name]:
+                problems.append(f"{where} fix {name} at {value} and the standing limits "
+                                f"fix it at {held[name]}")
+            continue
+        own = next((limit for limit in base.knobs if limit.name == name), None)
+        if own is not None and not own.holds(value):
+            problems.append(f"{where} fix {name} at {value}, outside the standing "
+                            f"{own.text()}")
+        bounds.pop(name, None)
+        fixed[name] = value
+    return dataclasses.replace(
+        entry, hash=max(base.hash, entry.hash, key=len), name=entry.name or base.name,
+        knobs=tuple(bounds.values()), fixed=tuple(fixed.items()),
+        cold_start=entry.cold_start or base.cold_start), problems
+
+
+def combine(standing: Limits, project: Limits) -> Limits:
+    """The standing limits with a project's combined in; `LimitsError` with every way
+    the project's would widen them.
+
+    A project's entry for a template the standing limits list narrows that entry: a
+    bound inside the standing one, a side it leaves open kept from the standing, a
+    standing fixed value kept, a standing range fixed at a value inside it. An entry
+    for any other template admits it. Either way the standing caps hold, and a
+    template's cold-start mode may be stricter than the standing one and never looser.
+    """
+    problems: list[str] = []
+    merged = list(standing.templates)
+    where = "the project's limits"
+    for entry in project.templates:
+        shared = [base for base in standing.templates if _overlap(base.hash, entry.hash)]
+        clash = [base for base in standing.templates
+                 if base.key == entry.key and base not in shared]
+        if clash:
+            problems.append(f"{where} name an entry {entry.key!r} for hash {entry.hash} and "
+                            f"the standing limits' {entry.key!r} is hash {clash[0].hash}: "
+                            "give the project's entry a name of its own")
+        if len(shared) > 1:
+            problems.append(f"{where} for template {entry.key!r} name hash {entry.hash}, "
+                            "which begins more than one standing entry's")
+            continue
+        floor = (shared[0].cold_start or standing.cold_start) if shared \
+            else standing.cold_start
+        if entry.cold_start and _MODE_ORDER[entry.cold_start] < _MODE_ORDER[floor]:
+            problems.append(f"{where} for template {entry.key!r} set cold_start "
+                            f"{entry.cold_start!r}, looser than the standing {floor!r}")
+        if shared:
+            narrowed, found = _narrow(shared[0], entry)
+            problems += found
+            merged[merged.index(shared[0])] = narrowed
+        else:
+            narrowed = entry
+            merged.append(entry)
+        problems += [f"the project's {line}" for line in _beyond_caps(narrowed, standing.caps)]
+    if problems:
+        raise LimitsError(problems)
+    return dataclasses.replace(standing, templates=tuple(merged), project=project.path,
+                               project_description=project.description)
+
+
+def loads(text: str, path: str = "", *, project: bool = False) -> Limits:
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise LimitsError([f"invalid TOML: {exc}"]) from exc
-    return from_dict(data, path)
+    return from_dict(data, path, project=project)
 
 
-def load(path: str) -> Limits:
+def load(path: str, *, project: bool = False) -> Limits:
     with open(path, encoding="utf-8") as handle:
-        return loads(handle.read(), os.path.abspath(path))
+        return loads(handle.read(), os.path.abspath(path), project=project)
 
 
 def default_path(instrument_path: str) -> str:
@@ -446,31 +611,14 @@ def default_path(instrument_path: str) -> str:
 # -- the check ----------------------------------------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
-class Ledger:
-    """What this daemon session has spent: acquisitions accepted, and since when."""
-
-    runs: int = 0
-    started: _dt.datetime | None = None
-    now: _dt.datetime | None = None
-
-    @property
-    def hours(self) -> float:
-        if self.started is None:
-            return 0.0
-        now = self.now or _dt.datetime.now()
-        return max(0.0, (now - self.started).total_seconds() / 3600.0)
-
-
-def check(method: Method | None, rendered: Rendered | None, limits: Limits | None,
-          ledger: Ledger, *, real: bool, replicates: int | None = None) -> list[str]:
+def check(method: Method | None, rendered: Rendered | None, limits: Limits | None, *,
+          real: bool) -> list[str]:
     """Why `method` may not be sent under `limits`; empty if it may.
 
     `rendered` is the render the method came from, or None for a hand-written method;
-    `method` None asks only whether anything may be sent at all: the limits' presence
-    and the budget. `real` is whether the boxes are the instrument's. `replicates` is
-    given by `acquire` and not by `arm`. With no limits a real owner refuses everything
-    and a rehearsal nothing. One sentence per reason.
+    `method` None asks only whether anything may be sent at all, which is whether there
+    are limits. `real` is whether the boxes are the instrument's. With no limits a real
+    owner refuses everything and a rehearsal nothing. One sentence per reason.
     """
     if limits is None:
         return [NO_LIMITS] if real else []
@@ -490,19 +638,6 @@ def check(method: Method | None, rendered: Rendered | None, limits: Limits | Non
             problems += _electrodes.refusals(method, limits.electrodes)
         if limits.rf_drive is not None:
             problems += _electrodes.rf_refusals(method, limits.rf_drive)
-    budget = limits.budget
-    if ledger.runs >= budget.max_runs:
-        problems.append(
-            f"this daemon session has made its {budget.max_runs} acquisitions, which is "
-            "the standing budget: a person restarting clockwork serve renews it")
-    if ledger.hours >= budget.max_hours:
-        problems.append(
-            f"this daemon session started {ledger.hours:.1f} h ago and the standing budget "
-            f"is {budget.max_hours:g} h: a person restarting clockwork serve renews it")
-    if replicates is not None and replicates > budget.max_replicates_per_run:
-        problems.append(
-            f"{replicates} replicates is more than the {budget.max_replicates_per_run} the "
-            "standing limits allow in one acquisition")
     return problems
 
 
@@ -511,34 +646,44 @@ def _template_problems(rendered: Rendered, limits: Limits) -> list[str]:
     template = rendered.template
     label = template.name if template is not None and template.name else "this template"
     if entry is None:
-        where = f" ({limits.path})" if limits.path else ""
-        return [f"{label} (hash {rendered.template_hash[:12]}) is not in the standing "
-                f"limits{where}, so an agent may not run it: a [templates] entry with "
-                "this hash admits it, and that is added by whoever keeps the limits, "
-                "never by a session"]
+        files = [path for path in (limits.path, limits.project) if path]
+        where = f" ({', '.join(files)})" if files else ""
+        return [f"{label} (hash {rendered.template_hash[:12]}) is not in the limits in "
+                f"force{where}, so an agent may not run it: a [templates] entry with this "
+                "hash, in the standing limits or a project's, admits it, and that is added "
+                "by whoever keeps those limits, never by the session it was refused to"]
     if template is not None:
         invalid = entry.problems_against(template)
         if invalid:
-            return [f"the standing limits for {label} cannot be applied: " + "; ".join(invalid)]
+            return [f"{entry.whose} for {label} cannot be applied: " + "; ".join(invalid)]
     units = {knob.name: knob.unit for knob in template.knobs} if template is not None else {}
     problems: list[str] = []
+    outside: set[str] = set()
     for limit in entry.knobs:
         value = rendered.knobs.get(limit.name)
-        if value is None:
+        if value is None or limit.holds(value):
             continue
-        if (limit.min is not None and value < limit.min) \
-                or (limit.max is not None and value > limit.max):
-            unit = units.get(limit.name, "")
-            problems.append(
-                f"{limit.name} = {value}{' ' + unit if unit else ''} is outside the standing "
-                f"limits for {label}, {limit.text(unit)}")
+        unit = units.get(limit.name, "")
+        outside.add(limit.name)
+        problems.append(
+            f"{limit.name} = {value}{' ' + unit if unit else ''} is outside {entry.whose} "
+            f"for {label}, {limit.text(unit)}")
     for name, value in entry.fixed:
         asked = rendered.knobs.get(name)
         if asked is not None and asked != value:
             unit = units.get(name, "")
+            outside.add(name)
             problems.append(
-                f"{name} is fixed at {value}{' ' + unit if unit else ''} by the standing "
-                f"limits for {label} and was asked for {asked}")
+                f"{name} is fixed at {value}{' ' + unit if unit else ''} by {entry.whose} "
+                f"for {label} and was asked for {asked}")
+    for cap in limits.caps:
+        value = rendered.knobs.get(cap.name)
+        if value is None or cap.name in outside or cap.holds(value):
+            continue
+        unit = units.get(cap.name, "")
+        problems.append(
+            f"{cap.name} = {value}{' ' + unit if unit else ''} is outside the standing cap "
+            f"on {cap.name}, {cap.text(unit)}, which holds for every template")
     return problems
 
 

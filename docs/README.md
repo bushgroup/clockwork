@@ -23,9 +23,10 @@
   the boxes back against, the numbers measured, the criteria that judge them, and the verdict
   and report a routine answers.
 - [**Standing limits**](instrument-limits.md). The `limits.toml` beside the instrument file that
-  bounds what an agent may send: the templates it may run and how far each knob may turn, the
-  boxes it may address, the budget per daemon session, the cold-start check against what the
-  boxes hold, and the run record every request leaves beside its files.
+  bounds what an agent may send: the largest potential difference between any two electrodes
+  and the RF drive, the templates it may run and how far each knob may turn, the boxes it may
+  address, a project's own file that narrows them, the cold-start check against what the boxes
+  hold, and the run record every request leaves beside its files.
 - [**Method file and provenance**](method-file-format.md). The flat TOML document a trainee loads
   to run an experiment: each box's strings in three phases, the ordered sequence that starts and
   restarts them, and the stamp that traces every acquisition back to the method that produced it.

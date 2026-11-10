@@ -598,6 +598,9 @@ def main(argv: list[str] | None = None) -> int:
     mcp.add_argument("--limits", metavar="PATH", default="",
                      help="the instrument's standing limits (default: limits.toml beside "
                           "--instrument; docs/instrument-limits.md)")
+    mcp.add_argument("--project-limits", metavar="PATH", default="",
+                     help="a project's limits, which admit its own templates and narrow "
+                          "the standing ones but never widen them (default: none)")
     mcp.add_argument("--routines", metavar="DIR", default="",
                      help="the instrument's routines (default: routines beside the "
                           "library's first directory; docs/routines.md)")
@@ -698,7 +701,8 @@ def main(argv: list[str] | None = None) -> int:
 
         return server.run(fake=args.mcp_fake, library=args.library, output=args.output,
                           endpoint=args.endpoint, instrument_path=args.instrument,
-                          limits_path=args.limits, routines=args.routines)
+                          limits_path=args.limits, routines=args.routines,
+                          project_limits_path=args.project_limits)
 
     if cli is not None and cli.is_verb(args.command):
         # As `serve`: a windowed build has no stdout of its own, and the answer belongs
