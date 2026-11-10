@@ -50,11 +50,14 @@ __all__ = [
     "MAX_RF_CHANNEL",
     "Electrodes",
     "Net",
+    "RfCap",
     "Source",
     "Spread",
     "Unreadable",
     "from_dict",
     "refusals",
+    "rf_drive_from_list",
+    "rf_refusals",
     "worst",
 ]
 
@@ -209,6 +212,49 @@ def from_dict(raw: object, problems: list[str]) -> Electrodes | None:
     return Electrodes(max_v=float(max_v), nets=tuple(net for net in nets if net is not None))
 
 
+@dataclass(frozen=True, slots=True)
+class RfCap:
+    """The highest drive one RF head may be set to, in percent of full scale.
+
+    Stands in for the RF term of the electrode check while a head's volts per percent
+    are unknown: the drives an instrument has run at are the ones known to be safe
+    (Matt, 2026-11-10; lab record, task 159)."""
+
+    box: str
+    channel: int
+    max_pct: float
+
+
+def rf_drive_from_list(raw: object, problems: list[str]) -> tuple[RfCap, ...]:
+    """Validate a `rf_drive` list, adding every problem to `problems`."""
+    if not isinstance(raw, list) or not raw:
+        problems.append("rf_drive must list at least one head, as { box, channel, max_pct }")
+        return ()
+    caps: list[RfCap] = []
+    for index, entry in enumerate(raw):
+        where = f"rf_drive[{index}]"
+        if not isinstance(entry, dict):
+            problems.append(f"{where} must be a table with box, channel and max_pct")
+            continue
+        for key in entry:
+            if key not in ("box", "channel", "max_pct"):
+                problems.append(f"{where}.{key} is not a key the limits define "
+                                "(box, channel, max_pct)")
+        source = _source({key: entry[key] for key in ("box", "channel") if key in entry},
+                         where, "channel", MAX_RF_CHANNEL, problems)
+        cap = entry.get("max_pct")
+        if not _number(cap) or not 0 <= cap <= 100:
+            problems.append(f"{where}.max_pct must be a percent of full scale, 0 to 100")
+            continue
+        if source is None:
+            continue
+        if any((known.box, known.channel) == (source.box, source.channel) for known in caps):
+            problems.append(f"rf_drive names {source.box} RF {source.channel} more than once")
+            continue
+        caps.append(RfCap(source.box, source.channel, float(cap)))
+    return tuple(caps)
+
+
 # -- what a method sets -------------------------------------------------------------
 
 
@@ -221,6 +267,8 @@ class _Box:
     ranges: dict[int, list[float]] = field(default_factory=dict)
     offsets: dict[int, list[float]] = field(default_factory=dict)
     sets: dict[tuple[int, str], list[float]] = field(default_factory=dict)
+    rf_auto: set[int] = field(default_factory=set)
+    """RF heads the strings put in `AUTO`, where the box chooses the drive (§8.3)."""
 
 
 def _float(text: str) -> float | None:
@@ -249,9 +297,6 @@ def _read_box(method: Method, box: BoxMethod) -> _Box:
     alternate: set[int] = set()
     alternate_ranges: dict[int, list[float]] = {}
     swaps = False
-    for entry in box.rf:
-        if entry.drive_pct is not None:
-            read.rf.setdefault(entry.channel, []).append(entry.drive_pct)
     for command in _commands(method, box):
         head, args = _head(command)
         if head.startswith("STBLDAT"):
@@ -271,6 +316,8 @@ def _read_box(method: Method, box: BoxMethod) -> _Box:
             read.states.append((f"while {box.name}'s strings are sent", dict(dc)))
         elif index is None:
             continue
+        elif head == "SRFMODE" and len(args) > 1 and args[1].upper() == "AUTO":
+            read.rf_auto.add(index)
         elif head == "SALTRENA" and len(args) > 1 and args[1].upper() == "TRUE":
             alternate.add(index)
         elif value is None:
@@ -426,6 +473,36 @@ def worst(method: Method, electrodes: Electrodes) -> Spread | None:
         if found is None or high_v - low_v > found.volts:
             found = Spread(high_v - low_v, high, high_v, low, low_v, label)
     return found
+
+
+def rf_refusals(method: Method, caps: Sequence[RfCap]) -> list[str]:
+    """Why `method` may not be sent under `rf_drive`: one sentence per RF head it would
+    drive past its cap, put in `AUTO`, or drive at all where no cap names the head."""
+    capped = {(cap.box, cap.channel): cap.max_pct for cap in caps}
+    problems: list[str] = []
+    for box in method.boxes:
+        try:
+            read = _read_box(method, box)
+        except Unreadable as exc:
+            problems.append(f"{exc}, so the RF drives it sets cannot be checked against "
+                            "the standing limits")
+            continue
+        for channel in sorted(set(read.rf) | read.rf_auto):
+            head = f"{box.name} RF {channel}"
+            cap = capped.get((box.name, channel))
+            if cap is None:
+                problems.append(f"the method sets a drive on {head}, which the standing "
+                                "limits' rf_drive does not name, so it may not be driven")
+                continue
+            if channel in read.rf_auto:
+                problems.append(f"the method puts {head} in AUTO, where the box chooses "
+                                f"the drive, and the standing limits hold it at {cap:g}% "
+                                "or less")
+            highest = max(read.rf.get(channel, [0.0]))
+            if highest > cap:
+                problems.append(f"the method drives {head} at {highest:g}%, more than the "
+                                f"{cap:g}% the standing limits allow")
+    return problems
 
 
 def refusals(method: Method, electrodes: Electrodes) -> list[str]:

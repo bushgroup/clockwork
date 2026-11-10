@@ -59,6 +59,11 @@ nets = [
   { name = "TW 1", dc = { box = "box1", channel = 15 }, arb = { box = "box2", module = 1 } },
   { name = "TW 2", dc = { box = "box1", channel = 15 }, arb = { box = "box2", module = 2 } },
 ]
+
+[[rf_drive]]
+box = "box1"
+channel = 1
+max_pct = 50.0
 ```
 
 - `schema_version` pins the document to the shape this section describes.
@@ -101,6 +106,12 @@ nets = [
   (`arb`, by box and module) or an RF head's (`rf`, by box and channel, with
   `rf_peak_v_per_pct`, the head's peak volts per percent of drive). [The electrodes](#the-electrodes)
   below says how the check uses them.
+- `rf_drive`, optional, caps the drive of each RF head it names at `max_pct`, in percent of full
+  scale. Where the list is given, a method may not set a drive on a head it does not name, and
+  may not put a named head in `AUTO`, where the box chooses the drive. The caps are the way to
+  bound RF until a head's peak volts per percent is known well enough to give the head a net in
+  `electrodes`; set them at the drives the instrument has run at. Write them as `[[rf_drive]]`
+  blocks, which TOML accepts after any other table.
 
 `clockwork.envelope.load()` collects every problem in a document before raising, so a document
 with several mistakes reports all of them at once, and `clockwork mcp` exits with those problems
@@ -129,7 +140,9 @@ Before `arm` or `acquire` submits a job, the server refuses:
 4. a knob outside its narrowed range, and a fixed knob at any value but its own;
 5. a method that addresses a box outside `allow.boxes`;
 6. a method, rendered or hand-written, that would put two nets of `electrodes` more than `max_v`
-   apart at any moment, or whose table the check cannot read;
+   apart at any moment, or whose table the check cannot read, and one that would drive an RF
+   head past its `rf_drive` cap, drive a head the caps do not name, or put a capped head in
+   `AUTO`;
 7. any send once the session has made `max_runs` acquisitions or `max_hours` have passed since
    the daemon started, and an acquisition asking for more than `max_replicates_per_run` files.
 

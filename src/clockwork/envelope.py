@@ -35,7 +35,8 @@ at the instrument still owns the sample and the source; nothing here reads eithe
 names the nets that share the instrument's ion-optical volume and the largest
 difference allowed between any two; every method, rendered or hand-written, is refused
 if at any moment of its strings two nets would be further apart (`clockwork.electrodes`;
-lab record, task 159).
+lab record, task 159). Until an RF head's volts are known, `rf_drive` caps its drive at
+what the instrument has run at instead (Matt, 2026-11-10).
 
 No Qt, like the layers beneath it.
 """
@@ -220,6 +221,9 @@ class Limits:
     electrodes: _electrodes.Electrodes | None = None
     """The nets that share the volume and the largest difference between them, or None
     where the limits bound no potentials."""
+    rf_drive: tuple[_electrodes.RfCap, ...] | None = None
+    """The highest drive each RF head may be set to, or None where the limits bound no
+    RF drive. Where given, a head it does not name may not be driven at all."""
 
     def entry_for(self, template_hash: str) -> TemplateLimits | None:
         return next((entry for entry in self.templates if entry.matches(template_hash)),
@@ -342,7 +346,7 @@ def from_dict(data: Mapping, path: str = "") -> Limits:
     """Validate a parsed limits document; `LimitsError` with every problem found."""
     problems: list[str] = []
     _unknown(data, "limits", ("schema_version", "description", "cold_start", "allow",
-                              "budget", "templates", "electrodes"), problems)
+                              "budget", "templates", "electrodes", "rf_drive"), problems)
     if data.get("schema_version") != SCHEMA_VERSION:
         problems.append(f"schema_version must be {SCHEMA_VERSION}, not "
                         f"{data.get('schema_version')!r}")
@@ -410,11 +414,13 @@ def from_dict(data: Mapping, path: str = "") -> Limits:
                                 "would match both")
     electrodes = (_electrodes.from_dict(data["electrodes"], problems)
                   if "electrodes" in data else None)
+    rf_drive = (_electrodes.rf_drive_from_list(data["rf_drive"], problems)
+                if "rf_drive" in data else None)
     if problems:
         raise LimitsError(problems)
     return Limits(boxes=boxes, budget=budget, templates=tuple(templates), cold_start=mode,
                   description=description, path=path, hand_written=hand_written,
-                  electrodes=electrodes)
+                  electrodes=electrodes, rf_drive=rf_drive)
 
 
 def loads(text: str, path: str = "") -> Limits:
@@ -482,6 +488,8 @@ def check(method: Method | None, rendered: Rendered | None, limits: Limits | Non
                 f"address {', '.join(limits.boxes)}")
         if limits.electrodes is not None:
             problems += _electrodes.refusals(method, limits.electrodes)
+        if limits.rf_drive is not None:
+            problems += _electrodes.rf_refusals(method, limits.rf_drive)
     budget = limits.budget
     if ledger.runs >= budget.max_runs:
         problems.append(

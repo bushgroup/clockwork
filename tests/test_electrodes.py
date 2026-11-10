@@ -261,3 +261,78 @@ def test_the_standing_limits_refuse_an_unsafe_hand_written_method():
 def test_a_bad_electrodes_table_is_a_problem_in_the_limits():
     with pytest.raises(LimitsError, match="electrodes.max_v"):
         envelope.loads(LIMITS.replace("max_v = 60.0", "max_v = 0"))
+
+
+# --- the RF drive caps -------------------------------------------------------------
+
+# Array-of-tables, so the caps may follow any other table in the document.
+RF_CAPS = """
+[[rf_drive]]
+box = "box1"
+channel = 1
+max_pct = 50.0
+
+[[rf_drive]]
+box = "box1"
+channel = 2
+max_pct = 30.0
+"""
+
+
+def rf_bank(*heads: tuple[int, float, str]) -> str:
+    return "".join(f'\n[boxes.rf.{channel}]\ndrive_pct = {drive}\nmode = "{mode}"\n'
+                   for channel, drive, mode in heads)
+
+
+def test_rf_heads_at_the_drives_the_limits_name_are_sent():
+    limits = envelope.loads(LIMITS + RF_CAPS)
+    assert [(cap.channel, cap.max_pct) for cap in limits.rf_drive] == [(1, 50.0), (2, 30.0)]
+    tested = load(method_text(rf=rf_bank((1, 50.0, "MANUAL"), (2, 30.0, "MANUAL"))))
+    assert check(tested, None, limits, Ledger(), real=True) == []
+    # Below the cap is within it, and a method that sets no drive is the cold-start
+    # check's to judge.
+    lower = load(method_text(rf=rf_bank((1, 20.0, "MANUAL"))))
+    assert check(lower, None, limits, Ledger(), real=True) == []
+    assert check(load(method_text()), None, limits, Ledger(), real=True) == []
+
+
+def test_an_rf_drive_past_its_cap_is_refused_wherever_the_method_sets_it():
+    limits = envelope.loads(LIMITS + RF_CAPS)
+    declared = load(method_text(rf=rf_bank((1, 60.0, "MANUAL"))))
+    assert check(declared, None, limits, Ledger(), real=True) == [
+        "the method drives box1 RF 1 at 60%, more than the 50% the standing limits allow"]
+    # A setter string and a table event (channel 34 is RF 2) count the same.
+    by_string = method_text().replace('setup = ["STBLCLK,EXT"]',
+                                      'setup = ["STBLCLK,EXT", "SRFDRV,2,45"]')
+    assert "box1 RF 2 at 45%" in check(load(by_string), None, limits, Ledger(), real=True)[0]
+    by_table = CLOCK_TABLE.replace("806:16:37", "806:16:37:34:31")
+    assert "box1 RF 2 at 31%" in check(load(method_text(by_table)), None, limits, Ledger(),
+                                       real=True)[0]
+
+
+def test_auto_mode_and_a_head_the_caps_do_not_name_are_refused():
+    limits = envelope.loads(LIMITS + RF_CAPS)
+    auto = load(method_text(rf=rf_bank((1, 50.0, "AUTO"))))
+    assert check(auto, None, limits, Ledger(), real=True) == [
+        "the method puts box1 RF 1 in AUTO, where the box chooses the drive, and the "
+        "standing limits hold it at 50% or less"]
+    unnamed = load(method_text(rf=rf_bank((3, 10.0, "MANUAL"))))
+    assert "box1 RF 3, which the standing limits' rf_drive does not name" in check(
+        unnamed, None, limits, Ledger(), real=True)[0]
+
+
+def test_a_bad_rf_drive_list_reports_every_problem_at_once():
+    with pytest.raises(LimitsError) as caught:
+        envelope.loads(LIMITS.replace("[allow]", """rf_drive = [
+  { box = "box1", channel = 5, max_pct = 50.0 },
+  { box = "box1", channel = 1, max_pct = 120.0, colour = "red" },
+  { box = "box1", channel = 2, max_pct = 30.0 },
+  { box = "box1", channel = 2, max_pct = 20.0 },
+]
+
+[allow]"""))
+    joined = " | ".join(caught.value.problems)
+    for expected in ("rf_drive[0].channel must be a whole number from 1 to 4",
+                     "rf_drive[1].colour", "rf_drive[1].max_pct must be a percent",
+                     "names box1 RF 2 more than once"):
+        assert expected in joined
