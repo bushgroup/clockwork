@@ -261,8 +261,11 @@ values into a method file. There are two ways to get one.
   only with `--overwrite`.
 
 ```
-clockwork render-template --template bradykinin-clock/template.toml --knobs duration_ms=25 --labels sample=bradykinin --to cells/25ms.toml
+clockwork render-template --template bradykinin-clock/template.toml --knobs duration_ms=25 --labels sample=bradykinin --to D:\data\methods\25ms.toml
 ```
+
+Give `--to` the full path of the file to write. A relative one is refused when the library is
+the instrument's own, which keeps a rendered file out of the folder every user shares.
 
 A rendered file opens in the window like any other method, into the same panes, and can be sent,
 acquired, replicated and put in the run queue. What it adds is a record of where it came from:

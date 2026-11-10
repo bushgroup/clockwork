@@ -122,6 +122,12 @@ def project_of(directory: str) -> str:
     folder's parent with `-data` taken off; a folder that is itself `<project>-data` is
     read the same way. Anything else -- a person's folder, the working directory -- names
     no project and gives the empty string, never a guess.
+
+    Read off the name and nothing else, so it is as good as the convention is kept: any
+    folder ending `-data` reads as a project's (`raw-data/<day>` gives `raw`), the day
+    folder's parent is read before the day folder itself, and a folder deeper than the
+    day folder gives nothing. `clockwork report --project` says it outright where the
+    name would mislead.
     """
     if not directory:
         return ""
@@ -168,9 +174,11 @@ class Report:
         """The kept folder's report id (`clockwork.keep`), or empty where none was kept."""
         self.kept = kept
         """The kept folder's path on this PC, or empty."""
-        self.project = project
+        self.project = " ".join(project.split())
         """The research project the run belongs to (`project_of`), or empty: always empty
-        from the window, which knows no project."""
+        from the window, which knows no project. One line whatever was given: it goes
+        into a list item of the report, and a `--project` with a line break in it would
+        otherwise write the item after it."""
 
     def url(self, budget: int = BUDGET) -> str:
         """The pre-filled form's URL, no longer than `budget` characters."""

@@ -381,6 +381,17 @@ def test_one_single_frame_and_every_per_repetition_method_are_acquirable():
 # --- a method against its own strings (lab record, task 31) ---------------------------
 
 
+def why_incomplete(run) -> str:
+    """What a run that is not complete has to say for itself, for an assertion's message.
+
+    The two golden-method tests failed once in a full run made beside other work and
+    passed every time since, alone and under load (lab record, task 160); the bare
+    assertion printed a truncated `Run` and no cause. This prints the cause."""
+    return (f"{run.text}; frames {[record.outcome for record in run.frames]}; ended by "
+            f"{[record.ended_by for record in run.frames]}; folds "
+            f"{[fold.error for fold in run.folds]}")
+
+
 def golden_text(name: str) -> str:
     """One golden method as it is written on disk, for mutating a single number of."""
     directory = clockwork.lab_dir("golden")
@@ -2386,7 +2397,7 @@ def test_the_detection_response_golden_method_acquires(rig):
     boxes = boxes_for(method, arb_modules=ARB_MODULES)
     send_phases(method, boxes)
     run = rig.acquire(method, boxes)
-    assert run.complete
+    assert run.complete, why_incomplete(run)
     assert UimfFile(run.summed_path).frame_params(1).scans == SCANS
 
 
@@ -2403,7 +2414,7 @@ def test_the_bradykinin_clock_golden_method_acquires_with_its_cross_box_start_or
     seen: list[acq.Event] = []
     send_phases(method, boxes)
     run = rig.acquire(method, boxes, progress=seen.append)
-    assert run.complete
+    assert run.complete, why_incomplete(run)
     walked = [(event.box, event.command) for event in seen
               if isinstance(event, PhaseSent) and event.phase == "start"]
     assert walked == [(step.box, step.command) for step in method.start]

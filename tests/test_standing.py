@@ -348,3 +348,25 @@ def test_a_daemon_started_from_the_console_twin_runs_as_the_windowed_exe(monkeyp
     monkeypatch.setattr("sys.frozen", True, raising=False)
     monkeypatch.setattr("sys.executable", str(tmp_path / "clockwork-cli.exe"))
     assert serving.serve_command()[:2] == [str(tmp_path / "clockwork.exe"), "serve"]
+
+
+def test_a_verb_names_each_saved_setting_it_took(capsys, monkeypatch, tmp_path, library,
+                                                 instrument_path):
+    """A process started inside a packaged application can be handed a private copy of
+    the window's saved settings, so a verb says which saved values it used and a stale
+    copy is seen where it is used (lab record, task 160)."""
+    monkeypatch.setattr("clockwork.app.saved.saved_settings", lambda keys=None: {
+        "instrument_path": instrument_path, "library_dir": str(tmp_path / "saved-library")})
+    (tmp_path / "runs").mkdir()
+    made = Daemon(tmp_path / "runs", library=library)
+    try:
+        code, answer, err = verb(capsys, "warm-up", "--endpoint", made.endpoint)
+        assert code == 0, err
+        assert (f"clockwork warm-up: from the window's saved settings: instrument "
+                f"document {instrument_path}") in err
+        assert "saved-library" not in err, "the daemon's library was used, not the saved"
+        code, answer, err = verb(capsys, "warm-up", "--endpoint", made.endpoint,
+                                 "--instrument", instrument_path)
+        assert code == 0 and "saved settings" not in err, "a flag is not a saved setting"
+    finally:
+        made.stop()

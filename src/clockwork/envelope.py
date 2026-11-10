@@ -91,8 +91,11 @@ HASH_PREFIX_MIN = 8
 NO_LIMITS = (
     "no standing limits are in force for this instrument, so an agent may not send to "
     "its boxes or acquire: start `clockwork mcp` with --limits, or put a limits.toml "
-    "beside the instrument document")
-"""The refusal every send to a real owner gets when no limits were loaded."""
+    "beside the instrument document, which with no --instrument is instrument.toml in "
+    "the folder CLOCKWORK_INSTRUMENT names")
+"""The refusal every send to a real owner gets when no limits were loaded. It names the
+variable because the commonest cause is an instrument directory that did not resolve
+(`clockwork.instrument_unresolved`), which nothing else says at the moment of refusal."""
 
 HAND_WRITTEN = (
     "a hand-written method has no knobs for the standing limits to bound, so an agent "
@@ -217,19 +220,36 @@ class Limits:
         return (entry.cold_start if entry is not None and entry.cold_start
                 else self.cold_start)
 
-    def against(self, templates: Iterable[Template]) -> list[str]:
-        """Every problem applying these limits to a library's templates, and every entry
-        no template in it matches."""
+    def against(self, templates: Iterable[Template], *,
+                unmatched: bool = True) -> list[str]:
+        """Every problem applying these limits to a library's templates, and, unless
+        `unmatched` is false, every entry no template in it matches.
+
+        The two are different kinds of finding. An entry that cannot be applied to its
+        template is a mistake in the limits. An entry with no template is a mistake only
+        where the library is meant to hold every template the limits name: one
+        instrument's limits name several projects' templates, a daemon serves one
+        project's, and the others' entries are then unmatched by design (`unmatched`
+        lists them apart)."""
         problems: list[str] = []
         templates = list(templates)
+        absent = set(self.unmatched(templates))
         for entry in self.templates:
-            found = [template for template in templates if entry.matches(template.hash)]
-            if not found:
-                problems.append(f"limits for template {entry.key!r} name hash {entry.hash} "
-                                "and no template in the library has it")
-            for template in found:
-                problems += entry.problems_against(template)
+            if entry.key in absent:
+                if unmatched:
+                    problems.append(f"limits for template {entry.key!r} name hash "
+                                    f"{entry.hash} and no template in the library has it")
+                continue
+            for template in templates:
+                if entry.matches(template.hash):
+                    problems += entry.problems_against(template)
         return problems
+
+    def unmatched(self, templates: Iterable[Template]) -> list[str]:
+        """The key of every entry whose hash no template in a library has."""
+        hashes = [template.hash for template in templates]
+        return [entry.key for entry in self.templates
+                if not any(entry.matches(digest) for digest in hashes)]
 
 
 def _number(value: object) -> bool:
@@ -468,8 +488,11 @@ def _template_problems(rendered: Rendered, limits: Limits) -> list[str]:
     template = rendered.template
     label = template.name if template is not None and template.name else "this template"
     if entry is None:
+        where = f" ({limits.path})" if limits.path else ""
         return [f"{label} (hash {rendered.template_hash[:12]}) is not in the standing "
-                "limits, so an agent may not run it"]
+                f"limits{where}, so an agent may not run it: a [templates] entry with "
+                "this hash admits it, and that is added by whoever keeps the limits, "
+                "never by a session"]
     if template is not None:
         invalid = entry.problems_against(template)
         if invalid:

@@ -123,12 +123,13 @@ series; `--request-id` continues a request from an earlier session.
 To make a method a person can open in the window, render the template to a file:
 
 ```
-clockwork render-template --template bradykinin-clock/template.toml --labels sample=bradykinin --knobs duration_ms=25 --to cells/25ms.toml
+clockwork render-template --template bradykinin-clock/template.toml --labels sample=bradykinin --knobs duration_ms=25 --to C:\lab\slimphony-demo\methods\25ms.toml
 ```
 
-`--to` is a path in the library unless it is absolute, and `.toml` is added where it is missing.
-An existing file is left alone, and the verb refuses with one sentence, unless `--overwrite` is
-given. A render with `problems` writes nothing; one outside the standing limits or with refusals
+`.toml` is added to `--to` where it is missing. A relative `--to` is a path in the library's last
+directory, and is refused where that directory is an instrument's own library, as it is when the
+daemon serves the instrument's library alone ([MCP server](mcp-server.md)). An existing file is
+left alone, and the verb refuses with one sentence, unless `--overwrite` is given. A render with `problems` writes nothing; one outside the standing limits or with refusals
 is still written, since the window runs it regardless, and its answer says so. The answer names
 the file it wrote under `written`. The file is an ordinary method with a `[rendered]` table at
 its foot, which is what makes its runs in the window record the template and knobs
@@ -216,7 +217,9 @@ goes in that run's log. Ctrl-C during either ends the ramp after the step it is 
 the verb again ramps on from what the boxes read back, so a box already at its target is sent
 nothing. Given no options, both take the method library, the instrument file and the output
 directory from the window's saved settings, and `warm-up` takes the acquisition console from them
-too (`--console` overrides it). The installer's "Warm up" and "Stand down" shortcuts run the two
+too (`--console` overrides it). Each saved value a verb uses is named on standard error, in a
+line that begins "from the window's saved settings", so a value that is not the one the window
+shows is seen where it is used. The installer's "Warm up" and "Stand down" shortcuts run the two
 verbs this way, in a console window that stays open on the answer. A saved instrument file that
 cannot be read is refused with its path and a sentence saying that the path came from the
 window's settings, since no option named it. A daemon that `warm-up` starts logs to `serve.log`
@@ -275,9 +278,9 @@ by setting `CLOCKWORK_ISSUES` to the address of that tracker's new-issue page.
 
 A report made for a research project names it, so that the fault can be traced to the sitting
 that met it. `--project NAME` gives the name. Without it, the name is read off the folder the
-transcript is in, or with no `--transcript` off the output folder of the running `clockwork
-serve`: a project's runs are written to `<project>-data\<day>\`, and the report carries
-`Project: <project>`. A folder named any other way gives no project line, and a report from the
+transcript is in, or with no `--transcript` off the output folder of the running daemon, which
+is asked at `--endpoint` where it is not on the default socket: a project's runs are written to
+`<project>-data\<day>\`, and the report carries `Project: <project>`. A folder named any other way gives no project line, and a report from the
 window never carries one.
 
 `clockwork request` opens a new feature request on the same tracker with the version, the build

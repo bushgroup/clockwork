@@ -476,16 +476,18 @@ def _report_project(args: argparse.Namespace) -> str:
         return args.project
     if args.transcript:
         return project_of(os.path.dirname(os.path.abspath(args.transcript)))
-    return project_of(_serve_output())
+    return project_of(_serve_output(getattr(args, "endpoint", "")))
 
 
-def _serve_output() -> str:
+def _serve_output(endpoint: str = "") -> str:
     """The running serve's output folder, or empty when none answers within a second:
-    a report is often made because something stopped, and must not wait on it."""
+    a report is often made because something stopped, and must not wait on it.
+    `endpoint` is the daemon's command socket where it is not the default one."""
     from clockwork.owner import RemoteOwner
     from clockwork.owner.remote import DEFAULT_COMMAND, DaemonError
 
-    owner = RemoteOwner(DEFAULT_COMMAND, origin="clockwork report", timeout=1.0)
+    owner = RemoteOwner(endpoint or DEFAULT_COMMAND, origin="clockwork report",
+                        timeout=1.0)
     try:
         return owner.hello().output
     except DaemonError:
@@ -559,7 +561,8 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--library", metavar="DIR", default="",
                        help="the method library clients may list, or several directories "
                             f"joined by {os.pathsep!r}, searched in order (default: golden "
-                            "in $CLOCKWORK_INSTRUMENT, then in ../slimphony)")
+                            "in $CLOCKWORK_INSTRUMENT when that is set, in ../slimphony "
+                            "beside a checkout when it is not)")
     serve.add_argument("--console", metavar="PATH", default="",
                        help="the acquisition console executable, or a directory holding "
                             "it (default: $CLOCKWORK_CONSOLE, then the installer's)")
@@ -589,8 +592,9 @@ def main(argv: list[str] | None = None) -> int:
                      help="where runs are written and read back (default: the daemon's)")
     mcp.add_argument("--instrument", metavar="PATH", default="",
                      help="the instrument document runs are acquired under (default: "
-                          "instrument.toml in $CLOCKWORK_INSTRUMENT, then in ../slimphony; "
-                          "none under --fake)")
+                          "instrument.toml in $CLOCKWORK_INSTRUMENT when that is set, in "
+                          "../slimphony beside a checkout when it is not; none under "
+                          "--fake or over a daemon that is --fake)")
     mcp.add_argument("--limits", metavar="PATH", default="",
                      help="the instrument's standing limits (default: limits.toml beside "
                           "--instrument; docs/instrument-limits.md)")
@@ -619,6 +623,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="the research project the report is from (default: read off "
                              "the transcript's folder, else the running serve's output "
                              "folder, when either is a project's <project>-data folder)")
+    report.add_argument("--endpoint", metavar="ADDRESS", default="",
+                        help="the daemon's command socket, asked for its output folder "
+                             "when no transcript is named (default: tcp://127.0.0.1:5570)")
     request = commands.add_parser(
         "request", help="open a feature request on the lab's issue tracker",
         description="Open a new feature request in the browser with the version, the "

@@ -86,7 +86,15 @@ snapshot is the one an operator reaches for when the window may already be close
 SAVED = ("warm_up", "stand_down", "snapshot_boxes")
 """The tools whose verbs fall back on the window's saved settings for the library, the
 instrument document, the output directory and the console, flags first: they are run
-from desktop shortcuts that carry no flags (`clockwork.app.saved`)."""
+from desktop shortcuts that carry no flags (`clockwork.app.saved`). Each saved value a
+verb used is named on standard error (`SAVED_WORDS`)."""
+
+SAVED_WORDS = {"instrument_path": "instrument document", "output_dir": "output folder",
+               "library_dir": "library", "console_path": "console"}
+"""How each saved setting a verb took is named on standard error. A verb run with no
+flags says which saved values it used, because the saved settings are not one thing: a
+process started inside a packaged application can be handed a private copy of them, and
+then reads values the window never saved (lab record, task 160)."""
 
 SAVED_INSTRUMENT = ("run_routine",)
 """The tools whose verbs fall back on the window's saved instrument document alone,
@@ -217,8 +225,10 @@ def add_verbs(commands: argparse._SubParsersAction) -> None:
                                  "(default: the daemon's)")
         common.add_argument("--instrument", metavar="PATH", default="",
                             help="the instrument document runs are acquired under "
-                                 "(default: the window's saved one, then instrument.toml "
-                                 "in $CLOCKWORK_INSTRUMENT or ../slimphony)")
+                                 "(default: the window's saved one for the verbs that "
+                                 "read it, else instrument.toml in $CLOCKWORK_INSTRUMENT "
+                                 "when that is set, in ../slimphony beside a checkout "
+                                 "when it is not)")
         common.add_argument("--limits", metavar="PATH", default="",
                             help="the instrument's standing limits (default: limits.toml "
                                  "beside --instrument)")
@@ -406,7 +416,7 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
     program = f"clockwork {verb.name}"
     arguments = _arguments(verb, args, args.verb_parser)
 
-    from .. import instrument_file
+    from .. import instrument_file, instrument_unresolved
     from ..owner import RemoteOwner
     from ..owner.remote import DEFAULT_COMMAND, DaemonError
     from .audit import AuditLog
@@ -422,6 +432,10 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
                      if key == "instrument_path"}
     endpoint = args.endpoint or DEFAULT_COMMAND
     instrument_path = args.instrument or saved.get("instrument_path", "")
+    took: list[str] = []
+    """The saved settings this verb used, in the order it used them."""
+    if instrument_path and not args.instrument:
+        took.append("instrument_path")
     if verb.tool.name in STARTS:
         from ..app.serving import connect_or_start, serve_command
 
@@ -436,6 +450,10 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
             return 1
         if started:
             _say(err, "clockwork serve started; it stays running until stand-down")
+            took += [key for key, given in (("output_dir", args.output),
+                                            ("library_dir", args.library),
+                                            ("console_path", args.console))
+                     if not given and saved.get(key)]
     owner = RemoteOwner(endpoint, origin=f"{program} at the command line")
     try:
         try:
@@ -448,6 +466,12 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
             # The instrument directory's own document, and so the limits beside it,
             # unless one was named or saved; never under a rehearsal's simulated boxes.
             instrument_path = instrument_file() or ""
+            if not instrument_path:
+                # Looked for and not found because the variable names nothing: said
+                # here, since the refusal that follows from it comes much later.
+                unresolved = instrument_unresolved(when_unset=False)
+                if unresolved:
+                    _say(err, f"{program}: {unresolved}")
         try:
             instrument, limits = instrument_and_limits(
                 fake=bool(hello.fake), instrument_path=instrument_path,
@@ -463,6 +487,12 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
             return 1
         output = os.path.abspath(args.output or hello.output or saved.get("output_dir", "")
                                  or os.getcwd())
+        took += [key for key, known in (("output_dir", args.output or hello.output),
+                                        ("library_dir", args.library or hello.library))
+                 if not known and saved.get(key) and key not in took]
+        if took:
+            _say(err, f"{program}: from the window's saved settings: " + "; ".join(
+                f"{SAVED_WORDS[key]} {saved[key]}" for key in took))
         toolbox = Toolbox(owner, library=args.library or hello.library
                           or saved.get("library_dir", ""), output=output,
                           instrument=instrument, instrument_path=instrument_path,

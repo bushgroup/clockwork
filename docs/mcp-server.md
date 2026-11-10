@@ -45,12 +45,16 @@ library as the `golden` directory and the routines as the `routines` directory. 
 `$CLOCKWORK_INSTRUMENT` when that variable is set, and otherwise a folder named `slimphony`
 beside the clockwork checkout. The `instrument.toml` at its root is what marks it, so a folder without one is never
 taken for it. A variable that names a folder without one resolves nothing; clockwork does not
-then fall back on the sibling.
+then fall back on the sibling. The daemon's log, the second line the MCP server prints and the
+standard error of a verb that looked for the instrument document each say so, with the
+variable's name and its value. Quotes around the value and spaces at its ends are ignored, so a
+value pasted with either still names its folder.
 
 With no flags, `clockwork serve` lists the instrument directory's `golden` directory, and the MCP
 server and the command-line verbs acquire under its `instrument.toml` with the `limits.toml`
 beside it in force. A flag, or the window's saved setting where the verbs read one, always wins. A `--fake`
-server takes no instrument document by default. A public clone has no instrument directory, and
+server takes no instrument document by default, and neither does a server or a verb over a
+daemon that is itself `--fake`. A public clone has no instrument directory, and
 every default then falls back to what it was without one: no library, no instrument document, no
 limits.
 
@@ -73,11 +77,29 @@ clockwork serve --library "C:\lab\slimphony\golden;C:\lab\slimphony-demo\templat
 The directories are searched in order. `list_templates` and `list_methods` name each entry's
 `library`, with `path` relative to it. A path found in two directories is listed from both, each
 with a `duplicate` field naming every copy, and every tool refuses it with both paths named until
-one copy is renamed or removed; a template is never taken quietly from the first. A relative path
-that names a file in none of them, such as `render_template`'s `to`, is placed in the last
-directory, which is the project's. The [standing limits](instrument-limits.md) still name every
-template that may run: a project template they do not list is refused against the instrument as
-any unlisted template is.
+one copy is renamed or removed; a template is never taken quietly from the first. Names are
+compared as the file system compares them, so on Windows two copies that differ only in case are
+one name.
+
+A relative `to` given to `render_template` is written to the last directory, which is the
+project's. It is refused in three cases, each with one sentence that says what to give instead.
+The last directory is an instrument's own library, which is the case whenever the instrument's
+library is served alone: the instrument's library is kept by its own people, and a render goes to
+an absolute path, such as a file in the folder of the task it is for. The last directory does not
+exist. An earlier directory already holds a file of that name, which a render neither replaces
+nor shadows with a second copy. An absolute `to` is written where it says.
+
+The routines are looked for in `routines` beside the first directory, so the instrument's library
+goes first. Where that folder is not there, `list_routines` answers a `problem` naming the folder
+it looked in.
+
+The [standing limits](instrument-limits.md) still name every template that may run: a project
+template they do not list is refused against the instrument as any unlisted template is, and the
+refusal names the limits file and says that an entry with the template's hash admits it. One
+instrument's limits can name the templates of several projects while a daemon serves one
+project's. `status` therefore reports two lists under `limits`: `problems` holds each entry that
+cannot be applied to the template it names, and `not_served` holds the entries whose template
+the library does not contain.
 
 `--fake` needs no daemon. The server holds simulated boxes and a simulated acquisition console of
 its own, starts the console at once, and writes its files to

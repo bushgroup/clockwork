@@ -129,7 +129,10 @@ uv run pytest
 The self-check needs no hardware: it passes on a machine with no MIPS box, no digitizer and no
 acquisition console. Both lower layers ship a stand-in for the hardware they talk to, so a clone
 with no instrument can run everything the self-check runs, the whole UIMF path included, and
-`uv run clockwork --fake` opens the real window over those stand-ins.
+`uv run clockwork --fake` opens the real window over those stand-ins. On a machine that does have
+a console build, the self-check starts it, asks it for `info` and stops it. Setting
+`CLOCKWORK_CHECK_CONSOLE=0` skips that one check, and it is skipped without being asked while a
+clockwork window or daemon holds the instrument.
 
 ## If you run a similar instrument
 

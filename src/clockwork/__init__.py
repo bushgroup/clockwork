@@ -99,7 +99,8 @@ def instrument_dir(name: str | None = None) -> str | None:
     clockwork: the instrument document, the standing limits beside it, the method
     library (`golden`) and the routines. `$CLOCKWORK_INSTRUMENT` when it is set, and
     then nothing else: a variable naming the wrong folder resolves nothing rather than
-    quietly serving another instrument's material. Otherwise the sibling
+    quietly serving another instrument's material (`instrument_unresolved` is the
+    sentence for it). Otherwise the sibling
     `../slimphony` beside this checkout, which an installed clockwork does not have, so
     an instrument PC sets the variable. Recognised by the instrument document at its
     root (`INSTRUMENT_FILE`), never by a task system, which a project's repository has
@@ -109,7 +110,7 @@ def instrument_dir(name: str | None = None) -> str | None:
     if name is not None and name not in _INSTRUMENT_SUBDIRS:
         raise ValueError(f"unknown instrument directory {name!r}; one of "
                          f"{_INSTRUMENT_SUBDIRS}")
-    named = os.environ.get(INSTRUMENT_ENV)
+    named = _instrument_named()
     candidates = ([named] if named else
                   [os.path.abspath(os.path.join(ROOT, "..", INSTRUMENT_SIBLING))])
     for root in candidates:
@@ -121,6 +122,48 @@ def instrument_dir(name: str | None = None) -> str | None:
         path = os.path.join(root, name)
         return path if os.path.isdir(path) else None
     return None
+
+
+def _instrument_named() -> str:
+    """`$CLOCKWORK_INSTRUMENT` as it was meant, or the empty string when it is not set.
+
+    Surrounding whitespace and one pair of quotes are taken off: `set NAME="D:\\x"` in
+    cmd.exe keeps the quotes in the value and a pasted value keeps its trailing space,
+    and either would name a folder that is not there.
+    """
+    value = (os.environ.get(INSTRUMENT_ENV) or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1].strip()
+    return value
+
+
+def instrument_unresolved(*, when_unset: bool = True) -> str:
+    """Why no instrument directory resolves, in one sentence that names the variable;
+    the empty string when one does.
+
+    Two cases read differently. The variable set and naming nothing is a mistake on this
+    PC, and the sentence says what the value is and what is wrong with it, so a caller
+    says it wherever it starts (the daemon's log, `clockwork mcp`'s first line, a verb's
+    standard error). The variable unset and no sibling is a public clone or an installed
+    build nobody has pointed at an instrument: ordinary, and said only where something
+    then cannot be done for want of a library or limits, so `when_unset` false answers
+    the empty string for it.
+    """
+    if instrument_dir() is not None:
+        return ""
+    named = _instrument_named()
+    if not named and not when_unset:
+        return ""
+    if named:
+        wrong = (f"holds no {INSTRUMENT_FILE}" if os.path.isdir(named)
+                 else "is not a folder on this PC")
+        return (f"{INSTRUMENT_ENV} is set to {named!r}, which {wrong}, so no instrument "
+                "directory is in use: no library, instrument document or limits are found "
+                "by default until it names the folder that holds "
+                f"{INSTRUMENT_FILE}")
+    return (f"no instrument directory was found: set {INSTRUMENT_ENV} to the folder that "
+            f"holds {INSTRUMENT_FILE} (a checkout also finds ../{INSTRUMENT_SIBLING} "
+            "beside it)")
 
 
 def instrument_file() -> str | None:
@@ -144,7 +187,10 @@ def library_dirs(value: str) -> tuple[str, ...]:
         if not part:
             continue
         path = os.path.abspath(part)
-        key = os.path.normcase(path)
+        # The directory itself rather than its spelling: one folder named by its long
+        # and its 8.3 short name, or through a link, is one library, and kept as two
+        # every document in it would be its own duplicate.
+        key = os.path.normcase(os.path.realpath(path))
         if key not in seen:
             seen.add(key)
             found.append(path)
@@ -196,5 +242,5 @@ def built_commit() -> str | None:
 
 
 __all__ = ["INSTRUMENT_ENV", "INSTRUMENT_FILE", "INSTRUMENT_SIBLING", "ROOT", "__version__",
-           "built_commit", "commit_of", "instrument_dir", "instrument_file", "lab_dir",
-           "library_dirs", "library_setting"]
+           "built_commit", "commit_of", "instrument_dir", "instrument_file",
+           "instrument_unresolved", "lab_dir", "library_dirs", "library_setting"]

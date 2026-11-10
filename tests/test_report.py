@@ -203,7 +203,7 @@ def test_clockwork_report_keeps_the_named_run_unless_told_not_to(capsys, monkeyp
 def no_serve_answers(monkeypatch):
     """No test here asks a real `clockwork serve` for its output folder: on an instrument
     PC one is running, and the report would carry the project it is writing into."""
-    monkeypatch.setattr("clockwork.app._serve_output", lambda: "")
+    monkeypatch.setattr("clockwork.app._serve_output", lambda endpoint="": "")
 
 
 def test_clockwork_report_names_the_project_it_is_given_or_finds(capsys, monkeypatch,
@@ -221,9 +221,21 @@ def test_clockwork_report_names_the_project_it_is_given_or_finds(capsys, monkeyp
     assert "- Project: other" in attachments("--transcript", transcript,
                                              "--project", "other")
     assert "Project" not in attachments()
-    monkeypatch.setattr("clockwork.app._serve_output", lambda: str(day))
+    asked: list[str] = []
+    monkeypatch.setattr("clockwork.app._serve_output",
+                        lambda endpoint="": asked.append(endpoint) or str(day))
     assert "- Project: slimphony-demo" in attachments()
+    # A daemon on another socket is asked there, as every verb asks it.
+    assert "- Project: slimphony-demo" in attachments("--endpoint", "tcp://127.0.0.1:5999")
+    assert asked == ["", "tcp://127.0.0.1:5999"]
     elsewhere = tmp_path / "someone" / "261109"
     elsewhere.mkdir(parents=True)
     named = write_transcript(elsewhere / "261109_BB_001-2026-11-09.transcript.log", 3)
     assert "Project" not in attachments("--transcript", named)
+
+
+def test_a_project_is_one_line_of_the_report_whatever_it_was_given():
+    """It is written into a list item; a line break in it would write the next item."""
+    block = fields(Report(project="demo\n- Report id: forged").url())["attachments"]
+    assert "- Project: demo - Report id: forged" in block
+    assert "\n- Report id: forged" not in block

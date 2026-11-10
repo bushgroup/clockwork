@@ -37,6 +37,10 @@ ROOT = os.path.abspath(os.path.join(HERE, ".."))
 FAIL: list[str] = []
 SKIPPED: list[str] = []
 
+REAL_CONSOLE_ENV = "CLOCKWORK_CHECK_CONSOLE"
+"""Set to 0 to skip the one check that starts a real acquisition console where this
+machine has a build of one; everything else here runs on stand-ins."""
+
 
 def check_true(name: str, cond: object) -> None:
     print("{:4s} {}".format("OK" if cond else "FAIL", name))
@@ -1536,7 +1540,7 @@ def main() -> int:
             check_true(f"lab_dir({sub!r}) resolves", clockwork.lab_dir(sub) is not None)
     try:
         clockwork.lab_dir("not-a-lab-directory")
-        check_true("lab_dir rejects an unknown directory name", lab is None)
+        check_true("lab_dir rejects an unknown directory name", False)
     except ValueError:
         check_true("lab_dir rejects an unknown directory name", True)
 
@@ -1575,10 +1579,30 @@ def main() -> int:
                        and clockwork.instrument_dir("golden")
                        == os.path.join(os.path.abspath(made_instrument), "golden")
                        and clockwork.instrument_dir("routines") is None)
+            os.environ[clockwork.INSTRUMENT_ENV] = f'"{made_instrument}" '
+            check_true("and still names it written with quotes and a trailing space",
+                       clockwork.instrument_dir() == os.path.abspath(made_instrument)
+                       and clockwork.instrument_unresolved() == "")
             os.environ[clockwork.INSTRUMENT_ENV] = project
             check_true("a directory with a task system and no instrument document is not "
                        "an instrument directory",
                        clockwork.instrument_dir() != os.path.abspath(project))
+            said = clockwork.instrument_unresolved(when_unset=False)
+            check_true("and a variable that names nothing is said by name and by value "
+                       f"({said[:60]}...)",
+                       clockwork.INSTRUMENT_ENV in said and repr(project) in said)
+            from clockwork.mcp import Toolbox, ToolFailure
+
+            golden_made = os.path.join(made_instrument, "golden")
+            try:
+                Toolbox(object(), library=golden_made, output=scratch)._write_rendered(
+                    None, "rendered/x", False)  # type: ignore[arg-type]
+                check_true("a relative render is refused into an instrument's own library",
+                           False)
+            except ToolFailure as exc:
+                check_true("a relative render is refused into an instrument's own library",
+                           "absolute path" in str(exc)
+                           and not os.path.exists(os.path.join(golden_made, "rendered")))
         finally:
             if saved_instrument is None:
                 os.environ.pop(clockwork.INSTRUMENT_ENV, None)
@@ -3254,10 +3278,34 @@ def main() -> int:
                    supervisor.alive and supervisor.info is not None)
     check_true("and is stopped on the way out", not supervisor.alive)
 
+    # The one check here that touches something real: where this machine has a console
+    # build, it is started, asked `info` and stopped, which opens the digitizer driver
+    # for a few seconds. It is skipped where that could disturb anyone: on request
+    # (`CLOCKWORK_CHECK_CONSOLE=0`), and whenever the instrument lock is held, which is
+    # a window or a daemon that owns the instrument and has, or may start, a console of
+    # its own on the same ports. Otherwise the check holds the lock itself while its
+    # console runs, so a window started in those seconds is told why it must wait.
+    from clockwork.owner import lock as lock_module
+
     found = console_process.find_console()
+    held = lock_module.InstrumentLock("the clockwork self-check")
+
+    def in_use() -> str:
+        try:
+            held.acquire()
+        except lock_module.LockError as exc:
+            return str(exc)
+        return ""
+
     if found is None:
         skip("a real console process starts, answers info and stops",
              "no console executable on this machine; lab record, task 49")
+    elif os.environ.get(REAL_CONSOLE_ENV, "").strip().lower() in ("0", "no", "off", "false"):
+        skip("a real console process starts, answers info and stops",
+             f"{REAL_CONSOLE_ENV} switches it off")
+    elif (busy := in_use()):
+        skip("a real console process starts, answers info and stops",
+             f"{busy}; the console is left alone")
     else:
         proc = console_process.ConsoleProcess(found)
         try:
@@ -3277,6 +3325,7 @@ def main() -> int:
                        proc.needs_restart() == {})
         finally:
             proc.stop()
+            held.release()
         check_true("and stops when it is told to", not proc.alive)
 
     section("wire transcript")

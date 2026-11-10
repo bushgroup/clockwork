@@ -6,20 +6,21 @@ Keysight/Acqiris SA220P digitizer through PNNL's AqMD3 acquisition console over 
 produces UIMF files that `mainspring` reads. It replaces FALKOR. This is the **public-role half of
 a two-repo arrangement**: it carries `src/clockwork/`, `tools/`, `tests/`, `docs/`, `packaging/`
 and the public self-check — nothing else. The development record lives in the private sibling
-**`bushgroup/clockwork-lab`** (tasks, notes, explorations, vendor manuals, wiring maps, and the
-working CLAUDE.md with the full project state and never-do list).
+**`bushgroup/clockwork-lab`** (tasks, notes, explorations, vendor manuals, and the working
+CLAUDE.md with the full project state and never-do list); one instrument's own material (its
+library, routines, limits, wiring) lives in that instrument's private repository.
 
-**Sessions are based here.** A gitignored `CLAUDE.local.md` imports the lab repo's CLAUDE.md; if
-you are reading this file *without* that import, you have a public clone — the package and
-`tools/check_public.py` are fully usable, the lab material is not yours to see.
+**Sessions are based here.** A gitignored `CLAUDE.local.md` imports the lab repo's CLAUDE.md and
+says to Read it where the import is not honoured. With no `CLAUDE.local.md` at all you have a
+public clone: the package and `tools/check_public.py` are fully usable, the lab material is not.
 
 ## Rules that live with the code
 
-- **Run anything with `uv run <path/to/script.py>`** — no flags, no venv activation. Never rely on
-  the `python` on PATH.
-- **`uv run tools/check_public.py`** after touching `src/clockwork/`. Hardware-free: a clone with
-  no MIPS box, no digitizer, no acquisition console and no lab repo must pass it. Checks that need
-  one of those report SKIPPED, never FAIL.
+- **Run anything with `uv run <path/to/script.py>`**: no flags, no venv, never `python` on PATH.
+- **`uv run tools/check_public.py`** after touching `src/clockwork/`. A clone with no MIPS box,
+  no digitizer, no acquisition console and no lab repo must pass it; checks that need one report
+  SKIPPED, never FAIL. Where it finds a console build it starts and stops it once, unless
+  `CLOCKWORK_CHECK_CONSOLE=0` or a window or daemon holds the instrument.
 - **Three layers under one seam.** `clockwork.mips` (serial sender and response parser),
   `clockwork.acq` (ZeroMQ client to the acquisition console, UIMF file and parameter creation) and
   `clockwork.method` (the saved per-box strings plus acquisition settings) **never import Qt**;
@@ -37,24 +38,25 @@ you are reading this file *without* that import, you have a public clone — the
 - **Derived facts only, never vendor documents.** GAA's manuals are proprietary and stay in the
   lab repo; the MIPS and ARB firmware is public on GitHub and may be quoted with a commit hash.
 - **No acquisition data here** — `.gitignore` excludes `.uimf` and `.githooks/pre-commit` refuses
-  the path. No trainee method files or wiring photographs either; those are lab material.
+  the path. No trainee method files or wiring photographs either; those are private material.
 - **Windows first.** The instrument PCs run Windows 11 LTSC; the installer is the primary
   deliverable. Nothing should *break* elsewhere, but nothing else is tested.
 - **Lab-side paths resolve through `clockwork.lab_dir()`**: `$CLOCKWORK_LAB`, then this root, then
-  the sibling `../clockwork-lab`. Nothing in this repo, code or docs, refers to lab material except
-  in opaque form ("lab record, task NN"); never by a path that only resolves lab-side.
+  the sibling `../clockwork-lab`. **An instrument's material resolves through
+  `clockwork.instrument_dir()`**: `$CLOCKWORK_INSTRUMENT` when set and nothing else, otherwise the
+  sibling `../slimphony`. Nothing in this repo, code or docs, refers to lab material except in
+  opaque form ("lab record, task NN"); never by a path that only resolves lab-side.
 - **Public commit messages are self-contained statements of the change.** Task IDs may appear as
   opaque references at most, as are trainee reports, which live in the lab repo's Issues (`lab #N`,
   never quoted). Trailer is `Assisted-by: <model name>`, no email — never
   `Co-Authored-By:`. `.githooks/commit-msg` rewrites, `.githooks/pre-commit` rejects staged files
   over 5 MiB and any `.uimf` path; both need `git config core.hooksPath .githooks` once per clone.
 - **`.gitattributes` pins `* text=auto eol=lf`.**
-- **Outward-facing prose (README, `docs/`, user guide) follows the `manuscript-voice` skill** from
-  the lab repo. Repo-internal prose (this file, docstrings, commit messages) does not.
+- **Outward-facing prose (README, `docs/`, user guide) follows the `manuscript-voice` skill**,
+  kept in the instrument's repository. Repo-internal prose (docstrings, commit messages) does not.
 - **BSD 3-Clause, `LICENSE`, copyright University of Washington.** Written from the first commit
-  (2026-09-06) as if public. The version is declared in `pyproject.toml` and
-  `clockwork.__version__` (and in the Inno Setup script once one exists); `check_public.py` fails
-  unless they agree.
+  (2026-09-06) as if public. The version is declared in `pyproject.toml`, `clockwork.__version__`
+  and the Inno Setup script; `check_public.py` fails unless they agree.
 
 ## Maintaining this file
 

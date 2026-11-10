@@ -169,8 +169,10 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
     where an instrument directory resolves (`clockwork.instrument_dir`) and to
     `fake_output()`. `library` may name several directories (`clockwork.library_dirs`).
     `routines` defaults to the `routines` directory beside the library's first.
-    `instrument_path` defaults, except under `fake`, to the instrument directory's
-    document (`clockwork.instrument_file`), so the limits beside it are in force.
+    `instrument_path` defaults, except under `fake` or over a daemon that is itself
+    `--fake`, to the instrument directory's document (`clockwork.instrument_file`), so
+    the limits beside it are in force. A `$CLOCKWORK_INSTRUMENT` that names nothing is
+    said on the line after the first (`clockwork.instrument_unresolved`).
 
     `limits_path` is the instrument's standing limits (`clockwork.envelope`), by default
     the `limits.toml` beside `instrument_path` if there is one. Limits named and not
@@ -180,11 +182,14 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
     refused nothing.
     """
     say = stream if stream is not None else sys.stderr
-    from .. import instrument_dir, instrument_file
+    from .. import instrument_dir, instrument_file, instrument_unresolved
     from ..owner import LocalOwner, RemoteOwner, StartConsole
     from ..owner.remote import DEFAULT_COMMAND, DaemonError
 
-    if not fake and not instrument_path:
+    # Read before any daemon is asked for, so a document that does not load is the
+    # sentence back; taken back below if the daemon turns out to be a rehearsal's.
+    defaulted = not fake and not instrument_path
+    if defaulted:
         instrument_path = instrument_file() or ""
     try:
         instrument, limits = instrument_and_limits(
@@ -193,9 +198,11 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
         print(f"{PROGRAM}: {exc}", file=say)
         return 1
 
+    simulated = fake
     if fake:
         owner: object = LocalOwner(fake=True, program=f"{PROGRAM} --fake").start()
         owner.submit(StartConsole(label="starting the simulated console"))  # type: ignore[attr-defined]
+        named_library = bool(library)
         library = library or instrument_dir("golden") or ""
         output = output or fake_output()
     else:
@@ -206,13 +213,35 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
             print(f"{PROGRAM}: {exc}", file=say)
             owner.close()  # type: ignore[attr-defined]
             return 1
+        simulated = bool(hello.fake)
+        if simulated and defaulted and instrument_path:
+            # `clockwork serve --fake` behind this server: its simulated boxes never run
+            # under the instrument's own document, as a verb's never do. Limits named
+            # with --limits stay, since a rehearsal of the limits is what naming them
+            # asks for.
+            instrument_path = ""
+            try:
+                instrument, limits = instrument_and_limits(
+                    fake=True, instrument_path="", limits_path=limits_path)
+            except ValueError as exc:
+                print(f"{PROGRAM}: {exc}", file=say)
+                owner.close()  # type: ignore[attr-defined]
+                return 1
+        named_library = bool(library or hello.library)
         library = library or hello.library
         output = output or hello.output or os.getcwd()
     os.makedirs(output, exist_ok=True)
-    print(f"{PROGRAM} {__version__}{' --fake' if fake else ''}: library {library or '(none)'}"
-          f", files to {output}, calls logged to "
+    print(f"{PROGRAM} {__version__}{' --fake' if fake else ''}: library "
+          f"{library or '(none)'}, files to {output}, calls logged to "
           f"{AuditLog.beside(output).path}, limits "
           f"{limits.path if limits is not None else '(none)'}", file=say)
+    # A variable that names nothing is said whatever else was given; no instrument
+    # directory at all only where it has left this server without a library or, against
+    # the instrument, without limits.
+    unresolved = instrument_unresolved(
+        when_unset=not named_library or (limits is None and not simulated))
+    if unresolved:
+        print(f"{PROGRAM}: {unresolved}", file=say)
     try:
         build_server(owner, library, output, instrument=instrument,
                      instrument_path=instrument_path, log=AuditLog.beside(output, via="mcp"),

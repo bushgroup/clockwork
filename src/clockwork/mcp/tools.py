@@ -62,7 +62,14 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .. import envelope, library_dirs, library_setting, summary
+from .. import (
+    INSTRUMENT_ENV,
+    INSTRUMENT_FILE,
+    envelope,
+    library_dirs,
+    library_setting,
+    summary,
+)
 from .. import manifest as manifest_module
 from .. import method as method_module
 from .. import routine as routine_module
@@ -369,14 +376,19 @@ class Toolbox:
         `render_template` with `to` says which template and knob values it came from, in
         `rendered`. A document that does not load is listed with the problem that stopped
         it. `library` is the directory each was found in, and `path` is relative to it.
+        A path found in two library directories is listed from both with `duplicate`
+        naming every copy, as `list_templates` lists one, and refused the same way.
         """
         methods = []
+        duplicates = self._duplicates()
         for entry in methodlib.scan_library(self.library):
             if self._is_template(entry.path):
                 continue
+            relative = os.path.relpath(entry.path, entry.library).replace(os.sep, "/")
             methods.append({
-                "path": os.path.relpath(entry.path, entry.library).replace(os.sep, "/"),
+                "path": relative,
                 "library": entry.library,
+                **({"duplicate": duplicates[relative]} if relative in duplicates else {}),
                 "name": entry.name,
                 "hash": entry.hash,
                 "created": entry.created.isoformat() if entry.created else None,
@@ -392,7 +404,7 @@ class Toolbox:
 
         `method` is a path in the library, or an absolute path.
         """
-        path = self._in_library(method)
+        path = self._document(method, "method")
         loaded = method_module.load(path)
         return {
             "path": path,
@@ -410,8 +422,8 @@ class Toolbox:
         `a` and `b` are paths in the library. `identical` is true when nothing a box is
         sent differs; each box's phases are compared line by line.
         """
-        first = method_module.load(self._in_library(a))
-        second = method_module.load(self._in_library(b))
+        first = method_module.load(self._document(a, "method"))
+        second = method_module.load(self._document(b, "method"))
         diff = methodlib.method_diff(first, second)
         return {"identical": diff.identical, **_plain(dataclasses.asdict(diff))}
 
@@ -938,7 +950,11 @@ class Toolbox:
         with and the stem that arming named, whether sends through this server are refused and why,
         the standing limits in force, and how much of this daemon session's budget is
         left. The budget is the daemon session's, not this server's: `acquisitions_by`
-        says how many each surface spent, `cli` being the command line's."""
+        says how many each surface spent, `cli` being the command line's. Under
+        `limits`, `problems` are entries that cannot be applied to the template they
+        name in this library, each a mistake to put right; `not_served` are entries
+        whose template this library does not hold, which is ordinary where the limits
+        name several projects' templates and one project's are served."""
         state = self.owner.status()  # type: ignore[attr-defined]
         armed = ({"method": state.armed.method, "stem": state.armed.stem}
                  if state.armed is not None else None)
@@ -946,13 +962,15 @@ class Toolbox:
         refused = guard_acquisition(self.owner, None, "status", limits=self.limits,
                                     ledger=ledger)
         limits = self.limits
+        served = self._templates() if limits is not None else []
         return {
             "limits": None if limits is None else {
                 "path": limits.path, "description": limits.description,
                 "cold_start": limits.cold_start, "boxes": list(limits.boxes),
                 "hand_written": limits.hand_written,
                 "templates": [entry.key for entry in limits.templates],
-                "problems": limits.against(self._templates()),
+                "problems": limits.against(served, unmatched=False),
+                "not_served": limits.unmatched(served),
             },
             "budget": None if limits is None else {
                 "acquisitions_made": ledger.runs,
@@ -1200,9 +1218,14 @@ class Toolbox:
         against documents, with the criteria that judge it. For each: its name, what it
         asks, whether it may run with nobody at the instrument (`unattended`), what it
         acquires or reads, each criterion in words with its source, and whether the
-        standing limits allow its template. Run one with `run_routine`.
+        standing limits allow its template. Run one with `run_routine`. Where the
+        routine directory is not set or not there, `problem` says where it was looked
+        for and how to name it.
         """
         routines = []
+        missing = self._no_routines()
+        if missing:
+            return {"directory": self.routines, "routines": [], "problem": missing}
         for path, loaded in routine_module.scan(self.routines):
             relative = os.path.relpath(path, self.routines).replace(os.sep, "/")
             if isinstance(loaded, RoutineError):
@@ -1459,12 +1482,23 @@ class Toolbox:
 
     def _duplicates(self) -> dict[str, list[str]]:
         """Each path, relative to its library, that more than one library holds, with
-        the full path of every copy."""
-        copies: dict[str, list[str]] = {}
+        the full path of every copy.
+
+        Compared as the file system compares them (`os.path.normcase`), which is how
+        `_in_library` finds a path: `line-b.toml` in one library and `LINE-B.toml` in
+        another are one name on Windows, refused as one, and so listed as one. Keyed by
+        each copy's own spelling, since that is what a listing shows."""
+        copies: dict[str, list[tuple[str, str]]] = {}
         for library, path in self._library_files():
             relative = os.path.relpath(path, library).replace(os.sep, "/")
-            copies.setdefault(relative, []).append(path)
-        return {relative: paths for relative, paths in copies.items() if len(paths) > 1}
+            copies.setdefault(os.path.normcase(relative), []).append((relative, path))
+        return {relative: [path for _, path in found]
+                for found in copies.values() if len(found) > 1
+                for relative, _ in found}
+
+    def _library_text(self) -> str:
+        """The library's directories as a refusal names them."""
+        return ", ".join(self.libraries)
 
     @staticmethod
     def _is_template(path: str) -> bool:
@@ -1487,7 +1521,9 @@ class Toolbox:
             return path
         if not self.libraries:
             raise ToolFailure(f"{path!r} is not an absolute path and no method library is "
-                              "set; start the server with --library")
+                              f"set: start the server with --library, or set {INSTRUMENT_ENV} "
+                              "to the instrument's folder, whose golden directory is the "
+                              "library by default")
         found = [os.path.join(library, path) for library in self.libraries
                  if os.path.exists(os.path.join(library, path))]
         if len(found) > 1:
@@ -1495,11 +1531,60 @@ class Toolbox:
                               + "; rename or remove one copy, or name it by its full path")
         return found[0] if found else os.path.join(self.libraries[-1], path)
 
+    def _document(self, path: str, what: str) -> str:
+        """`_in_library` for a document a tool is about to read: one sentence where it is
+        not there, naming where it was looked for, rather than the open's own error."""
+        found = self._in_library(path)
+        if not os.path.isfile(found):
+            where = (f"at {found}" if os.path.isabs(path)
+                     else f"in the library ({self._library_text()})")
+            raise ToolFailure(f"there is no {what} {path!r} {where}; "
+                              f"list_{what}s shows what is there")
+        return found
+
     def _write_rendered(self, rendered: Rendered, to: str, overwrite: bool) -> str:
-        """Save a render with its `[rendered]` table; the absolute path it went to."""
-        path = os.path.abspath(self._in_library(to))
-        if not path.lower().endswith(".toml"):
-            path += ".toml"
+        """Save a render with its `[rendered]` table; the absolute path it went to.
+
+        An absolute `to` is written where it says. A relative one is a path in the
+        library's last directory and nowhere else, and three things are refused rather
+        than guessed at. A last directory that is an instrument's own library -- the only
+        one served, or one named after a project's -- is the instrument's, kept by its
+        people, and a session's render does not go into it (lab record, task 160). A last
+        directory that is not there is a mistyped setting, not a folder to make. And a
+        file of that name in an earlier directory is neither replaced, which `overwrite`
+        would otherwise do to an instrument's file, nor shadowed by a second copy, which
+        every tool would then refuse as a duplicate. `.toml` is added before any of this
+        is looked up, so `to = "line-b"` is checked as the `line-b.toml` it would write."""
+        if not to.lower().endswith(".toml"):
+            to += ".toml"
+        if os.path.isabs(to):
+            path = os.path.abspath(to)
+        else:
+            if not self.libraries:
+                self._in_library(to)  # refuses: no library to place it in
+            last = self.libraries[-1]
+            absolute = ("give `to` as an absolute path, such as a file in the folder of "
+                        "the task this render is for")
+            if _is_instrument_library(last):
+                only = ("the only library served is" if len(self.libraries) == 1
+                        else "the library's last directory is")
+                raise ToolFailure(
+                    f"{to!r} is not written: {only} the instrument's own ({last}), and a "
+                    f"render does not go into it; {absolute}"
+                    + ("" if len(self.libraries) == 1 else
+                       ", or name the project's directory after the instrument's"))
+            if not os.path.isdir(last):
+                raise ToolFailure(
+                    f"{to!r} is not written: the library's last directory, {last}, does "
+                    f"not exist; correct --library, or {absolute}")
+            elsewhere = [os.path.join(library, to) for library in self.libraries[:-1]
+                         if os.path.exists(os.path.join(library, to))]
+            if elsewhere:
+                raise ToolFailure(
+                    f"{to!r} is not written: {' and '.join(elsewhere)} already has that "
+                    "name in another library directory, and a render neither replaces it "
+                    f"nor puts a second copy beside it; name another file, or {absolute}")
+            path = os.path.abspath(os.path.join(last, to))
         if os.path.exists(path) and not overwrite:
             raise ToolFailure(f"{path} already exists; pass overwrite to replace it, or name "
                               "another file")
@@ -1520,9 +1605,9 @@ class Toolbox:
         if method:
             if knobs or labels:
                 raise ToolFailure("knobs and labels belong to a template, not a method")
-            path = self._in_library(method)
+            path = self._document(method, "method")
             return method_module.load(path), None, path
-        path = self._in_library(template)
+        path = self._document(template, "template")
         rendered = template_module.render(template_module.load_template(path),
                                           dict(knobs or {}), dict(labels or {}))
         return rendered.method, rendered, path
@@ -1824,6 +1909,9 @@ class Toolbox:
 
     def _routine(self, name: str) -> Routine:
         """The routine called `name` in the routine directory, or one sentence why not."""
+        missing = self._no_routines()
+        if missing:
+            raise ToolFailure(f"there is no routine called {name!r}: {missing}")
         found = routine_module.scan(self.routines)
         names = []
         for path, loaded in found:
@@ -1834,11 +1922,28 @@ class Toolbox:
             if loaded.name == name:
                 return loaded
             names.append(loaded.name)
-        if not self.routines:
-            raise ToolFailure("no routine directory is set: start the server with --library "
-                              "or --routines")
         raise ToolFailure(f"there is no routine called {name!r} in {self.routines}; the "
                           f"routines are {', '.join(names) or 'none'}")
+
+    def _no_routines(self) -> str:
+        """Why there are no routines to list or run, or the empty string: no directory
+        set, or one that is not there, with where it came from. Routines are looked for
+        beside the library's *first* directory, so a project's templates named before the
+        instrument's library point at a `routines` the project does not have."""
+        if not self.routines:
+            return ("no routine directory is set: start the server with --library or "
+                    f"--routines, or set {INSTRUMENT_ENV} to the instrument's folder, "
+                    "whose routines directory is found beside its library")
+        if os.path.isdir(self.routines):
+            return ""
+        beside = (f", which is `{routine_module.ROUTINES_NAME}` beside the library's first "
+                  f"directory ({self.libraries[0]})"
+                  if self.libraries and _same_directory(
+                      self.routines, routine_module.default_directory(self.libraries[0]))
+                  else "")
+        return (f"the routines were looked for in {self.routines}{beside}, and that folder "
+                "does not exist: name the instrument's library first in --library, or "
+                "give --routines")
 
     # -- the two ends of the day's helpers ---------------------------------------
 
@@ -2145,6 +2250,16 @@ def _run_summary(run: Run) -> dict:
         "scans_published": run.scans_published,
         "warnings": list(run.warnings),
     }
+
+
+def _is_instrument_library(directory: str) -> bool:
+    """Whether a library directory is an instrument directory's own: `golden` under a
+    folder that holds the instrument document (`clockwork.instrument_dir`). Read off the
+    folder rather than off `$CLOCKWORK_INSTRUMENT`, so a library named by hand is
+    recognised too."""
+    path = os.path.abspath(directory)
+    return (os.path.normcase(os.path.basename(path)) == "golden"
+            and os.path.isfile(os.path.join(os.path.dirname(path), INSTRUMENT_FILE)))
 
 
 def _same_directory(first: str, second: str) -> bool:
