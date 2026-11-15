@@ -35,11 +35,15 @@ import threading
 from collections.abc import Mapping
 from typing import Any
 
-__all__ = ["RECORD_SCHEMA", "RECORD_SUFFIX", "SOURCES", "VERDICTS", "RunRecord", "brief",
+__all__ = ["RECORD_SCHEMA", "RECORD_SUFFIX", "RECORD_TEMPORARY", "SOURCES", "VERDICTS", "RunRecord", "brief",
            "find", "find_for_stem", "holds", "newest_verdict", "record_path"]
 
 RECORD_SCHEMA = 1
 RECORD_SUFFIX = ".request.json"
+RECORD_TEMPORARY = RECORD_SUFFIX + ".tmp"
+"""The suffix of the file a record is written through before its rename (`_write`). It
+exists for a moment on every change, under the same stem as the record, so whatever
+leaves the record out of a stem's files leaves this out too (`naming.files_of`)."""
 SOURCES = ("agent", "window")
 
 SECTIONS = ("plans", "arms", "acquisitions", "files", "notes", "routines", "verdicts")
@@ -189,7 +193,7 @@ class RunRecord:
 
     def _write(self, data: Mapping[str, object]) -> None:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        temporary = self.path + ".tmp"
+        temporary = self.path + RECORD_TEMPORARY[len(RECORD_SUFFIX):]
         with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
             json.dump(data, handle, ensure_ascii=False, indent=1)
             handle.write("\n")

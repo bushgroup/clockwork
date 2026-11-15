@@ -42,7 +42,7 @@ import os
 import re
 from collections.abc import Iterable
 
-from .record import RECORD_SUFFIX
+from .record import RECORD_SUFFIX, RECORD_TEMPORARY
 
 __all__ = [
     "COUNTER_DIGITS",
@@ -123,14 +123,18 @@ def files_of(directory: str | os.PathLike[str], stem: str) -> list[str]:
     The one file left out is a request's record (`<stem>.request.json`,
     `clockwork.record`). It is named for the file a request expects to make first and
     is written before that request's send, so it is not an attempt of its own: counting
-    it would refuse every arming the MCP tools make.
+    it would refuse every arming the MCP tools make. The `.request.json.tmp` it is
+    written through on every change is left out with it: a series' own record writes, and
+    a `note`'s, raced its job's check of the first stem and failed the series before any
+    send (lab #19).
     """
     try:
         names = os.listdir(os.fspath(directory))
     except OSError:
         return []
     return sorted(name for name in names
-                  if _base(name) == stem and not name.endswith(RECORD_SUFFIX))
+                  if _base(name) == stem
+                  and not name.endswith((RECORD_SUFFIX, RECORD_TEMPORARY)))
 
 
 def next_number(

@@ -289,12 +289,37 @@ def test_a_stem_is_taken_by_any_file_it_names_and_not_by_its_neighbours(tmp_path
     (tmp_path / "260926_MB_01.sent.txt").write_text("", encoding="utf-8")
     # A request's record names the file it expects, before any attempt is made.
     (tmp_path / "260926_MB_014.request.json").write_text("{}", encoding="utf-8")
+    # ...and so does the temporary file it is rewritten through (lab #19).
+    (tmp_path / "260926_MB_014.request.json.tmp").write_text("{}", encoding="utf-8")
     assert naming.files_of(tmp_path, "260926_MB_014") == []
     for name in ("260926_MB_014.sent.txt", "260926_MB_014-2026-09-26.transcript.log"):
         (tmp_path / name).write_text("", encoding="utf-8")
     assert naming.files_of(tmp_path, "260926_MB_014") == [
         "260926_MB_014-2026-09-26.transcript.log", "260926_MB_014.sent.txt"]
     assert naming.files_of(tmp_path / "nope", "260926_MB_014") == []
+
+
+def test_a_record_being_rewritten_does_not_take_its_stem(tmp_path, monkeypatch):
+    """Lab #19: a series wrote its own record while its job checked the first stem, and
+    the record's temporary file failed the series. Looked at in the middle of each write,
+    the stem must still be free."""
+    from clockwork import record as record_module
+
+    seen: list[list[str]] = []
+    real_replace = os.replace
+
+    def replace(source, target):
+        seen.append([os.listdir(tmp_path), naming.files_of(tmp_path, "261112_UBQ_005")])
+        real_replace(source, target)
+
+    monkeypatch.setattr(record_module.os, "replace", replace)
+    run = record_module.RunRecord.open(str(tmp_path), "261112_UBQ_005", request_id="r1",
+                                       text="a series", initials="UBQ")
+    run.append("notes", {"text": "while the series starts", "by": "session"})
+    assert len(seen) == 2
+    for listing, taken in seen:
+        assert "261112_UBQ_005.request.json.tmp" in listing
+        assert taken == []
 
 
 def test_a_name_in_another_shape_is_not_a_stem():
