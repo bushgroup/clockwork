@@ -61,7 +61,6 @@ import csv
 import datetime as _dt
 import glob
 import io
-import json
 import os
 import re
 from collections.abc import Iterable, Mapping, Sequence
@@ -74,6 +73,7 @@ from .acq.uimf import KNOB_PREFIX, LABEL_PREFIX, MARK_PREFIX, RAW_SUFFIX
 from .method import template as template_module
 from .naming import parse_stem
 from .record import RECORD_SUFFIX, holds, newest_verdict
+from .record import load as load_record
 from .summary import file_kind
 
 __all__ = ["FIXED", "manifest", "to_csv", "write_csv"]
@@ -149,8 +149,7 @@ class _Records:
             pattern = os.path.join(glob.escape(directory), "*" + RECORD_SUFFIX)
             for path in sorted(glob.glob(pattern)):
                 try:
-                    with open(path, encoding="utf-8") as handle:
-                        data = json.load(handle)
+                    data = load_record(path)
                 except (OSError, ValueError):
                     continue
                 if isinstance(data, dict):

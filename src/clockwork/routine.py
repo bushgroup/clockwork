@@ -53,6 +53,7 @@ from .acq.loop import DC_BIAS_TOLERANCE_V, RF_DRIVE_TOLERANCE_PCT, RF_FREQUENCY_
 from .method import Method, declared_commands, is_comment
 from .mips.state import ARB_MODULE_GETTERS, BoxState, declared_settings
 from .record import RECORD_SUFFIX
+from .record import load as load_record
 
 __all__ = [
     "FUNCTIONS",
@@ -748,8 +749,7 @@ def last_passing(directory: str, name: str, *, before: str = "",
             best = line
     for path in glob.glob(os.path.join(glob.escape(directory or "."), "*" + RECORD_SUFFIX)):
         try:
-            with open(path, encoding="utf-8") as handle:
-                data = json.load(handle)
+            data = load_record(path)
         except (OSError, ValueError):
             continue
         if not isinstance(data, Mapping):

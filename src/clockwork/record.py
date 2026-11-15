@@ -23,6 +23,13 @@ with its time, and `newest_verdict` reads back the last (lab record, task 90).
 
 Written whole on every change, through a temporary file and a rename, so a reader never
 sees half of it; UTF-8, LF. Qt-free.
+
+On Windows the rename and a reader collide: `os.replace` is refused (PermissionError)
+while a reader holds the record open, and a reader's `open` is refused while the rename
+is under way. Both last a moment, so the writer retries its rename and every reader goes
+through `load`, which retries its open, for up to `SHARING_WAIT_S`. Before this, a run's
+file entry written by the recording thread was dropped, or a manifest read just then
+missed the record and its verdict.
 """
 
 from __future__ import annotations
@@ -32,11 +39,13 @@ import glob
 import json
 import os
 import threading
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from typing import Any
 
-__all__ = ["RECORD_SCHEMA", "RECORD_SUFFIX", "RECORD_TEMPORARY", "SOURCES", "VERDICTS", "RunRecord", "brief",
-           "find", "find_for_stem", "holds", "newest_verdict", "record_path"]
+__all__ = ["RECORD_SCHEMA", "RECORD_SUFFIX", "RECORD_TEMPORARY", "SHARING_WAIT_S", "SOURCES",
+           "VERDICTS", "RunRecord", "brief", "find", "find_for_stem", "holds", "load",
+           "newest_verdict", "record_path"]
 
 RECORD_SCHEMA = 1
 RECORD_SUFFIX = ".request.json"
@@ -63,6 +72,26 @@ _GUARD = threading.Lock()
 """One lock for every record this process writes: they are small and written seldom."""
 
 
+SHARING_WAIT_S = 2.0
+"""How long a record's reader or writer keeps retrying a Windows sharing refusal. The
+other side holds the file for a read or a rename of a few kilobytes, milliseconds."""
+
+
+def _shared[T](attempt: Callable[[], T]) -> T:
+    """`attempt()`, retried while Windows refuses it for another handle on the file
+    (PermissionError), for up to `SHARING_WAIT_S`; then the refusal is raised."""
+    deadline = time.monotonic() + SHARING_WAIT_S
+    pause = 0.002
+    while True:
+        try:
+            return attempt()
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(pause)
+            pause = min(pause * 2, 0.05)
+
+
 def _now() -> str:
     return _dt.datetime.now().isoformat(timespec="seconds")
 
@@ -71,15 +100,24 @@ def record_path(directory: str, stem: str) -> str:
     return os.path.join(directory, stem + RECORD_SUFFIX)
 
 
+def load(path: str) -> Any:
+    """The record at `path`, parsed; every reader of a record reads through this. A
+    sharing refusal from a writer's rename is waited out (`_shared`); OSError for any
+    other failure to open, ValueError for a document that is not JSON."""
+    def attempt() -> Any:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    return _shared(attempt)
+
+
 def find(directory: str, request_id: str) -> str | None:
     """The record of `request_id` in `directory`, or None."""
     if not request_id or not os.path.isdir(directory):
         return None
     for path in sorted(glob.glob(os.path.join(glob.escape(directory), "*" + RECORD_SUFFIX))):
         try:
-            with open(path, encoding="utf-8") as handle:
-                if json.load(handle).get("request", {}).get("id") == request_id:
-                    return path
+            if load(path).get("request", {}).get("id") == request_id:
+                return path
         except (OSError, ValueError, AttributeError):
             continue
     return None
@@ -100,8 +138,7 @@ def find_for_stem(directory: str, stem: str, request_id: str | None = None) -> s
         return found
     for path in sorted(glob.glob(os.path.join(glob.escape(directory), "*" + RECORD_SUFFIX))):
         try:
-            with open(path, encoding="utf-8") as handle:
-                data = json.load(handle)
+            data = load(path)
         except (OSError, ValueError):
             continue
         if isinstance(data, dict) and holds(data, stem):
@@ -148,8 +185,7 @@ class RunRecord:
             return record
 
     def read(self) -> dict[str, Any]:
-        with open(self.path, encoding="utf-8") as handle:
-            return json.load(handle)
+        return load(self.path)
 
     def append(self, section: str, entry: Mapping[str, object]) -> None:
         """Add `entry` to `section`, stamped with the time."""
@@ -197,7 +233,7 @@ class RunRecord:
         with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
             json.dump(data, handle, ensure_ascii=False, indent=1)
             handle.write("\n")
-        os.replace(temporary, self.path)
+        _shared(lambda: os.replace(temporary, self.path))
 
 
 def brief(summary: Mapping[str, Any]) -> dict[str, Any]:

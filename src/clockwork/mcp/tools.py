@@ -53,7 +53,6 @@ import datetime as _dt
 import glob
 import hashlib
 import inspect
-import json
 import os
 import threading
 import time
@@ -116,6 +115,7 @@ from ..owner.remote import DaemonError
 from ..owner.wire import TYPE_KEY, to_wire
 from ..record import RECORD_SUFFIX, VERDICTS, RunRecord, brief, find_for_stem, newest_verdict
 from ..record import find as find_record
+from ..record import load as load_record
 from ..routine import Routine, RoutineError
 from ..transcript import send_log_name
 from .audit import LOG_NAME, AuditLog, SealFailure
@@ -2356,8 +2356,7 @@ def _records(directory: str) -> dict[str, str]:
     found: dict[str, str] = {}
     for path in glob.glob(os.path.join(glob.escape(directory), "*" + RECORD_SUFFIX)):
         try:
-            with open(path, encoding="utf-8") as handle:
-                identity = json.load(handle).get("request", {}).get("id")
+            identity = load_record(path).get("request", {}).get("id")
         except (OSError, ValueError, AttributeError):
             continue
         if identity:
