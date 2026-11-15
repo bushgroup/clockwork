@@ -501,10 +501,15 @@ prefix is what tells the two apart.
 When the failure is the digitizer driver's, the text after `error` is the driver's own report
 in a fixed shape, with no space between the code and the second label:
 
-    error Error during call to digitizer. Error Code: <n>Error Message: <text>
+    error Error during call to digitizer <call>. Error Code: <n>Error Message: <text>
 
 `<n>` is the driver's signed status code, and it is what a client matches on. The message text
-is the driver's English and is not part of the protocol.
+is the driver's English and is not part of the protocol. `<call>` names the driver function that
+returned the code, with the attribute in parentheses where the function is one of the generic
+attribute calls, as in `AqMD3_GetAttributeViBoolean(AQMD3_ATTR_CALIBRATION_IS_REQUIRED)`. It is
+there for a reader of the log, and a client does not match on it either. Builds before 1.5.1 have
+no `<call>` and end the first sentence at `digitizer.`, so a client that reads the code works
+against both.
 
 One code has a client behaviour attached, **-1074134951**, which the SA220P has answered to
 `acquire` with two messages:
@@ -526,8 +531,9 @@ client treats both alike.
 A new process opens a new driver session, and its first `acquire` takes about 2.2 s where every
 later one takes 0.07 to 0.21 s; we take the difference to be the self-calibration the driver
 asks for on a new session. A refusal answers sooner than either, so whatever throws does so before any
-calibration time is spent. The fork's message does not say which of the calls described below
-threw.
+calibration time is spent. Every refusal on record came from a 1.5.0 console, whose message does
+not name the call, so which of the calls described below threw is not yet known; from 1.5.1 the
+`<call>` field says.
 
 When `acquire` answers with this code, clockwork restarts the console process, sends the
 configuration again and sends `acquire` once more. A second refusal stops the run before its

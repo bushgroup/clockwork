@@ -178,10 +178,10 @@ class ConsoleCommandError(AcqError):
     def code(self) -> int | None:
         """The digitizer driver's status code, where the console's reply carries one.
 
-        A driver error reads `Error during call to digitizer. Error Code: <n>Error
-        Message: <text>`; anything else the console caught carries no code and gives
-        None (`docs/console-protocol.md`, "A driver error, and the one a client
-        retries").
+        A driver error reads `Error during call to digitizer <call>. Error Code: <n>Error
+        Message: <text>`, with no `<call>` before the console's 1.5.1; anything else the
+        console caught carries no code and gives None (`docs/console-protocol.md`, "A
+        driver error, and the one a client restarts the console for").
         """
         found = _DRIVER_CODE.search(str(self))
         return int(found.group(1)) if found else None
