@@ -118,7 +118,7 @@ from ..record import RECORD_SUFFIX, VERDICTS, RunRecord, brief, find_for_stem, n
 from ..record import find as find_record
 from ..routine import Routine, RoutineError
 from ..transcript import send_log_name
-from .audit import AuditLog
+from .audit import LOG_NAME, AuditLog, SealFailure
 from .guard import guard_acquisition
 
 __all__ = ["TOOLS", "Tool", "ToolFailure", "Toolbox", "tool"]
@@ -161,6 +161,10 @@ fold are seconds, and a series ends after its current repetition too."""
 AT_REST = 0.005
 """Within this of zero a DC bias setpoint, RF drive or ARB range counts as zero: each is
 read back to two decimals."""
+
+SEALS = ("seal_calls", "stand_down")
+"""The tools that end the audit log's live segment once their own line is in it, and
+answer the segment under `sealed` (lab record, task 161)."""
 
 
 class ToolFailure(ValueError):
@@ -291,7 +295,6 @@ class Toolbox:
             except TypeError as exc:
                 raise ToolFailure(f"{name} was given the wrong arguments: {exc}") from exc
             result = found.function(self, **arguments)
-            return result
         except ToolFailure as exc:
             error = str(exc)
             raise
@@ -305,6 +308,15 @@ class Toolbox:
             self.log.write(tool=name, arguments=arguments, result=result, error=error,
                            seconds=time.monotonic() - started,
                            request=self._request_for_log(arguments, result))
+        if name in SEALS:
+            # After the line: the segment ends with the call that ended it.
+            try:
+                result["sealed"] = self.log.seal()
+            except SealFailure as exc:
+                if name == "seal_calls":
+                    raise ToolFailure(str(exc)) from exc
+                result["sealed"] = {"error": str(exc)}
+        return result
 
     def _request_for_log(self, arguments: Mapping[str, object],
                          result: Mapping[str, object] | None) -> dict[str, str] | None:
@@ -1174,6 +1186,21 @@ class Toolbox:
         return summary.ion_events(self._in_output(path), frames=frames)
 
     @tool("data", read_only=False)
+    def seal_calls(self) -> dict:
+        """End the audit log's live file, so a folder listed now is never changed.
+
+        This call's own line is written last, then `mcp-calls.log` in the output
+        directory is renamed `mcp-calls.<YYYYMMDD-HHMMSS>.log` and never written again;
+        the next call starts a new live file. Every reader of the log reads all its
+        segments, so nothing is lost to `status`, `list_files` or a request's words.
+        Seal before listing or archiving a day's folder. Answers the segment under
+        `sealed`: its name, size in bytes and MD5. Needs no daemon.
+        """
+        if not self.log.path:
+            raise ToolFailure("this server keeps no audit log, so there is nothing to seal")
+        return {"directory": os.path.dirname(self.log.path), "log": LOG_NAME}
+
+    @tool("data", read_only=False)
     def manifest(self, paths: list[str] | None = None, out: str = "") -> dict:
         """One row per run under some directories: what each file says it was, as a table.
 
@@ -1350,7 +1377,8 @@ class Toolbox:
         acquisition or a send is running or queued, naming it, unless `stop` is true:
         then the run ends after its current repetition (`reason` goes in its log) and the
         stand-down follows. This ends the session's daemon: every later tool call finds
-        none until one is started again.
+        none until one is started again. Its own line ends the audit log's live file,
+        which it then seals as `seal_calls` does, answering the segment under `sealed`.
         """
         self._settle()
         busy = self._busy()

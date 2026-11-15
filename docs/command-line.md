@@ -19,7 +19,11 @@ clockwork serve
 clockwork status
 ```
 
-A verb that finds no daemon exits with one sentence saying so. Each verb is a process of its own,
+A verb that finds no daemon exits with one sentence saying so. The one verb that needs none is
+`seal-calls`, which works on the output folder's [audit log](mcp-server.md#the-audit-log) alone
+and is run when the day is closed, often after `stand-down` has stopped the daemon. It takes the
+folder from `--output`, or from the window's saved settings when no option is given, and asks no
+daemon for it. Each verb is a process of its own,
 and everything that must outlast one verb is kept by the daemon or on disk: which method the boxes
 were last sent, each job and its progress, the audit log and the run record. `arm` in one command
 and `acquire` in the next therefore behave exactly as the two tools do in one MCP session.
@@ -210,7 +214,10 @@ down, which stops the acquisition console with it, and waits until the daemon's 
 ended, the instrument lock is free and nothing listens on the console's command port, which the
 answer's `daemon` entry reports. A digital output cannot be confirmed low, since the box's getter
 reads its output register rather than the pin, so the answer lists the outputs that were sent low
-instead. Every later verb finds no daemon until one is started again.
+instead. Every later verb finds no daemon until one is started again. Its own line is the last
+of the live [audit log](mcp-server.md#the-audit-log) segment, which it then seals and names in
+the answer's `sealed` entry, so a folder listed after the stand-down is not changed by the next
+call. To list a folder at any other moment, run `clockwork seal-calls --output DIR` first.
 
 Both are refused while a send or an acquisition is running or queued, and name the job.
 `stand-down --stop` ends such a run after its current repetition and then stands down; `--reason`
@@ -329,6 +336,7 @@ Each verb is its tool, described in full by `clockwork <verb> --help` and in the
 - `windowed-intensities`: summed intensity in named m/z windows, and ratios to a reference.
 - `arrival-time-distribution`: intensity against scan in one m/z window, with its peak.
 - `ion-events`: ion arrivals push by push in a file of single pushes: how many, how tall, how wide.
+- `seal-calls`: end the output folder's live audit log segment under a stamped name, with no daemon needed.
 - `manifest`: one row per run under some directories, as CSV: day, stem, sample, knobs and marks, series place, outcome, pusher period, verdict and notes.
 
 **Routines**

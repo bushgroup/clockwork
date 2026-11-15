@@ -373,13 +373,13 @@ def check_mcp() -> None:
     """
     import asyncio
     import datetime as dt
-    import json
     import tempfile
 
     from mcp import Client
 
     from clockwork import summary
     from clockwork.mcp import NO_LIMITS, TOOLS, Toolbox, ToolFailure
+    from clockwork.mcp.audit import LOG_NAME, AuditLog
     from clockwork.mcp.server import SIMULATED, build_server
     from clockwork.mips import Discovery
     from clockwork.owner import LocalOwner, StartConsole
@@ -512,8 +512,7 @@ arm = ["SMOD,TBL"]
                 f"manifest reads it back ({row.get('verdict')})",
                 not given.get("begun", True) and given.get("record") == seen["armed"]["record"]
                 and row.get("verdict") == "worked")
-            with open(os.path.join(output, "mcp-calls.log"), encoding="utf-8") as handle:
-                lines = [json.loads(line) for line in handle]
+            lines = list(AuditLog(os.path.join(output, LOG_NAME)).lines())
             check_true(
                 f"every call is one line of the audit log ({len(lines)} lines), the request "
                 "on the acquire",
@@ -1063,12 +1062,15 @@ def check_standing() -> None:
     A standing method with a DC bias bank, two RF heads and one ARB box's range, named by
     an instrument document; `warm_up` through the toolbox over a `--fake` owner must send
     its setup phase and nothing after it, ramped, and read the declaration back; then
-    `stand_down` must leave every box local and at zero and the owner shut down.
+    `stand_down` must leave every box local and at zero and the owner shut down, and
+    seal the audit log after its own line (lab record, task 161).
     """
+    import json
     import tempfile
 
     from clockwork import instrument, method
     from clockwork.mcp import Toolbox
+    from clockwork.mcp.audit import LOG_NAME
     from clockwork.owner import LocalOwner
 
     document = """\
@@ -1127,6 +1129,14 @@ arm = []
                        down["not_zero"] == [] and down["daemon"]["stopped"]
                        and down["outputs_lowered"] == ["seq A-P", "arb A-P"]
                        and owner.closing)
+            sealed = down.get("sealed") or {}
+            segment = os.path.join(scratch, str(sealed.get("name", "")))
+            with open(segment, encoding="utf-8") as handle:
+                last = json.loads(handle.readlines()[-1])["tool"]
+            check_true("stand-down seals the audit log after its own line, leaving no live "
+                       f"file ({sealed.get('name')})",
+                       last == "stand_down"
+                       and not os.path.exists(os.path.join(scratch, LOG_NAME)))
         finally:
             owner.shutdown()
             owner.join(30)

@@ -161,7 +161,7 @@ relative to the output directory, unless it is absolute.
 | | `read_box_state` | `boxes` (optional) | Every box's persistent settings read back, as the window's state panel shows them |
 | | `arm` | `request`, `initials`, a method or template, `setup`, `conditions`, `request_id`, `plan` | The request id, the stem the first file takes, what the boxes read back, the cold-start cautions, and the run record's path |
 | | `warm_up` | none | The instrument file's standing method's `setup` phase sent, its DC bias, RF drive and ARB range ramped; whether every declared setting reads back as declared (`ok`, `differences`), the read-back, and the send log |
-| | `stand_down` | `stop`, `reason` | Every box local, its DC bias, RF drive and ARB range ramped to zero and its outputs lowered; what is not at zero, the outputs lowered, the read-back, and whether the daemon, the lock and the console are gone once it has been shut down |
+| | `stand_down` | `stop`, `reason` | Every box local, its DC bias, RF drive and ARB range ramped to zero and its outputs lowered; what is not at zero, the outputs lowered, the read-back, whether the daemon, the lock and the console are gone once it has been shut down, and the [audit log](#the-audit-log) segment it sealed |
 | Acquisition | `acquire` | as `arm` without `setup` and `conditions`, plus `replicates` | A job number, at once; the run proceeds on the owner |
 | | `series` | `request`, `initials`, `plan`, `conditions`, `setup`, `request_id`, `check` | A job number, at once, with the seed, the order drawn, the counts and the minutes; the daemon arms and acquires every point of the [series plan](series-file-format.md). With `check`, each point's repetitions and minutes and nothing sent |
 | | `progress` | `job`, `after`, `wait_s` | The job's events since number `after`, how many files are done of how many were asked for, and whether it is done |
@@ -174,6 +174,7 @@ relative to the output directory, unless it is absolute.
 | | `windowed_intensities` | `path`, `windows`, `reference`, `scans`, `frames` | Summed intensity in named m/z windows and each window's ratio to a reference |
 | | `arrival_time_distribution` | `path`, `mz`, `preset`, `frames`, `points` | Intensity against scan in one m/z window, with the peak in scans and in ms |
 | | `ion_events` | `path`, `frames` | Ion arrivals push by push in a file of single pushes: events per push, the fraction of pushes holding any, event heights in stored units and millivolts, widths, and how many reached the card's top code |
+| | `seal_calls` | none | Ends the live [audit log](#the-audit-log) segment under a stamped name: the segment's name, size and MD5 |
 | | `manifest` | `paths` (optional), `out` | One row per run under the paths, or the output directory: its file, stem, day, sample, knobs and marks, series place, outcome, pusher period against the declared one, verdict and note count. Written as CSV to `out`, or answered as `columns` and `rows` |
 | Routine | `list_routines` | none | Every routine: what it asks, whether it may run unattended, what it acquires or reads, its criteria in words, and whether the standing limits allow its template |
 | | `run_routine` | `name`, `initials`, `conditions` | The routine run through `arm` and `acquire` and judged: `pass`, `fail` or `could not judge` with the reason, each criterion's numbers, the report as text, and the run record it was added to |
@@ -369,6 +370,25 @@ command line's. A long text argument, such as a method's text, is recorded as it
 SHA-256 and length rather than quoted, and a result is summarised to its numbers and the lengths
 of its lists. The files and their logs hold everything else, so a person who was away can read
 what an agent did, and why, from the audit log and the files alone.
+
+The log is kept in segments, so that a folder can be listed and archived while the day goes on.
+`mcp-calls.log` is the live segment, the only one written to. `seal_calls` ends it: its own line
+is written last, and the file is renamed to `mcp-calls.<YYYYMMDD-HHMMSS>.log`, the time of
+sealing, with `-2`, `-3` and so on added if that name is taken. Nothing writes to a sealed segment
+again, and the next call starts a new live file. A seal with no live file still seals the file its
+own line starts, so when `seal_calls` answers there is never a live file in the folder. The answer
+gives the segment's name, size in bytes and MD5. `stand_down` seals in the same way after its own
+line, and reports the segment under `sealed`. A day's folder is therefore listed by sealing first
+and listing second; a call made after the listing lands in a new live file that the listing never
+held. On Windows a segment cannot be renamed while another process has it open, so the seal
+retries for a few seconds and then fails with the operating system's error, leaving its own line
+in the live file.
+
+Whatever reads the log back reads every segment: every `mcp-calls*.log` in the folder, in the
+order of each file's first line, with the live file last. That covers the words of a request that
+`list_files`, `summarize_file` and `verdict` show, the request the command line's `acquire`
+continues from its `arm`, and the acquisitions `status` counts. Where two segments disagree about
+a request's words, the later one wins, as it would within one file.
 
 ## What the server does not do
 

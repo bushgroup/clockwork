@@ -7,7 +7,9 @@ registered (lab record, task 73). The verb is the tool's name with hyphens
 (`request_id` is `--request-id`), and the tool's docstring is the verb's help. Each verb
 builds a `Toolbox` over a `RemoteOwner` and makes one `Toolbox.call`, so a verb is
 refused exactly where the MCP server's tool is -- the interlock and the standing limits
-are inside the tools -- and writes the same audit line, marked `via: cli`.
+are inside the tools -- and writes the same audit line, marked `via: cli`. The one verb
+that asks no daemon is `seal-calls` (`LOCAL`), which the close of a day runs after
+`stand-down` has stopped it.
 
 **There is no in-process `--fake` for a verb.** An owner that lives only as long as one
 verb's process holds nothing the next verb can use: `arm` then `acquire` as two
@@ -83,6 +85,11 @@ STARTS = ("warm_up", "snapshot_boxes")
 morning's is the one verb run before anything else is (lab record, task 95), and a
 snapshot is the one an operator reaches for when the window may already be closed
 (task 97)."""
+
+LOCAL = ("seal_calls",)
+"""The tools whose verbs ask no daemon: they work on the output folder alone, from
+`--output` or the window's saved output folder. Sealing the audit log is the close of a
+day, run after `stand-down` has stopped the daemon (lab record, task 161)."""
 
 SAVED = ("warm_up", "stand_down", "snapshot_boxes")
 """The tools whose verbs fall back on the window's saved settings for the library, the
@@ -420,6 +427,8 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
     verb: Verb = args.verb
     program = f"clockwork {verb.name}"
     arguments = _arguments(verb, args, args.verb_parser)
+    if verb.tool.name in LOCAL:
+        return _run_local(verb, args, arguments, out, err, program)
 
     from .. import instrument_file, instrument_unresolved
     from ..owner import RemoteOwner
@@ -540,6 +549,48 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
         return 130
     finally:
         owner.close()
+
+
+class _NoDaemon:
+    """The owner of a verb that asks no daemon: its session is unknown, and its audit
+    line says so by naming none."""
+
+    def hello(self) -> object:
+        from ..owner.remote import DaemonError
+
+        raise DaemonError("this verb asks no daemon")
+
+
+def _run_local(verb: Verb, args: argparse.Namespace, arguments: Mapping[str, object],
+               out: TextIO, err: TextIO, program: str) -> int:
+    """A `LOCAL` verb: its output folder from `--output` or the saved settings, never a
+    daemon's, and one `Toolbox.call` over an owner that has none."""
+    from .audit import AuditLog
+
+    output = args.output or ""
+    if not output:
+        from ..app.saved import saved_settings
+
+        output = saved_settings().get("output_dir", "")
+        if output:
+            _say(err, f"{program}: from the window's saved settings: "
+                      f"{SAVED_WORDS['output_dir']} {output}")
+    if not output:
+        _say(err, f"{program}: name the output folder with --output; the window has none "
+                  "saved")
+        return 1
+    output = os.path.abspath(output)
+    if not os.path.isdir(output):
+        _say(err, f"{program}: {output} is not a folder")
+        return 1
+    toolbox = Toolbox(_NoDaemon(), output=output, log=AuditLog.beside(output, via="cli"))
+    try:
+        answer = toolbox.call(verb.tool.name, arguments)
+    except ToolFailure as exc:
+        _say(err, f"{program}: {exc}")
+        return 1
+    _print(out, answer, indent=2)
+    return 0
 
 
 def _follow(toolbox: Toolbox, arguments: Mapping[str, object], out: TextIO, err: TextIO,

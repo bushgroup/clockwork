@@ -10,12 +10,17 @@ is pinned before a job exists (lab record, tasks 69 and 71).
 from __future__ import annotations
 
 import asyncio
+import datetime as _dt
+import hashlib
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
+import threading
 import time
+import types
 
 import pytest
 from mcp import Client, StdioServerParameters
@@ -31,7 +36,8 @@ from clockwork.mcp import (
     ToolFailure,
     guard_acquisition,
 )
-from clockwork.mcp.audit import AuditLog, hashed
+from clockwork.mcp import audit as audit_module
+from clockwork.mcp.audit import LOG_NAME, AuditLog, SealFailure, hashed, segments
 from clockwork.mcp.server import SIMULATED, build_server
 from clockwork.method import template as template_module
 from clockwork.mips import Discovery
@@ -133,8 +139,8 @@ async def follow(client: Client, job: int, timeout: float = 120.0) -> dict:
 
 
 def audit_lines(output: str) -> list[dict]:
-    with open(os.path.join(output, "mcp-calls.log"), encoding="utf-8") as handle:
-        return [json.loads(line) for line in handle]
+    """Every line of the folder's audit log, sealed segments and the live file in order."""
+    return list(AuditLog(os.path.join(output, LOG_NAME)).lines())
 
 
 def limits_text(library: str, *, templates: tuple[str, ...] = ("line-b.toml",),
@@ -548,6 +554,117 @@ def test_the_acquisition_count_is_the_daemon_sessions_and_says_which_surface_mad
     assert reader.acquisitions_by("one") == {"mcp": 5, "cli": 1, "in process": 1}
     assert reader.acquisitions("one") == 7 and reader.acquisitions("another") == 1
     assert reader.acquisitions_by("") == {}
+
+
+def _calls(log: AuditLog, *made: tuple[str, dict | None, dict]) -> None:
+    for tool, request, result in made:
+        log.write(tool=tool, arguments={}, seconds=0.1, result=result, request=request)
+
+
+def test_a_seal_mid_session_changes_nothing_the_log_is_read_for(tmp_path):
+    """A call after a day folder was listed grew its listed log, twice (lab record, task
+    161). A sealed segment is never written again, and every reader reads all of them."""
+    path = str(tmp_path / LOG_NAME)
+    log = AuditLog(path, via="mcp")
+    log.session = "day"
+    first = {"id": "r1", "text": "line B at 400"}
+    _calls(log, ("arm", first, {"ok": True}), ("acquire", first, {"job": 1}),
+           ("series", {"id": "r2", "text": "a grid"}, {"acquisitions": 4}))
+    before = (log.acquisitions_by("day"), log.request_for("line B at 400", "day"),
+              log.requests())
+
+    sealed = log.seal()
+    assert sealed is not None and not os.path.exists(path)
+    segment = tmp_path / str(sealed["name"])
+    assert re.fullmatch(r"mcp-calls\.\d{8}-\d{6}\.log", sealed["name"])
+    held = segment.read_bytes()
+    assert sealed["bytes"] == len(held) and sealed["md5"] == hashlib.md5(held).hexdigest()
+    assert (log.acquisitions_by("day"), log.request_for("line B at 400", "day"),
+            log.requests()) == before
+
+    _calls(log, ("acquire", first, {"job": 2}))
+    assert os.path.isfile(path), "the call after a seal starts a new live file"
+    assert segment.read_bytes() == held, "and leaves the segment as it was sealed"
+    assert segments(str(tmp_path)) == [str(segment), path]
+    assert log.acquisitions_by("day") == {"mcp": 6}
+    assert log.request_for("line B at 400", "day") == "r1"
+
+
+def test_segments_are_read_in_the_order_of_their_first_lines_the_live_one_last(tmp_path):
+    """A tail split off by hand (`mcp-calls.after-<stamp>.log`) is read as a segment,
+    in its place by time, not by name; the latest words for a request win across files."""
+    def line(time: str, words: str) -> str:
+        return json.dumps({"time": time, "tool": "arm", "request": {"id": "r", "text": words},
+                           "session": "s"}) + "\n"
+    (tmp_path / "mcp-calls.after-20261112-210000.log").write_text(
+        line("2026-11-12T21:00:00", "third"), encoding="utf-8")
+    (tmp_path / "mcp-calls.20261112-200000.log").write_text(
+        line("2026-11-12T09:00:00", "first") + "not json\n", encoding="utf-8")
+    (tmp_path / "mcp-calls.20261113-080000.log").write_text(
+        line("2026-11-12T20:00:00", "second"), encoding="utf-8")
+    (tmp_path / LOG_NAME).write_text(line("2026-11-13T08:00:00", "fourth"),
+                                     encoding="utf-8")
+    log = AuditLog(str(tmp_path / LOG_NAME))
+    assert [entry["request"]["text"] for entry in log.lines()] == [
+        "first", "second", "third", "fourth"]
+    assert log.requests() == {"r": "fourth"}
+    os.remove(tmp_path / LOG_NAME)
+    assert log.requests() == {"r": "third"}
+
+
+def test_a_seal_never_overwrites_a_segment_and_seals_nothing_with_no_live_file(
+        tmp_path, monkeypatch):
+    path = tmp_path / LOG_NAME
+    log = AuditLog(str(path))
+    assert log.seal() is None and AuditLog("").seal() is None
+    now = _dt.datetime(2026, 11, 14, 18, 30, 5)
+
+    class Frozen(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ARG003 -- the signature replaced
+            return now
+    monkeypatch.setattr(audit_module, "_dt", types.SimpleNamespace(datetime=Frozen))
+    taken = tmp_path / "mcp-calls.20261114-183005.log"
+    taken.write_text("already sealed\n", encoding="utf-8")
+    _calls(log, ("status", None, {}))
+    assert log.seal()["name"] == "mcp-calls.20261114-183005-2.log"
+    _calls(log, ("status", None, {}))
+    assert log.seal()["name"] == "mcp-calls.20261114-183005-3.log"
+    assert taken.read_text(encoding="utf-8") == "already sealed\n"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="an open file refuses a rename on Windows only")
+def test_a_seal_waits_out_another_holder_and_then_refuses_with_its_error(tmp_path):
+    path = tmp_path / LOG_NAME
+    log = AuditLog(str(path))
+    _calls(log, ("status", None, {}))
+    with open(path, encoding="utf-8"):
+        with pytest.raises(SealFailure, match="another process holds it open"):
+            log.seal(wait_s=0.3)
+    assert path.is_file(), "a refused seal leaves the live file where it was"
+    holder = open(path, encoding="utf-8")  # noqa: SIM115 -- released by the timer
+    threading.Timer(0.3, holder.close).start()
+    assert log.seal(wait_s=5)["bytes"] > 0 and not path.exists()
+
+
+def test_seal_calls_ends_with_its_own_line_and_leaves_no_live_file(tmp_path):
+    """The seal's own line is the last of the segment it seals, so after it answers the
+    folder has no live file, even when it had none before (Matt, 2026-11-14)."""
+    toolbox = Toolbox(object(), output=str(tmp_path))
+    with pytest.raises(ToolFailure):
+        toolbox.call("load_method", {"method": "missing.toml"})
+    answer = toolbox.call("seal_calls", {})
+    sealed = answer["sealed"]
+    assert answer["directory"] == str(tmp_path) and not (tmp_path / LOG_NAME).exists()
+    lines = (tmp_path / sealed["name"]).read_text(encoding="utf-8").splitlines()
+    assert [json.loads(text)["tool"] for text in lines] == ["load_method", "seal_calls"]
+
+    again = toolbox.call("seal_calls", {})["sealed"]
+    assert again["name"] != sealed["name"] and not (tmp_path / LOG_NAME).exists()
+    [only] = (tmp_path / again["name"]).read_text(encoding="utf-8").splitlines()
+    assert json.loads(only)["tool"] == "seal_calls"
+    assert [line["tool"] for line in audit_lines(str(tmp_path))] == [
+        "load_method", "seal_calls", "seal_calls"]
 
 
 # --- over the daemon ----------------------------------------------------------------

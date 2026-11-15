@@ -11,6 +11,13 @@ and each accepted `series` line's count of acquisitions (lab record, tasks 71 an
 A send the limits refuse is a failed call, and its line carries the refusal verbatim as
 its error.
 
+**The log is segments** (lab record, task 161), so a folder once listed never changes:
+`mcp-calls.log` is the live one, and `AuditLog.seal` renames it to
+`mcp-calls.<YYYYMMDD-HHMMSS>.log`, which nothing writes again; the next line starts a new
+live file, since `write` opens the live name per call. Every reader reads every
+`mcp-calls*.log` in the folder (`SEGMENTS`), in the order of each file's first line, the
+live one last -- which also takes in a tail another tool split off by hand.
+
 **A long text argument is hashed, never quoted.** A method's or a template's text is
 kilobytes, and what an auditor needs is whether two calls were given the same one; the
 line carries its SHA-256 and length instead. A result is summarised to its top-level
@@ -21,15 +28,25 @@ the caller, and the files hold what matters.
 from __future__ import annotations
 
 import datetime as _dt
+import glob
 import hashlib
 import json
 import os
 import threading
-from collections.abc import Mapping
+import time
+from collections.abc import Iterator, Mapping
 
-__all__ = ["LOG_NAME", "LONG_TEXT", "AuditLog", "hashed", "summarised"]
+__all__ = ["LOG_NAME", "LONG_TEXT", "SEAL_WAIT_S", "SEGMENTS", "AuditLog", "SealFailure",
+           "hashed", "segments", "summarised"]
 
 LOG_NAME = "mcp-calls.log"
+"""The live segment, the only one written to."""
+
+SEGMENTS = "mcp-calls*.log"
+"""Every segment of a folder's log, the live one among them."""
+
+SEAL_WAIT_S = 5.0
+"""How long a seal retries a rename another process's open handle refuses (Windows)."""
 
 LONG_TEXT = 200
 """Past this many characters, or with a line break in it, an argument is hashed."""
@@ -64,6 +81,38 @@ def summarised(result: object) -> object:
         elif isinstance(value, Mapping):
             out[key] = {"keys": len(value)}
     return out
+
+
+class SealFailure(OSError):
+    """The live segment could not be renamed; the sentence says why."""
+
+
+def _first_time(path: str) -> str:
+    """The `time` of a segment's first line, or empty when it has none to read."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            line = json.loads(handle.readline())
+    except (OSError, ValueError):
+        return ""
+    return str(line.get("time") or "") if isinstance(line, dict) else ""
+
+
+def segments(directory: str) -> list[str]:
+    """Every segment of the log in `directory`, oldest first and the live one last."""
+    live = os.path.join(directory, LOG_NAME)
+    found = [path for path in glob.glob(os.path.join(glob.escape(directory), SEGMENTS))
+             if os.path.isfile(path) and os.path.normcase(path) != os.path.normcase(live)]
+    # Times are to the second, and two seals in one second begin two segments in it:
+    # the one last written to is the later (`-2` sorts before `.log` by name).
+    found.sort(key=lambda path: (_first_time(path), _modified(path), os.path.basename(path)))
+    return found + ([live] if os.path.isfile(live) else [])
+
+
+def _modified(path: str) -> int:
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return 0
 
 
 class AuditLog:
@@ -115,43 +164,32 @@ class AuditLog:
         session reading its own count had no way to see that one was a
         `clockwork routine` at a terminal (lab record, task 96)."""
         counts: dict[str, int] = {}
-        if not session or not self.path or not os.path.isfile(self.path):
+        if not session:
             return counts
-        with open(self.path, encoding="utf-8") as handle:
-            for text in handle:
-                try:
-                    line = json.loads(text)
-                except ValueError:
-                    continue
-                if (not isinstance(line, dict) or line.get("error") is not None
-                        or line.get("session") != session):
-                    continue
-                surface = line.get("via") or "in process"
-                if line.get("tool") == "acquire":
-                    counts[surface] = counts.get(surface, 0) + 1
-                elif line.get("tool") == "series":
-                    spent = (line.get("result") or {}).get("acquisitions")
-                    counts[surface] = counts.get(surface, 0) + (
-                        spent if isinstance(spent, int) and spent > 0 else 1)
+        for line in self.lines():
+            if line.get("error") is not None or line.get("session") != session:
+                continue
+            surface = line.get("via") or "in process"
+            if line.get("tool") == "acquire":
+                counts[surface] = counts.get(surface, 0) + 1
+            elif line.get("tool") == "series":
+                spent = (line.get("result") or {}).get("acquisitions")
+                counts[surface] = counts.get(surface, 0) + (
+                    spent if isinstance(spent, int) and spent > 0 else 1)
         return counts
 
     def request_for(self, words: str, session: str) -> str | None:
         """The latest request id minted for exactly these words in daemon session
         `session`, or None: how a request begun by one process is continued by the next
         without its id, as the command line's `arm` and `acquire` are."""
-        if not words or not session or not self.path or not os.path.isfile(self.path):
+        if not words or not session:
             return None
         found = None
-        with open(self.path, encoding="utf-8") as handle:
-            for text in handle:
-                try:
-                    line = json.loads(text)
-                except ValueError:
-                    continue
-                request = line.get("request") if isinstance(line, dict) else None
-                if (isinstance(request, dict) and request.get("id")
-                        and request.get("text") == words and line.get("session") == session):
-                    found = str(request["id"])
+        for line in self.lines():
+            request = line.get("request")
+            if (isinstance(request, dict) and request.get("id")
+                    and request.get("text") == words and line.get("session") == session):
+                found = str(request["id"])
         return found
 
     def requests(self) -> dict[str, str]:
@@ -160,16 +198,69 @@ class AuditLog:
         A line that names a request by id alone -- a `note` from a process that never
         saw the words -- records them empty, and never blanks words already read."""
         found: dict[str, str] = {}
-        if not self.path or not os.path.isfile(self.path):
-            return found
-        with open(self.path, encoding="utf-8") as handle:
-            for text in handle:
-                try:
-                    request = json.loads(text).get("request")
-                except (ValueError, AttributeError):
-                    continue
-                if isinstance(request, dict) and request.get("id"):
-                    words = str(request.get("text") or "")
-                    if words or str(request["id"]) not in found:
-                        found[str(request["id"])] = words
+        for line in self.lines():
+            request = line.get("request")
+            if isinstance(request, dict) and request.get("id"):
+                words = str(request.get("text") or "")
+                if words or str(request["id"]) not in found:
+                    found[str(request["id"])] = words
         return found
+
+    def lines(self) -> Iterator[dict]:
+        """Every line of every segment, in order, each a mapping; a line that does not
+        parse as one is passed over."""
+        if not self.path:
+            return
+        for path in segments(os.path.dirname(self.path)):
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    texts = handle.readlines()
+            except OSError:
+                continue  # sealed between the listing and the open
+            for text in texts:
+                try:
+                    line = json.loads(text)
+                except ValueError:
+                    continue
+                if isinstance(line, dict):
+                    yield line
+
+    def seal(self, wait_s: float = SEAL_WAIT_S) -> dict[str, object] | None:
+        """End the live segment: rename it `mcp-calls.<YYYYMMDD-HHMMSS>.log` (`-2` and on
+        if that is taken, never over another) and answer its name, size and MD5; None
+        when there is no live file, or no log. A rename refused because another process
+        holds the file open is retried for `wait_s`, then `SealFailure` with the refusal.
+
+        Sealed under this log's lock, so no line from this process lands in a segment
+        once it is named; another process's write meets the rename as Windows' sharing
+        refusal and is retried, or opens a new live file after it."""
+        if not self.path:
+            return None
+        directory = os.path.dirname(self.path) or "."
+        stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        deadline = time.monotonic() + wait_s
+        with self._guard:
+            if not os.path.isfile(self.path):
+                return None
+            number = 1
+            while True:
+                name = f"mcp-calls.{stamp}{'' if number == 1 else f'-{number}'}.log"
+                target = os.path.join(directory, name)
+                if os.path.lexists(target):
+                    number += 1
+                    continue
+                try:
+                    os.rename(self.path, target)
+                    break
+                except FileExistsError:
+                    number += 1
+                except PermissionError as exc:
+                    if time.monotonic() >= deadline:
+                        raise SealFailure(
+                            f"{LOG_NAME} in {directory} could not be sealed within "
+                            f"{wait_s:g} s, since another process holds it open: "
+                            f"{exc.strerror or exc}") from exc
+                    time.sleep(0.1)
+        with open(target, "rb") as handle:
+            data = handle.read()
+        return {"name": name, "bytes": len(data), "md5": hashlib.md5(data).hexdigest()}

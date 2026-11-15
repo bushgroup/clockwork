@@ -24,6 +24,7 @@ import pytest
 from clockwork import method as method_module
 from clockwork.app import main
 from clockwork.mcp import TOOLS
+from clockwork.mcp.audit import LOG_NAME, AuditLog
 from clockwork.mcp.cli import _flag, verbs
 from clockwork.method import template as template_module
 from clockwork.owner import RemoteOwner
@@ -331,9 +332,20 @@ def test_a_request_from_the_shell_one_verb_per_process(shell, library, tmp_path)
     assert down["outputs_lowered"] == ["box1 A-P"]
     code, out, err = shell("status")
     assert code == 1 and "no clockwork serve answered" in err
+    # The stand-down sealed the log after its own line; the close seals again with no
+    # daemon to ask, and leaves a segment of its own line alone (lab record, task 161).
+    assert down["sealed"]["name"].startswith("mcp-calls.")
+    assert not os.path.exists(os.path.join(output, LOG_NAME))
+    closed = shell.json("seal-calls", "--output", output)["sealed"]
+    assert closed["name"] != down["sealed"]["name"]
+    with open(os.path.join(output, closed["name"]), encoding="utf-8") as handle:
+        [only] = handle.readlines()
+    assert json.loads(only)["tool"] == "seal_calls" and json.loads(only)["session"] is None
+    code, out, err = shell("seal-calls", "--output", str(tmp_path / "no-such-folder"))
+    assert code == 1 and "is not a folder" in err
 
-    with open(os.path.join(output, "mcp-calls.log"), encoding="utf-8") as handle:
-        logged = [json.loads(line) for line in handle]
+    logged = list(AuditLog(os.path.join(output, LOG_NAME)).lines())
+    assert [line["tool"] for line in logged][-2:] == ["stand_down", "seal_calls"]
     assert {line["via"] for line in logged} == {"cli"}
     assert {line["tool"] for line in logged} >= {entry.name for entry in TOOLS}
 
