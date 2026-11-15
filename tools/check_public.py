@@ -883,8 +883,9 @@ def check_early_stops() -> None:
     task 104).
 
     Over a `--fake` owner keeping failures in a scratch root. A clock-lock refusal of
-    `acquire` is retried once, with the card's settings sent again, and the run acquires;
-    two in a row end the run on a sentence with no driver code in it. For every way a run
+    `acquire` restarts the console and is tried once more, the card's settings sent to the
+    new process first, and the run acquires; a refusal that outlives the restart ends the
+    run on a sentence that says so, with no driver code in it (lab record, task 162). For every way a run
     or a send can stop early, the work's first event names its stem, which is what the
     window's Report takes, and `keep.for_report` given that stem lands in the folder the
     failure already made rather than a second one. A method the owner refuses opens no
@@ -981,36 +982,42 @@ def check_early_stops() -> None:
             fake.refuse_times["acquire"] = 1
             mark = len(fake.commands)
             end, events = acquire("261010_SC_001")
-            words = [command[0] for command in fake.commands[mark:]]
-            first, second = (index for index, word in enumerate(words)
-                             if word == "acquire")
-            between = words[first + 1:second]
+            before = [command[0] for command in fake.commands[mark:]]
+            renewed = owner.console.fake  # type: ignore[union-attr]
+            after = [command[0] for command in renewed.commands]
             log = "".join(open(path, encoding="utf-8").read() for path in glob.glob(
                 os.path.join(data, "261010_SC_001*.transcript.log")))
             check_true(
-                "one clock-lock refusal of `acquire` is retried and the run acquires, "
-                f"the settings sent again in between ({between})",
+                "one clock-lock refusal of `acquire` restarts the console and the run "
+                f"acquires on the new one, the settings sent to it first ({after[:6]})",
                 isinstance(end, JobFinished) and len(end.result) == 1
                 and end.result[0].complete
                 and sum(isinstance(event, ClockLockRetried) for event in events) == 1
-                and words.count("acquire") == 2
-                and all(word in between for word in
-                        ("init", "vertical", "invert", "disable io port"))
-                and words[second + 1:second + 3] == ["stop", "enable io port"])
+                and renewed is not fake and before.count("acquire") == 1
+                and after.count("acquire") == 1
+                and all(word in after[:after.index("acquire")] for word in
+                        ("init", "vertical", "invert", "disable io port")))
             check_true("the retry is its own line in the transcript, which counts them",
                        "ClockLockRetried: retried after a clock-lock failure" in log)
 
-            fake.refuse["acquire"] = refusal
-            fake.refuse_times["acquire"] = 2
-            end, events = acquire("261010_SC_002")
+            def clocks_never_lock(stand_in: object) -> None:
+                stand_in.refuse["acquire"] = refusal  # type: ignore[attr-defined]
+
+            renewed.refuse["acquire"] = refusal
+            owner.console.on_start = clocks_never_lock  # type: ignore[union-attr]
+            try:
+                end, events = acquire("261010_SC_002")
+            finally:
+                owner.console.on_start = None  # type: ignore[union-attr]
+                owner.console.fake.refuse.pop("acquire", None)  # type: ignore[union-attr]
             message = end.message if isinstance(end, JobFailed) else ""
             same, name = one_folder("261010_SC_002")
             check_true(
-                f"a second refusal stops the run in a sentence, no driver code in it "
-                f"({message[:72]}...)",
-                message.startswith("the digitizer could not lock its clock synthesizer, "
-                                   "twice") and "Error Code" not in message
-                and "acquire" not in fake.refuse)
+                f"a refusal past a restart stops the run in a sentence that says a restart "
+                f"was tried, no driver code in it ({message[:72]}...)",
+                message.startswith("the digitizer's clocks would not lock, again after "
+                                   "the console was restarted")
+                and "Error Code" not in message and "Press Acquire again" not in message)
             check_true(
                 f"a run stopped at `acquire` names its stem before it stops, and Report "
                 f"reuses the folder its failure was kept in ({name})",

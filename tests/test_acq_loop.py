@@ -2923,37 +2923,61 @@ CLOCK_LOCK_REFUSAL = (f"Error during call to digitizer. Error Code: {acq.CLOCK_L
                       "Error Message: Unexpected response: Cannot lock clock synthesizer")
 
 
-def test_a_clock_lock_refusal_is_tried_once_more_after_the_settings_are_sent_again(rig):
-    rig.fake.refuse["acquire"] = CLOCK_LOCK_REFUSAL
+REFERENCE_CLOCK_REFUSAL = (
+    f"Error during call to digitizer. Error Code: {acq.CLOCK_LOCK_ERROR_CODE}"
+    "Error Message: Unexpected response: Reference clocks are not stable")
+
+
+@pytest.mark.parametrize("refusal", [CLOCK_LOCK_REFUSAL, REFERENCE_CLOCK_REFUSAL])
+def test_a_clock_lock_refusal_restarts_the_console_and_is_tried_once_more(rig, refusal):
+    rig.fake.refuse["acquire"] = refusal
     rig.fake.refuse_times["acquire"] = 1
-    events, paused, prepared = [], [], []
+    events, restarted = [], []
     width = acq.start_chain_retrying(rig.console, rig.stream, progress=events.append,
-                                     prepare=lambda: prepared.append(True),
-                                     sleep=paused.append)
+                                     restart=lambda: restarted.append(True))
     assert width.num_samples > 0 and rig.console.running is False
-    assert paused == [acq.CLOCK_LOCK_RETRY_DELAY_S] and prepared == [True]
+    assert restarted == [True]
     [retried] = events
     assert isinstance(retried, acq.ClockLockRetried)
     assert retried.text.startswith("retried after a clock-lock failure")
+    assert "console is restarted" in retried.text
 
 
-def test_a_second_clock_lock_refusal_is_a_sentence_and_any_other_refusal_is_not_retried(
-        rig):
-    rig.fake.refuse["acquire"] = CLOCK_LOCK_REFUSAL
-    with pytest.raises(acq.ClockLockFailed, match="twice") as caught:
-        acq.start_chain_retrying(rig.console, rig.stream, prepare=lambda: None,
-                                 sleep=lambda _: None)
+def test_a_clock_lock_refusal_past_a_restart_is_a_sentence_that_asks_for_a_report(rig):
+    rig.fake.refuse["acquire"] = REFERENCE_CLOCK_REFUSAL
+    restarted = []
+    with pytest.raises(acq.ClockLockFailed) as caught:
+        acq.start_chain_retrying(rig.console, rig.stream,
+                                 restart=lambda: restarted.append(True))
+    text = str(caught.value)
+    assert restarted == [True] and caught.value.restarted
     assert caught.value.cause.code == acq.CLOCK_LOCK_ERROR_CODE
-    assert "Error Code" not in str(caught.value)
+    assert "after the console was restarted" in text and "Report it" in text
+    assert "Error Code" not in text and "Press Acquire again" not in text
 
+
+def test_a_clock_lock_refusal_with_no_console_to_restart_names_the_restart(rig):
+    rig.fake.refuse["acquire"] = REFERENCE_CLOCK_REFUSAL
+    rig.fake.refuse_times["acquire"] = 1
+    events = []
+    with pytest.raises(acq.ClockLockFailed) as caught:
+        acq.start_chain_retrying(rig.console, rig.stream, progress=events.append,
+                                 restart=None)
+    text = str(caught.value)
+    # Refused once only, so a second `acquire` would have opened the chain: raising here
+    # is not sending it again on the same process, which has never cleared it.
+    assert not caught.value.restarted and not events
+    assert text.count("Restart the console") == 1 and "Press Acquire again" not in text
+
+
+def test_any_other_refusal_of_acquire_is_not_retried(rig):
     rig.fake.refuse["acquire"] = ("Error during call to digitizer. Error Code: "
                                   "-1074118653Error Message: Acquisition running")
-    prepared = []
+    restarted = []
     with pytest.raises(acq.ConsoleCommandError) as caught:
         acq.start_chain_retrying(rig.console, rig.stream,
-                                 prepare=lambda: prepared.append(True),
-                                 sleep=lambda _: None)
-    assert caught.value.code == -1074118653 and not prepared
+                                 restart=lambda: restarted.append(True))
+    assert caught.value.code == -1074118653 and not restarted
     assert acq.ConsoleCommandError("the console refused 'acquire': bad").code is None
 
 

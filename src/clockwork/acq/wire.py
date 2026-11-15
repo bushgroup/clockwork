@@ -71,12 +71,15 @@ record, task 20).
 """
 
 CLOCK_LOCK_ERROR_CODE = -1074134951
-"""The SA220P's "Cannot lock clock synthesizer", the one driver code a client retries.
+"""The SA220P's clock-lock refusal of `acquire`, the one driver code a client recovers from.
 
-Seen once, answering `acquire`, and gone four minutes later with nothing changed on the
-client side. Both places in `acquire` that can raise it do so before anything is
+Met with two messages, "Cannot lock clock synthesizer" and "Reference clocks are not
+stable", matched on neither. Every clearance on record came with a new console process,
+never with `acquire` sent again on the same one, so a client that holds the process
+restarts it. Both places in `acquire` that can raise it do so before anything is
 started, so the configuration and `acquire` may be sent again (`docs/console-protocol.md`,
-"A driver error, and the one a client retries"; lab record, task 104).
+"A driver error, and the one a client restarts the console for"; lab record, tasks 104
+and 162).
 """
 
 _DRIVER_CODE = re.compile(r"Error Code:\s*(-?\d+)")

@@ -154,7 +154,6 @@ __all__ = [
     "ABORT_AFTER_FAILURES",
     "ABORT_AFTER_UNWITNESSED",
     "ARM_TIMEOUT_S",
-    "CLOCK_LOCK_RETRY_DELAY_S",
     "FRAME_POLL_S",
     "FRAME_TIMEOUT_FLOOR_S",
     "FRAME_TIMEOUT_SLACK",
@@ -474,18 +473,6 @@ does that job and a spuriously precise one invites a stopwatch.
 """
 
 
-CLOCK_LOCK_RETRY_DELAY_S = 5.0
-"""How long `start_chain_retrying` waits after a clock-lock refusal before trying again.
-
-A few seconds, and not more, because the boxes are armed and the sample is spraying while
-it waits. The one occurrence on record cleared by the next attempt four minutes later and
-nothing narrower is known; what the console's source does establish is that nothing is
-left running to wait out (`docs/console-protocol.md`, "A driver error, and the one a
-client retries"). Each retry is a `ClockLockRetried` in the transcript and the run log,
-so how often a pause this short is enough can be counted (lab record, task 104).
-"""
-
-
 # --- what goes wrong -----------------------------------------------------------------
 
 
@@ -513,21 +500,31 @@ class PusherPeriodRefused(AcqError):
 
 
 class ClockLockFailed(AcqError):
-    """The digitizer could not lock its clock synthesizer twice running, so no chain.
+    """The digitizer's clocks would not lock when the chain was opened, so no chain.
 
-    `start_chain_retrying`'s second refusal, in a sentence a trainee can act on rather
-    than the driver's code and English. Raised before any file exists or any frame was
-    asked for, so nothing was acquired and nothing is lost but the run's number (lab
-    record, task 104).
+    `start_chain_retrying`'s refusal it could not recover, in a sentence a trainee can act
+    on rather than the driver's code and English. `restarted` says whether a new console
+    process was tried first: without one (a caller that does not hold the console) the
+    sentence names the restart, the one act on record that has cleared it; after one it
+    asks for a report, since nothing on record clears what a restart did not. Never
+    "press Acquire again", which the record shows does not work. Raised before any file
+    exists or any frame was asked for, so nothing was acquired and nothing is lost but
+    the run's number (lab record, tasks 104 and 162).
     """
 
-    def __init__(self, delay_s: float, cause: ConsoleCommandError) -> None:
+    def __init__(self, cause: ConsoleCommandError, *, restarted: bool) -> None:
         self.cause = cause
-        super().__init__(
-            f"the digitizer could not lock its clock synthesizer, twice, {delay_s:g} s "
-            "apart, so the run stopped before its first frame and nothing was acquired. "
-            "Press Acquire again; if it fails the same way, restart the console and then "
-            "report it")
+        self.restarted = restarted
+        if restarted:
+            text = ("the digitizer's clocks would not lock, again after the console was "
+                    "restarted, so the run stopped before its first frame and nothing was "
+                    "acquired. Report it before acquiring again")
+        else:
+            text = ("the digitizer's clocks would not lock when the chain was opened, so "
+                    "the run stopped before its first frame and nothing was acquired. "
+                    "Restart the console, then acquire again: acquiring again without a "
+                    "restart has not cleared this")
+        super().__init__(text)
 
 
 class EnableGateError(AcqError):
@@ -980,21 +977,22 @@ def beam_lost_reason(floor: float, totals: Sequence[int]) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ClockLockRetried(Event):
-    """`acquire` was refused with the clock-lock code, and is being tried once more.
+    """`acquire` was refused with the clock-lock code; the console is restarted and it is
+    tried once more.
 
-    Reported before the pause, so the line is in the transcript whether or not the
+    Reported before the restart, so the line is in the transcript whether or not the
     second attempt works; a run whose second attempt fails ends on `ClockLockFailed`
-    after it. `error` is the console's refusal as it came (lab record, task 104).
+    after it. `error` is the console's refusal as it came (lab record, tasks 104 and 162).
     """
 
     error: str
-    delay_s: float
 
     @property
     def text(self) -> str:
-        return (f"retried after a clock-lock failure: the digitizer could not lock its "
-                f"clock synthesizer when the chain was opened; the settings and acquire "
-                f"are sent again in {self.delay_s:g} s")
+        return ("retried after a clock-lock failure: the digitizer's clocks would not "
+                "lock when the chain was opened, which only a new console process has "
+                "cleared; the console is restarted and the settings and acquire are sent "
+                "again")
 
 
 @dataclass(frozen=True, slots=True)
@@ -2277,23 +2275,27 @@ def start_chain_retrying(
     console: Console,
     stream: DataStream,
     *,
-    prepare: Callable[[], object],
+    restart: Callable[[], object] | None,
     progress: Callable[[Event], None] | None = None,
-    delay: float = CLOCK_LOCK_RETRY_DELAY_S,
-    sleep: Callable[[float], None] = time.sleep,
     ungate: bool = True,
 ) -> TofWidth:
-    """`start_chain`, tried once more if the card could not lock its clock synthesizer.
+    """`start_chain`, tried once more on a new console process if the card's clocks would
+    not lock.
 
     The card is expected to have been configured already. A refusal of `acquire` carrying
-    `CLOCK_LOCK_ERROR_CODE` is reported as a `ClockLockRetried`, then after `delay` the
-    configuration is sent again by `prepare` -- `init`, `horizontal`, `vertical`, `invert`
-    and the `enable io port` -- and `start_chain` repeats its own `disable io port`,
-    `acquire` and `enable io port`, so the second attempt is on the wire exactly what the
-    first was. A second refusal of the same kind is `ClockLockFailed`; any other failure,
-    on either attempt, is raised as it came. The code is matched rather than the English,
-    which is the driver's (`docs/console-protocol.md`, "A driver error, and the one a
-    client retries"; lab record, task 104).
+    `CLOCK_LOCK_ERROR_CODE` is reported as a `ClockLockRetried`, then `restart` starts a
+    new console process, points `console` and `stream` at it and sends the configuration
+    again -- `init`, `horizontal`, `vertical`, `invert` and the `enable io port` -- and
+    `start_chain` repeats its own `disable io port`, `acquire` and `enable io port`, so the
+    second attempt is on the wire what the first was, to a new driver session. A second
+    refusal of the same kind is `ClockLockFailed`; any other failure, on either attempt,
+    is raised as it came. The code is matched rather than the English, which is the
+    driver's (`docs/console-protocol.md`, "A driver error, and the one a client restarts
+    the console for"; lab record, tasks 104 and 162).
+
+    `restart` is None for a caller that does not hold the console process. The first
+    refusal is then `ClockLockFailed` at once: sending `acquire` again on the same process
+    has never cleared it, and only a new process has (lab record, task 162).
 
     The boxes are not touched. They are armed with the enable line low, which is what the
     run's first frame needs whichever attempt opened the chain, and nothing here raises it.
@@ -2304,15 +2306,16 @@ def start_chain_retrying(
     except ConsoleCommandError as exc:
         if exc.code != CLOCK_LOCK_ERROR_CODE:
             raise
-        report(ClockLockRetried(error=str(exc), delay_s=delay))
-    sleep(delay)
-    prepare()
+        if restart is None:
+            raise ClockLockFailed(exc, restarted=False) from exc
+        report(ClockLockRetried(error=str(exc)))
+    restart()
     try:
         return start_chain(console, stream, ungate=ungate)
     except ConsoleCommandError as exc:
         if exc.code != CLOCK_LOCK_ERROR_CODE:
             raise
-        raise ClockLockFailed(delay, exc) from exc
+        raise ClockLockFailed(exc, restarted=True) from exc
 
 
 def run_acquisition(

@@ -668,6 +668,23 @@ class LocalOwner:
         prologue did. The chain is the run's from here on, and `_acquire`'s `finally`
         stops it like the one it replaced.
         """
+        self._restart_under_run(console, stream, job)
+        return start_chain_retrying(
+            console, stream, progress=self._report,
+            restart=self._clock_lock_restart(console, stream, job))
+
+    def _clock_lock_restart(self, console: Console, stream: DataStream,
+                            job: Acquire) -> Callable[[], object] | None:
+        """`start_chain_retrying`'s `restart`, or None where this owner holds no console
+        process to restart: a clock-lock refusal has only ever cleared on a new process
+        (lab record, task 162)."""
+        if self.console is None:
+            return None
+        return lambda: self._restart_under_run(console, stream, job)
+
+    def _restart_under_run(self, console: Console, stream: DataStream, job: Acquire) -> None:
+        """A new console process, the run's two clients pointed at it and the card
+        prepared as the run's prologue prepared it; no chain is opened."""
         if self.console is None:
             raise AcqError("there is no console to restart")
         self._set_status(ConsoleStatus(state="starting"))
@@ -683,9 +700,6 @@ class LocalOwner:
             self._report(Warned(message))
         self._say(f"console restarted in {seconds:.1f} s; offset {prepared.offset_v} V, "
                   f"{'inverted' if prepared.inverted else 'not inverted'}")
-        return start_chain_retrying(
-            console, stream, progress=self._report,
-            prepare=lambda: prepare_console(console, job.instrument, info=info))
 
     def _status_now(self, seconds: float | None = None) -> ConsoleStatus:
         console = self.console
@@ -932,12 +946,12 @@ class LocalOwner:
                 self._say(
                     f"offset {prepared.offset_v} V, "
                     f"{'inverted' if prepared.inverted else 'not inverted'}")
-                # A clock-lock refusal of `acquire` is tried once more, the card's
-                # settings sent again first; its warnings were said the first time
-                # (lab record, task 104).
+                # A clock-lock refusal of `acquire` is tried once more on a new console
+                # process, the card's settings sent again first (lab record, tasks 104
+                # and 162).
                 width = start_chain_retrying(
                     console, stream, progress=self._report,
-                    prepare=lambda: prepare_console(console, job.instrument, info=info))
+                    restart=self._clock_lock_restart(console, stream, job))
                 return width
 
             try:

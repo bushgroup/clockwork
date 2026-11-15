@@ -496,7 +496,7 @@ than as its answer. The reply is one frame where `acquire` and `tof width` answe
 client that checks the frame count meets it as a malformed reply rather than as a period; the
 prefix is what tells the two apart.
 
-### A driver error, and the one a client retries
+### A driver error, and the one a client restarts the console for
 
 When the failure is the digitizer driver's, the text after `error` is the driver's own report
 in a fixed shape, with no space between the code and the second label:
@@ -506,12 +506,37 @@ in a fixed shape, with no space between the code and the second label:
 `<n>` is the driver's signed status code, and it is what a client matches on. The message text
 is the driver's English and is not part of the protocol.
 
-One code has a client behaviour attached: **-1074134951, "Cannot lock clock synthesizer"**,
-which the SA220P has answered to `acquire` once on record, in 1.5 s, on a run whose next
-attempt four minutes later acquired normally. The failure is transient, so a client may send
-the configuration and `acquire` again, and clockwork does so once, after a pause.
+One code has a client behaviour attached, **-1074134951**, which the SA220P has answered to
+`acquire` with two messages:
 
-The fork's source shows why that is safe. Both places `acquire` can throw this code are calls
+    Unexpected response: Cannot lock clock synthesizer
+    Unexpected response: Reference clocks are not stable
+
+The first was met once, in 1.5 s, and the next attempt four minutes later acquired normally. The
+second was met on four days between 2026-09-22 and 2026-10-27, 13 refusals in all, each
+answered in 0.21 to 0.25 s. It came at the first `acquire` after an idle gap in a console process
+that had been running for hours, after gaps of 2 h 25 min, 1 h 54 min and 10 min, the last
+following about 2 h 40 min of acquisition. A second `acquire` 5 s later, with the configuration
+sent again, was refused every time it was tried, and so was a press of Acquire minutes later. On
+every one of the four days, the refusal stopped only once a new console process was running,
+which the console's own log shows as its `Logger initialized` line. The code alone does not say
+which message a refusal carries, and the driver's English is not part of the protocol, so a
+client treats both alike.
+
+A new process opens a new driver session, and its first `acquire` takes about 2.2 s where every
+later one takes 0.07 to 0.21 s; we take the difference to be the self-calibration the driver
+asks for on a new session. A refusal answers sooner than either, so whatever throws does so before any
+calibration time is spent. The fork's message does not say which of the calls described below
+threw.
+
+When `acquire` answers with this code, clockwork restarts the console process, sends the
+configuration again and sends `acquire` once more. A second refusal stops the run before its
+first frame, with a sentence that says a restart was tried. Sending `acquire` again on the same
+process is not a recovery, because nothing a client can send reopens the driver session: `init`
+only sets the trigger again.
+
+The fork's source shows why sending the configuration and `acquire` again is safe, on a new
+process or the same one. Both places `acquire` can throw this code are calls
 to `configure_cst`, which applies the setup and self-calibrates the card when the driver asks
 for it: the first is the short streaming context that measures the pusher period, the second
 is the acquisition's own. In both, the throw comes before anything is started. The measuring

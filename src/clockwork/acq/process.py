@@ -91,6 +91,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..instrument import Instrument
@@ -1088,6 +1089,12 @@ class FakeConsoleProcess(ConsoleSupervisor):
 
         self.started_seconds: float | None = None
 
+        self.on_start: Callable[[object], None] | None = None
+        """Called with each new `FakeConsole` before it starts, for a test whose fault
+        outlives a process: a card whose clocks a restart does not bring back (lab
+        record, task 162). A restart otherwise makes a stand-in with none of the last
+        one's `refuse` entries, which is a restart that clears everything."""
+
     @property
     def fake(self) -> object | None:
         """The `FakeConsole` itself, for a test that wants to assert on it."""
@@ -1098,6 +1105,8 @@ class FakeConsoleProcess(ConsoleSupervisor):
             raise ConsoleProcessError("this FakeConsoleProcess is already running")
         decided("starting a simulated console in this process")
         fake = self._make()
+        if self.on_start is not None:
+            self.on_start(fake)
         fake.start()
         self._fake = fake
         self.command_endpoint = fake.command_endpoint
