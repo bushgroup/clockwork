@@ -675,6 +675,15 @@ class RemoteWorker(_Signals):
                               "boxes to start it again")
 
     def _fail_mine(self, message: str) -> None:
+        """Fail this window's jobs in a session that has ended, and forget every handle
+        id of it.
+
+        `_jobs` goes with the rest: a new daemon numbers its jobs from 1 again, and an
+        id cached from the old session handed the new job of that number the old one's
+        object. A queue row's acquisition then came back as a scan from an hour before,
+        `_job_finished` did not know it for the row's, and the row read `acquiring`
+        after a complete run until the window was closed (lab #13).
+        """
         for job_id in list(self._tracked):
             job = self._mine.get(job_id)
             if job is not None:
@@ -684,6 +693,8 @@ class RemoteWorker(_Signals):
         self._silent.clear()
         self._mine.clear()
         self._own.clear()
+        with self._guard:
+            self._jobs.clear()
         self._stop_asked = False
 
     # -- following -------------------------------------------------------------------

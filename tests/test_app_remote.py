@@ -225,6 +225,49 @@ def test_a_lost_daemon_fails_nothing_it_did_not_have_and_says_so(qtbot, tmp_path
         made.stop()
 
 
+def test_a_restarted_daemons_job_is_not_taken_for_the_old_one_of_its_number(
+        qtbot, tmp_path):
+    """A new daemon numbers its jobs from 1 again, and the client kept the old session's
+    id-to-job cache: the new job that reused an old number came back as the old job's
+    object, and a queue row's acquisition stayed `acquiring` after a complete run
+    (2026-10-26, after a stand-down restarted the daemon; lab #13)."""
+    endpoint = f"tcp://127.0.0.1:{free_port()}"
+    first = Daemon(tmp_path, command=endpoint, events=f"tcp://127.0.0.1:{free_port()}")
+    second: Daemon | None = None
+    worker = RemoteWorker(endpoint=endpoint, poll_s=0.05, connect_timeout=0.5)
+    finished: list[object] = []
+    worker.finished_job.connect(lambda job, result: finished.append(job))
+    worker.start()
+    try:
+        qtbot.waitUntil(lambda: worker.hello is not None, timeout=10_000)
+        old = Discover(method=make_method())
+        worker.submit(old)
+        # The daemon's own start-up job is followed too, so not necessarily the first.
+        qtbot.waitUntil(lambda: any(seen is old for seen in finished), timeout=20_000)
+        first.stop()
+        qtbot.waitUntil(lambda: "stopped answering" in worker.refused, timeout=20_000)
+
+        second = Daemon(tmp_path, command=endpoint,
+                        events=f"tcp://127.0.0.1:{free_port()}")
+        # Submitted until the new session reaches the old job's number: every one must
+        # come back as itself.
+        for _ in range(4):
+            job = Discover(method=make_method())
+            count = len(finished)
+            worker.submit(job)
+            # Identity, not equality: the old Discover is equal to this one by value. The
+            # daemon's own start-up job may finish in between, so not the first after.
+            qtbot.waitUntil(lambda: any(seen is old or seen is job
+                                        for seen in finished[count:]), timeout=20_000)
+            assert all(seen is not old for seen in finished[count:])
+            assert worker.origin(job) == ""
+    finally:
+        ended(worker)
+        first.stop()
+        if second is not None:
+            second.stop()
+
+
 # -- the window over the daemon ------------------------------------------------------
 
 
