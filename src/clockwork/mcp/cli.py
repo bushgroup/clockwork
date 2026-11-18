@@ -50,7 +50,6 @@ import inspect
 import json
 import os
 import sys
-import threading
 import types
 import typing
 from collections.abc import Mapping
@@ -59,7 +58,7 @@ from typing import Any, TextIO
 
 from .tools import PROGRESS_WAIT_MAX_S, TOOLS, Tool, Toolbox, ToolFailure
 
-__all__ = ["COMMON", "RECORD_WAIT_S", "Flag", "Verb", "add_verbs", "is_verb", "run",
+__all__ = ["COMMON", "Flag", "Verb", "add_verbs", "is_verb", "run",
            "verb_name", "verbs"]
 
 COMMON = ("endpoint", "library", "output", "instrument", "limits", "project_limits",
@@ -78,7 +77,8 @@ where the argument is a list (`clockwork manifest 260926 260927`)."""
 
 WAITS = ("acquire", "series")
 """The tools that start a run and answer at once, whose verbs wait for it to end unless
-given `--no-wait`: the run record's thread dies with the verb's process."""
+given `--no-wait`, printing its events for a person watching. The run record gains its
+files either way: the daemon enters them (lab record, task 164)."""
 
 STARTS = ("warm_up", "snapshot_boxes")
 """The tools whose verbs start a daemon when none answers, and leave it running: the
@@ -110,11 +110,6 @@ SAVED_INSTRUMENT = ("run_routine",)
 no document it had no limits and refused its first send, burning a file number, where
 warm-up an hour before had found the document saved (lab record, task 96). The library
 and the output directory stay the daemon's, which is what the routine runs in."""
-
-RECORD_WAIT_S = 60.0
-"""How long a finished `acquire` waits for its run record's last file entry: the
-summary of a file is computed as the owner reports it, and takes a second or two."""
-
 
 @dataclass(frozen=True, slots=True)
 class Flag:
@@ -219,8 +214,8 @@ def add_verbs(commands: argparse._SubParsersAction) -> None:
         if verb.tool.name in WAITS:
             parser.add_argument(
                 "--no-wait", action="store_true",
-                help="answer at once rather than when the run ends. The run record then "
-                     "gains its files only when something follows the job with progress")
+                help="answer at once rather than when the run ends; the daemon still "
+                     "enters every file in the run record")
         common = parser.add_argument_group("where the tools are pointed")
         common.add_argument("--endpoint", metavar="ADDRESS", default="",
                             help="the daemon's command socket "
@@ -617,8 +612,7 @@ def _follow(toolbox: Toolbox, arguments: Mapping[str, object], out: TextIO, err:
 
 def _wait(toolbox: Toolbox, job: int, err: TextIO, program: str) -> int:
     """An `acquire`'s run or a `series`' runs, to the end: each event's text on standard
-    error, then the run record's last entry, since the thread writing it dies with this
-    process."""
+    error. The daemon has entered every file in the run record before it reports the end."""
     asked: dict[str, object] = {"job": job, "wait_s": PROGRESS_WAIT_MAX_S}
     while True:
         try:
@@ -631,9 +625,6 @@ def _wait(toolbox: Toolbox, job: int, err: TextIO, program: str) -> int:
         asked["after"] = answer["last"]
         if answer["done"]:
             break
-    recorder: threading.Thread | None = toolbox.recorder(job)
-    if recorder is not None:
-        recorder.join(RECORD_WAIT_S)
     if answer.get("failed"):
         _say(err, f"{program}: job {job} failed: {answer['failed']}")
         return 1

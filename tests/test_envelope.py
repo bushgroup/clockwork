@@ -495,19 +495,19 @@ def test_the_default_limits_sit_beside_the_instrument_document(tmp_path):
 
 def test_a_run_record_is_one_document_per_request_found_again_by_its_id(tmp_path):
     first = record.RunRecord.open(str(tmp_path), "260924_ZZ_001", request_id="r-1",
-                                  text="run it once", initials="ZZ")
+                                  text="run it once", initials="ZZ", source="cli")
     first.append("plans", {"text": "one run at the defaults"})
     first.add_file({"stem": "260924_ZZ_001", "complete": False})
     first.add_file({"stem": "260924_ZZ_001", "complete": True})
     again = record.RunRecord.open(str(tmp_path), "260924_ZZ_009", request_id="r-1",
-                                  text="run it once")
+                                  text="run it once", source="mcp")
     assert again.path == first.path == str(tmp_path / "260924_ZZ_001.request.json")
     other = record.RunRecord.open(str(tmp_path), "260924_ZZ_001", request_id="r-2",
-                                  text="something else")
+                                  text="something else", source="mcp")
     assert other.path != first.path and "r-2" in other.path
     data = json.loads((tmp_path / "260924_ZZ_001.request.json").read_text(encoding="utf-8"))
     assert data["request"] == {**data["request"], "id": "r-1", "text": "run it once",
-                               "source": "agent", "initials": "ZZ"}
+                               "source": "cli", "initials": "ZZ"}
     assert [entry["text"] for entry in data["plans"]] == ["one run at the defaults"]
     assert [entry["complete"] for entry in data["files"]] == [True]
     assert record.find(str(tmp_path), "r-2") == other.path
@@ -516,3 +516,6 @@ def test_a_run_record_is_one_document_per_request_found_again_by_its_id(tmp_path
         first.append("gossip", {})
     with pytest.raises(ValueError):
         record.RunRecord.open(str(tmp_path), "x", request_id="r-3", text="", source="bot")
+    with pytest.raises(ValueError):  # read, never written again
+        record.RunRecord.open(str(tmp_path), "x", request_id="r-3", text="", source="agent")
+    assert "agent" in record.READ_SOURCES

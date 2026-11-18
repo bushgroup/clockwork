@@ -165,7 +165,7 @@ def test_a_directory_is_walked_recursively(tmp_path, day):
 
 def test_a_run_records_notes_are_counted_and_its_newest_verdict_read(day):
     record = RunRecord.open(str(day), "260927_AB_002", request_id="req-1",
-                            text="pulse at 5 ms")
+                            text="pulse at 5 ms", source="mcp")
     record.append("notes", {"text": "spray steady", "by": "session"})
     record.append("notes", {"text": "second look", "by": "session"})
     rows = by_stem(manifest.manifest([str(day)]))
@@ -184,7 +184,8 @@ def test_a_run_records_notes_are_counted_and_its_newest_verdict_read(day):
 
 
 def test_a_record_is_found_by_the_stems_it_holds_when_the_file_names_no_series(day):
-    record = RunRecord.open(str(day), "260927_AB_001", request_id="req-9", text="one run")
+    record = RunRecord.open(str(day), "260927_AB_001", request_id="req-9", text="one run",
+                            source="mcp")
     record.add_file({"stem": "260927_AB_001"})
     record.append("notes", {"text": "fine", "by": "session"})
     assert by_stem(manifest.manifest([str(day)]))["260927_AB_001"]["notes"] == 1

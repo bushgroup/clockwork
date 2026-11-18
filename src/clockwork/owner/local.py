@@ -84,11 +84,11 @@ from ..method import Method
 from ..method.template import Rendered, loads_template, render
 from ..mips import (
     Box,
+    BoxHealth,
     BoxState,
     Discovery,
     FakeBox,
     Found,
-    BoxHealth,
     MipsError,
     discover,
     read_health,
@@ -133,6 +133,7 @@ from .jobs import (
     matches_wire,
     wire_fingerprint,
 )
+from .keeper import RecordKeeper
 from .lock import Holder, InstrumentLock, LockError
 from .wire import to_wire
 
@@ -150,6 +151,10 @@ Taken from the bench script that first needed it (lab record, task 28).
 _NO_SPECTRUM = np.zeros(0)
 
 _CLOSING = "clockwork is shutting down, so this job was never started"
+
+RECORD_DRAIN_S = 120.0
+"""How long the owner waits, at a job's end, for its files to be entered in the run record
+before reporting the end anyway: a summary reads every frame, seconds for a long run."""
 
 _LOOP_LOG = logging.getLogger("clockwork.acq.loop")
 """The loop's own logger, for the one line the owner adds to a run's events: why it
@@ -293,6 +298,12 @@ class LocalOwner:
         transcript question and never a send-log one.**"""
 
         self._last_run: Run | None = None
+
+        self._records = RecordKeeper()
+        """Enters each file a request's job writes, and the note a failure or a stopped
+        series leaves, into that request's run record (`keeper`, lab record, task 164)."""
+        self._point: PointStarted | None = None
+        """The series point under way, for the note a failure leaves in its record."""
 
         self._ids = itertools.count(1)
         self._issued = 0
@@ -457,6 +468,7 @@ class LocalOwner:
                     continue
                 self._running = self._current = handle
                 self._kept = ""
+                self._point = None
                 self._report(JobStarted(handle=handle, job=job))
                 try:
                     result = self._do(job)
@@ -467,12 +479,35 @@ class LocalOwner:
                     message = sentence(exc)
                     if self._kept:
                         message = f"{message.rstrip('.')}. Files kept in {self._kept}"
+                    self._record_end(handle, job, failed=message)
                     self._report(JobFailed(handle=handle, job=job, message=message))
                 else:
                     self._running = None
+                    self._record_end(handle, job, result=result)
                     self._report(JobFinished(handle=handle, job=job, result=result))
         finally:
+            self._records.close(RECORD_DRAIN_S)
             self._close_everything()
+
+    def _record_end(self, handle: Handle, job: Job, *, failed: str = "",
+                    result: object = None) -> None:
+        """The note a failed job or a stopped series leaves in its request's run record,
+        then every entry still being written: before the end is reported, so that a
+        client waiting for the end reads a whole record."""
+        if not isinstance(job, (Acquire, SeriesJob)) or not job.series:
+            return
+        directory = job.directory or os.getcwd()
+        if failed:
+            point = self._point
+            where = (f" at planned point {point.index}, point {point.number} of "
+                     f"{point.points} as acquired" if point is not None else "")
+            self._records.note(directory, job.series,
+                               f"job {handle.id} failed{where}: {failed}")
+        elif isinstance(result, SeriesResult) and result.stopped:
+            self._records.note(directory, job.series, (
+                f"series job {handle.id} stopped after {result.points_done} of "
+                f"{result.points} points, {len(result.runs)} files: {result.stopped}"))
+        self._records.drain(RECORD_DRAIN_S)
 
     def _do(self, job: Job) -> object:
         if self._lock is not None:
@@ -985,6 +1020,7 @@ class LocalOwner:
                     runs.append(run)
                     self._last_run = run
                     self._report(RunDone(run=run))
+                    self._records.enter(directory, job.series, run)
                     if run.stopped_early or self._stop.is_set():
                         if index + 1 < job.replicates:
                             self._say(
@@ -1032,10 +1068,11 @@ class LocalOwner:
             method = _needs_method(point.method)
             sends = sent is None or self._armed is None or not matches_wire(
                 self._armed.fingerprint, method)
-            self._report(PointStarted(
+            self._point = PointStarted(
                 index=point.index, position=position, number=number,
                 points=len(job.points), knobs=dict(point.knobs),
-                replicates=point.replicates, reference=point.reference, sends=sends))
+                replicates=point.replicates, reference=point.reference, sends=sends)
+            self._report(self._point)
             stem = ""
             if sends:
                 stem = next_stem(directory, job.initials)

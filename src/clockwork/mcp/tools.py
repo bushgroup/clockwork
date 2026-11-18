@@ -26,9 +26,10 @@ not declare before the `Send` job exists, and `acquire` repeats it against what 
 `arm`'s send read back, declared values included (lab record, task 71).
 
 **Every request leaves a run record** (`clockwork.record`) beside its files: `arm` opens
-it with the request, the plan and the arming, `acquire` adds the acquisition, a thread
-per acquisition adds each file with its summary as the owner reports it, and `note` adds
-the session's notes.
+it with the request, the plan and the arming, `acquire` adds the acquisition, the owner
+adds each file with its summary as it writes it (`clockwork.owner.keeper`, lab record,
+task 164), and `note` adds the session's notes. Its `source` is this toolbox's route,
+`mcp` or `cli` (`Toolbox.route`).
 
 **A request is the unit of work.** Every `arm` and `acquire` carries the words of the
 person it is for; the first use of a set of words mints a request id, which every run
@@ -48,6 +49,7 @@ Qt-free, under the seam with the three lower layers.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import datetime as _dt
 import glob
@@ -111,6 +113,7 @@ from ..owner import (
     sentence,
     wire_fingerprint,
 )
+from ..owner.keeper import stem_of
 from ..owner.remote import DaemonError
 from ..owner.wire import TYPE_KEY, to_wire
 from ..record import RECORD_SUFFIX, VERDICTS, RunRecord, brief, find_for_stem, newest_verdict
@@ -270,8 +273,6 @@ class Toolbox:
         """Request id to the place its next run takes, counted from 1."""
         self._planned: dict[int, int] = {}
         """Job number to the replicates it was asked for, for `progress`'s position."""
-        self._recorders: dict[int, threading.Thread] = {}
-        """Job number to the thread adding its files to its request's run record."""
 
     # -- the one way in ----------------------------------------------------------
 
@@ -606,7 +607,7 @@ class Toolbox:
         identity, words = self._request(request, request_id)
         stem = next_stem(self.output, who)
         record = RunRecord.open(self.output, stem, request_id=identity, text=words,
-                                initials=who)
+                                initials=who, source=self.route)
         if plan.strip():
             record.append("plans", {"text": plan.strip()})
         event, handle = self._run(Send(
@@ -697,20 +698,18 @@ class Toolbox:
             template=rendered.template_text if rendered is not None else "",
             knobs=dict(rendered.knobs) if rendered is not None else {},
             labels=dict(rendered.labels) if rendered is not None else {})
-        handle = self._submit(job)
+        # Opened before the job is queued: the owner enters each file in it as the file
+        # is written, which may be before `submit` has returned here.
+        record = RunRecord.open(self.output, stem or next_stem(self.output, who),
+                                request_id=identity, text=words, initials=who,
+                                source=self.route)
+        handle = self._submit_recorded(job, record)
         with self._guard:
             self._planned[handle.id] = replicates
-        record = RunRecord.open(self.output, stem or next_stem(self.output, who),
-                                request_id=identity, text=words, initials=who)
         record.append("acquisitions", {
             "job": handle.id, "replicates": replicates, "first_place": place,
             "method": loaded.metadata.name,
             "template": _template_entry(rendered, path), "cold_start": cautioned})
-        recorder = threading.Thread(target=self._record_runs, args=(handle, record),
-                                    name=f"run record, job {handle.id}", daemon=True)
-        with self._guard:
-            self._recorders[handle.id] = recorder
-        recorder.start()
         return {"job": handle.id, "request_id": identity, "first_place": place,
                 "replicates": replicates, "label": handle.label,
                 "cold_start": cautioned, "record": record.path,
@@ -831,11 +830,12 @@ class Toolbox:
             method_path=template_path, template=template.text,
             labels=dict(planned.labels),
             cold_start=mode)
-        handle = self._submit(job)
+        record = RunRecord.open(self.output, next_stem(self.output, who),
+                                request_id=identity, text=words, initials=who,
+                                source=self.route)
+        handle = self._submit_recorded(job, record)
         with self._guard:
             self._planned[handle.id] = count
-        record = RunRecord.open(self.output, next_stem(self.output, who),
-                                request_id=identity, text=words, initials=who)
         order = [offset + point.index for point in executed]
         record.append("plans", {
             "text": planned.description, "job": handle.id, "plan": planned.text,
@@ -849,11 +849,6 @@ class Toolbox:
             "job": handle.id, "series": True, "replicates": planned.replicates,
             "first_place": place, "points": len(points), "method": template.name,
             "cold_start": cautioned})
-        recorder = threading.Thread(target=self._record_runs, args=(handle, record),
-                                    name=f"run record, job {handle.id}", daemon=True)
-        with self._guard:
-            self._recorders[handle.id] = recorder
-        recorder.start()
         return {"job": handle.id, "request_id": identity, "label": handle.label,
                 "seed": seed, "order": order, "first_place": place,
                 "acquisitions": spent, "files": count, "points": len(points),
@@ -896,14 +891,10 @@ class Toolbox:
                         if isinstance(entry.event, JobStarted)), None)
         with self._guard:
             planned = self._planned.get(job)
-            recorded = job in self._recorders
         if planned is None and isinstance(started, Acquire):
             planned = started.replicates
         if planned is None and isinstance(started, SeriesJob):
             planned = sum(point.replicates for point in started.points)
-        if not recorded and isinstance(started, (Acquire, SeriesJob)):
-            self._record_seen(started, [entry.event.run for entry in entries
-                                        if isinstance(entry.event, RunDone)])
         answer: dict[str, Any] = {
             "job": job, "label": handle.label,
             "events": [_entry(entry) for entry in shown],
@@ -1057,7 +1048,7 @@ class Toolbox:
             words_asked = self.log.requests().get(identity, "") if identity else ""
             record = RunRecord.open(directory, stem, request_id=identity or f"verdict-{stem}",
                                     text=words_asked or UNREQUESTED,
-                                    source="agent" if identity else "window",
+                                    source=self.route if identity else "window",
                                     initials=who)
             record.add_file(_found_file(stem, files))
         else:
@@ -1745,63 +1736,6 @@ class Toolbox:
                 f"{handle.id}), so nothing was sent; call status to see what is running")
         return tuple(state for state in states.values() if isinstance(state, BoxState))
 
-    def recorder(self, job: int) -> threading.Thread | None:
-        """The thread adding job `job`'s files to its run record, if this toolbox
-        started the job: what a process that must not exit before the record is whole
-        -- a command line's `acquire` -- joins."""
-        with self._guard:
-            return self._recorders.get(job)
-
-    def _record_seen(self, job: Acquire | SeriesJob, runs: list[Run]) -> None:
-        """Add files a `progress` call saw to their request's run record, for a job
-        another process started and so no thread here is recording: an `acquire` verb
-        run with `--no-wait`, followed later. Replaces by stem, so a file seen twice is
-        entered once; never raises."""
-        if not runs or not job.series:
-            return
-        try:
-            found = find_record(job.directory or self.output, job.series)
-            if found is None:
-                return
-            record = RunRecord(found)
-            for run in runs:
-                record.add_file(_file_entry(run))
-        except Exception:  # noqa: BLE001 -- the record is the run's, never the answer's
-            return
-
-    def _record_runs(self, handle: Handle, record: RunRecord) -> None:
-        """Add each file an acquisition writes to its request's record, as the owner
-        reports it, until the job ends. On a thread of its own; a record it cannot
-        write is not a reason to disturb the run."""
-        seen = 0
-        point: PointStarted | None = None
-        try:
-            while True:
-                entries = self._wait(handle, seen, 30.0)
-                for entry in entries:
-                    seen = entry.seq
-                    event = entry.event
-                    if isinstance(event, PointStarted):
-                        point = event
-                    elif isinstance(event, RunDone):
-                        record.add_file(_file_entry(event.run))
-                    elif isinstance(event, JobFailed):
-                        where = (f" at planned point {point.index}, point {point.number} of "
-                                 f"{point.points} as acquired" if point is not None else "")
-                        record.append("notes", {"text": f"job {handle.id} failed{where}: "
-                                                        f"{event.message}", "by": "server"})
-                        return
-                    elif isinstance(event, JobFinished):
-                        result = event.result
-                        if isinstance(result, SeriesResult) and result.stopped:
-                            record.append("notes", {"text": (
-                                f"series job {handle.id} stopped after {result.points_done} "
-                                f"of {result.points} points, {len(result.runs)} files: "
-                                f"{result.stopped}"), "by": "server"})
-                        return
-        except Exception:  # noqa: BLE001 -- the record is the run's, never its end
-            return
-
     @staticmethod
     def _initials(initials: str) -> str:
         cleaned = clean_initials(initials)
@@ -1880,6 +1814,24 @@ class Toolbox:
         with self._guard:
             self._handles.setdefault(found.id, found)
         return found
+
+    @property
+    def route(self) -> str:
+        """The route this toolbox's requests come by, as a run record's `source` says it:
+        its audit log's `via`, `mcp` or `cli`; `mcp` for a toolbox whose log names none,
+        which is `build_server`'s in a test."""
+        return self.log.via if self.log.via in ("mcp", "cli") else "mcp"
+
+    def _submit_recorded(self, job: object, record: RunRecord) -> Handle:
+        """`_submit`, for a job whose request's record is already open: a job the owner
+        refuses to queue leaves a note there saying so, then the refusal is raised."""
+        try:
+            return self._submit(job)
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                record.append("notes", {"text": f"the job was not queued: {exc}",
+                                        "by": "server"})
+            raise
 
     def _submit(self, job: object) -> Handle:
         handle = self.owner.submit(job)  # type: ignore[attr-defined]
@@ -2094,7 +2046,8 @@ class Toolbox:
         judged = routine_module.judge(loaded, [audited])
         identity, words = self._request(words, "")
         record = RunRecord.open(self.output, next_stem(self.output, who),
-                                request_id=identity, text=words, initials=who)
+                                request_id=identity, text=words, initials=who,
+                                source=self.route)
         return self._routine_report(loaded, judged, record, identity, files=[],
                                     extra={"audit": audited,
                                            "read_back": "\n".join(state.render()
@@ -2139,9 +2092,6 @@ class Toolbox:
                                   f"the acquisition was refused: {exc}")
         job = int(started["job"])
         ended = self._await(self._known(job), ROUTINE_WAIT_S)
-        recorder = self.recorder(job)
-        if recorder is not None:
-            recorder.join(60.0)
         if ended is None:
             return self._unjudged(loaded, who, words, identity,
                                   f"the acquisition had not finished within "
@@ -2151,7 +2101,7 @@ class Toolbox:
             return self._unjudged(loaded, who, words, identity,
                                   f"the acquisition failed: {ended.message}", job=job)
         runs = [run for run in (ended.result or []) if isinstance(run, Run)]
-        files = [{"stem": _stem_of(run), "raw_path": run.raw_path,
+        files = [{"stem": stem_of(run), "raw_path": run.raw_path,
                   "summed_path": run.summed_path, "complete": run.complete}
                  for run in runs]
         if len(runs) != spec.replicates or not all(run.complete for run in runs):
@@ -2164,7 +2114,7 @@ class Toolbox:
             loaded, routine_module.measure(loaded, files),
             last=routine_module.last_passing(self.output, loaded.name, before=identity))
         record = RunRecord.open(self.output, files[0]["stem"], request_id=identity,
-                                text=words, initials=who)
+                                text=words, initials=who, source=self.route)
         return self._routine_report(loaded, judged, record, identity, files=files, job=job)
 
     def _await(self, handle: Handle, timeout: float) -> JobFinished | JobFailed | None:
@@ -2187,7 +2137,8 @@ class Toolbox:
         if not identity:
             identity, words = self._request(words, "")
         record = RunRecord.open(self.output, next_stem(self.output, who),
-                                request_id=identity, text=words, initials=who)
+                                request_id=identity, text=words, initials=who,
+                                source=self.route)
         judged = {"verdict": "could not judge", "reason": reason, "criteria": [],
                   "values": {}}
         return self._routine_report(loaded, judged, record, identity, files=files or [],
@@ -2304,30 +2255,6 @@ def _template_entry(rendered: Rendered | None, path: str) -> dict | None:
             "labels": dict(rendered.labels)}
 
 
-def _stem_of(run: Run) -> str:
-    """A run's stem, off its raw file's name, or its summed file's."""
-    stem = os.path.basename(run.raw_path or run.summed_path or "")
-    for suffix in (SUMMED_SUFFIX, RAW_SUFFIX):
-        if stem.endswith(suffix):
-            return stem[: -len(suffix)]
-    return stem
-
-
-def _file_entry(run: Run) -> dict:
-    """One finished run as its request's record keeps it, with its file's summary: the
-    summed file's, or the raw file's for a run that never folded and so wrote none."""
-    path = next((candidate for candidate in (run.summed_path, run.raw_path)
-                 if candidate and os.path.isfile(candidate)), "")
-    try:
-        numbers: dict[str, Any] = brief(summary.summarize(path)) if path else {}
-    except Exception as exc:  # noqa: BLE001 -- the record says why, never raises
-        numbers = {"problem": sentence(exc)}
-    return {"stem": _stem_of(run), "raw": run.raw_path, "summed": run.summed_path,
-            "complete": run.complete, "stopped_early": run.stopped_early,
-            "replicate": run.replicate, "seconds": round(run.seconds, 2),
-            "summary": numbers}
-
-
 def _run_files(path: str) -> tuple[str, str, list[str]]:
     """The directory, stem and files on disk of the run `path` names: either of its
     files or its stem. The summed file first, where there is one."""
@@ -2344,7 +2271,7 @@ def _run_files(path: str) -> tuple[str, str, list[str]]:
 
 def _found_file(stem: str, files: list[str]) -> dict:
     """A run's entry in a record begun after it was acquired: its files and the summary
-    of the first, as `_file_entry` keeps one for a run the server saw."""
+    of the first, as the owner's `file_entry` keeps one for a run it wrote."""
     summed = next((file for file in files if file.endswith(SUMMED_SUFFIX)), None)
     raw = next((file for file in files if not file.endswith(SUMMED_SUFFIX)), None)
     try:

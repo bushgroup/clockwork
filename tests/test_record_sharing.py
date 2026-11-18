@@ -28,7 +28,7 @@ STEM = "261114_SC_001"
 
 @pytest.fixture
 def kept(tmp_path) -> RunRecord:
-    return RunRecord.open(str(tmp_path), STEM, request_id="req-1", text="one run")
+    return RunRecord.open(str(tmp_path), STEM, request_id="req-1", text="one run", source="mcp")
 
 
 def refused(times: int, real):
@@ -101,7 +101,7 @@ def test_the_manifest_finds_the_record_while_it_is_being_rewritten(tmp_path):
     # record while the session reads the manifest. Before the fix, rows came back with
     # no record a few times in a hundred.
     write(tmp_path / f"{STEM}.summed.uimf", series=Series("req-1", index=1, position=1))
-    kept = RunRecord.open(str(tmp_path), STEM, request_id="req-1", text="one run")
+    kept = RunRecord.open(str(tmp_path), STEM, request_id="req-1", text="one run", source="mcp")
     kept.add_verdict(STEM, "worked", "sc")
     stop = threading.Event()
 

@@ -649,3 +649,77 @@ def test_a_window_refused_the_lock_says_who_holds_it_and_greys_the_hardware(
     finally:
         window.worker.shutdown()
         window.worker.wait(10_000)
+
+
+# --- the run record, entered by the owner (lab record, task 164) ---------------------
+
+
+def test_the_owner_enters_each_file_in_its_requests_record_with_no_client_following(
+        tmp_path):
+    """A request's files used to be entered by a thread in the process that issued it,
+    and were lost when that process ended first. The owner enters them now, before it
+    reports the job's end; nothing here follows the job but `ended`."""
+    from clockwork.record import RunRecord, find
+    from test_daemon import make_instrument, make_method
+
+    owner = _acquiring_owner(tmp_path)
+    try:
+        method = make_method()
+        sent = owner.submit(Send(method=method, directory=str(tmp_path),
+                                 stem="260925_ZZ_001"))
+        assert isinstance(ended(owner, sent), JobFinished)
+        record = RunRecord.open(str(tmp_path), "260925_ZZ_001", request_id="req-1",
+                                text="two runs", source="cli")
+        handle = owner.submit(Acquire(method=method, instrument=make_instrument(),
+                                      directory=str(tmp_path), stem="260925_ZZ_001",
+                                      replicates=2, series="req-1", initials="ZZ"))
+        finished = ended(owner, handle, timeout=120)
+        assert isinstance(finished, JobFinished), finished
+        files = record.read()["files"]
+        assert [entry["stem"] for entry in files] == [
+            os.path.basename(run.raw_path).removesuffix(".uimf") for run in finished.result]
+        assert all(entry["complete"] and entry["summary"]["frames"] for entry in files)
+        assert record.read()["request"]["source"] == "cli"
+
+        # A request with no record in the folder (a bench script's) gains none.
+        other = owner.submit(Acquire(method=method, instrument=make_instrument(),
+                                     directory=str(tmp_path), series="req-none",
+                                     initials="ZZ", replicate_only=True))
+        assert isinstance(ended(owner, other, timeout=120), JobFinished)
+        assert find(str(tmp_path), "req-none") is None
+    finally:
+        owner.shutdown()
+        assert owner.join(30)
+
+
+def test_a_failed_job_leaves_its_note_in_its_requests_record(tmp_path):
+    from clockwork.record import RunRecord
+    from test_acq_loop import UnpluggedBox
+    from test_daemon import BOX, make_instrument, make_method
+
+    pulled = UnpluggedBox()
+
+    def pull_after_the_first(handle: Handle, event: Event) -> None:
+        if isinstance(event, FrameEnded) and event.record.repetition == 1:
+            pulled.pulled = True
+
+    owner = _acquiring_owner(tmp_path, on_event=pull_after_the_first)
+    try:
+        owner.boxes[BOX] = Box(transport=pulled, name=BOX)
+        method = make_method(accumulations=3)
+        sent = owner.submit(Send(method=method, directory=str(tmp_path),
+                                 stem="260925_ZZ_001"))
+        assert isinstance(ended(owner, sent), JobFinished)
+        record = RunRecord.open(str(tmp_path), "260925_ZZ_001", request_id="req-2",
+                                text="runs that fail", source="mcp")
+        handle = owner.submit(Acquire(method=method, instrument=make_instrument(),
+                                      directory=str(tmp_path), stem="260925_ZZ_001",
+                                      replicates=2, series="req-2"))
+        failed = ended(owner, handle, timeout=120)
+        assert isinstance(failed, JobFailed), failed
+        [note] = record.read()["notes"]
+        assert note["by"] == "server"
+        assert note["text"] == f"job {handle.id} failed: {failed.message}"
+    finally:
+        owner.shutdown()
+        assert owner.join(30)

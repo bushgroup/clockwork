@@ -95,18 +95,18 @@ agent's.
 
 To acquire from a shell, run `acquire` and let it finish. It prints its answer, the job number,
 the request id and the run record's path, at once, then stays until the run ends, writing each
-event's line to standard error and entering each file in the run record as it is written. It
-exits 0 when the run is done and 1 if the job failed.
+event's line to standard error. It exits 0 when the run is done and 1 if the job failed.
 
-`acquire --no-wait` answers at once instead, for a script that starts an acquisition and follows
-it separately. `progress --job N --follow` follows a job from any process, the one that started
-it or not: it writes one compact JSON line per event as the events arrive and a last line with
-the answer, which lists the files the run wrote under `runs`. A follower also enters each file it
-sees in the run record, so a run started with `--no-wait` and followed to its end leaves the same
-record as one that waited. Note that a run started with `--no-wait` and never followed has files
-that stamp their request but a run record that lists none of them. `progress --job N` without
-`--follow` answers once, after waiting up to `--wait-s` seconds for news, exactly as the tool
-does.
+The daemon enters each file in the run record as it writes it, and finishes the record before it
+reports the job's end. The record therefore lists every file of the request whatever happens to
+the process that issued it: a verb killed part way through a run, `acquire --no-wait`, and an MCP
+session restarted while its series runs all leave the same record as a run that was waited for.
+
+`acquire --no-wait` answers at once, for a script that starts an acquisition and follows it
+separately. `progress --job N --follow` follows a job from any process, the one that started it or
+not: it writes one compact JSON line per event as the events arrive and a last line with the
+answer, which lists the files the run wrote under `runs`. `progress --job N` without `--follow`
+answers once, after waiting up to `--wait-s` seconds for news, exactly as the tool does.
 
 ## A request from a shell
 

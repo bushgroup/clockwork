@@ -280,7 +280,6 @@ def test_a_grid_over_the_count_acquires_each_point_at_its_own_and_every_file_rep
         counts.append((stamps["ClockworkSeriesIndex"], knobs["repetitions"]))
     assert sorted(counts) == [(1, 1), (2, 3)]
 
-    toolbox.recorder(started["job"]).join(60)
     [plan] = record_of(started["record"])["plans"]
     assert [(point["index"], point["repetitions"]) for point in plan["points"]] == [
         (1, 1), (2, 3)]
@@ -394,7 +393,6 @@ def test_every_file_of_a_shuffled_series_says_where_it_sat_and_what_shuffled_it(
     assert [entry["ClockworkKnobBTicks"] for entry in stamps] == [
         knobs[entry["ClockworkSeriesIndex"]] for entry in stamps]
 
-    toolbox.recorder(started["job"]).join(60)
     record = record_of(started["record"])
     [plan] = record["plans"]
     assert (plan["seed"], plan["order"], plan["files"]) == (12345, expected, 10)
@@ -462,7 +460,6 @@ def test_a_stop_ends_the_series_and_the_record_says_where(fake_owner, library,  
     positions = [entry["ClockworkSeriesPosition"] for entry in summed_stamps(output)]
     assert positions == list(range(1, len(positions) + 1))
 
-    toolbox.recorder(started["job"]).join(60)
     notes = [note["text"] for note in record_of(started["record"])["notes"]]
     assert any(note.startswith(f"series job {started['job']} stopped after "
                                f"{result['points_done']} of 6 points") for note in notes), notes

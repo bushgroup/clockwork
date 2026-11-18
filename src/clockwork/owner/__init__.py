@@ -9,6 +9,8 @@ it never imports Qt (enforced by `tests/test_architecture.py` and
                   events that say what a job did outside the loop
     jobs.py       the jobs that go in and the results that come back
     local.py      `LocalOwner`: the queue, the thread, every wire call, in this process
+    keeper.py     `RecordKeeper`: each file a request's job writes, entered in its run
+                  record by the owner that wrote it
     lock.py       the instrument lock: one owner per user, refused before any port
     wire.py       every job, event and result to and from JSON-ready data
     remote.py     `DaemonServer`, an owner behind two loopback ZeroMQ sockets, and

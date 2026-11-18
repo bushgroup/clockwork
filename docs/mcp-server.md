@@ -320,7 +320,9 @@ Every request leaves `<stem>.request.json` beside its files, named after the req
 file: the request in the person's words, the `plan` passed to `arm` or a series' plan with its
 seed and order, each arming with the
 template's hash and knob values, each acquisition, each file with a summary of its numbers, and
-the notes added with `note`, and the verdicts given with `verdict`. The server writes it and
+the notes added with `note`, and the verdicts given with `verdict`. Its `source` is `mcp` for a
+request made through these tools, `cli` for one made through `clockwork-cli`, and `window` for a run
+acquired at the window. The server writes it, the daemon enters each file as it writes it, and
 nothing edits it by hand; [the standing limits](instrument-limits.md#the-run-record) describe it in
 full. `list_files` names each run's record.
 

@@ -350,19 +350,28 @@ def test_a_request_from_the_shell_one_verb_per_process(shell, library, tmp_path)
     assert {line["tool"] for line in logged} >= {entry.name for entry in TOOLS}
 
 
-def test_acquire_no_wait_answers_at_once_and_a_later_follower_fills_the_record(shell):
+def test_acquire_no_wait_answers_at_once_and_the_daemon_fills_the_record(shell):
+    """The verb's process is gone the moment it answers, and nothing follows the job but
+    a bare owner client waiting for its end, which writes nothing: every file is in the
+    record all the same, because the daemon entered it (lab record, task 164)."""
     chosen = ("--template", "line-b.toml", "--labels", f"sample={LABELS['sample']}",
               "--request", REQUEST, "--initials", "zz")
     shell.json("discover-boxes", "--template", "line-b.toml",
                "--labels", f"sample={LABELS['sample']}")
     armed = shell.json("arm", *chosen)
     started = shell.json("acquire", *chosen, "--no-wait", "--replicates", "2")
-    code, out, err = shell("progress", "--job", str(started["job"]), "--follow")
-    assert code == 0, err
-    assert json.loads(out.splitlines()[-1])["position"]["files_done"] == 2
+    client = RemoteOwner(shell.endpoint, timeout=10)
+    try:
+        deadline = time.monotonic() + 120
+        while (now := client.status()).running is not None or now.queued:
+            assert time.monotonic() < deadline, "the job never ended"
+            time.sleep(0.2)
+    finally:
+        client.close()
     with open(started["record"], encoding="utf-8") as handle:
         record = json.load(handle)
     assert len(record["files"]) == 2 and record["files"][0]["stem"] == armed["stem"]
+    assert record["request"]["source"] == "cli"
 
 
 # --- exit codes ---------------------------------------------------------------------

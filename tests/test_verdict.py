@@ -31,7 +31,7 @@ def day(tmp_path):
     write(folder / "260927_AB_002.uimf", series=Series("req-2", index=1, position=1))
     write(folder / "260927_CD_003.uimf", rendered=False)
     record = RunRecord.open(str(folder), "260927_AB_001", request_id="req-1",
-                            text="pulse at 3 ms")
+                            text="pulse at 3 ms", source="mcp")
     record.add_file({"stem": "260927_AB_001"})
     return folder
 
@@ -96,7 +96,8 @@ def test_a_word_outside_the_vocabulary_and_other_without_words_are_refused(day):
 
 def test_a_run_its_requests_record_does_not_hold_yet_is_refused(day):
     # The request's record, begun at another stem, before this run's file entry is in it.
-    RunRecord.open(str(day), "260927_AB_000", request_id="req-2", text="pulse at 5 ms")
+    RunRecord.open(str(day), "260927_AB_000", request_id="req-2", text="pulse at 5 ms",
+                   source="mcp")
     with pytest.raises(ToolFailure, match="holds no file of 260927_AB_002; a verdict waits"):
         toolbox(day).call("verdict", {"path": "260927_AB_002", "verdict": "worked",
                                       "initials": "AB"})
@@ -131,7 +132,7 @@ def test_a_stamped_run_whose_record_is_missing_gets_one_under_its_request(day):
                                           "initials": "AB"})
     assert given["begun"]
     data = RunRecord(given["record"]).read()
-    assert data["request"]["id"] == "req-2" and data["request"]["source"] == "agent"
+    assert data["request"]["id"] == "req-2" and data["request"]["source"] == "mcp"
     assert find_for_stem(str(day), "260927_AB_002", "req-2") == given["record"]
     assert os.path.basename(find_for_stem(str(day), "260927_AB_002")) == (
         "260927_AB_002.request.json")

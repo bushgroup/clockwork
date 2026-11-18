@@ -14,6 +14,18 @@ appends to it, so one request is one document however many sessions it spans. A 
 started from the window is the same document with `window` as its source (Matt,
 2026-09-24).
 
+**`source` is the route the request came by**: `mcp`, a session's tool call through
+`clockwork-mcp`; `cli`, a verb of `clockwork-cli`, typed by a person or run from an agent's
+shell; `window`, a verdict given at the window on a run that had no request. Records
+written before 1.2.0 say `agent` for both of the first two, undistinguished; a reader
+accepts it (`READ_SOURCES`) and nothing writes it again (Matt, 2026-11-18; lab record,
+task 164). The source is the request's, set when its record is begun: a request continued
+by its id over the other route keeps the first.
+
+The files of a request's job are entered by the owner that wrote them
+(`clockwork.owner.keeper`), so a record stays whole when the process that issued the
+request ends before its job does.
+
 **A verdict is the person's judgement of one file, not the machine's outcome.** The run
 outcome stamped in the file (`completed`, `stopped`, `failed`, `incomplete`) says how the
 acquisition ended; a run that completed with no ions in it is `completed`, and its verdict
@@ -43,9 +55,9 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
-__all__ = ["RECORD_SCHEMA", "RECORD_SUFFIX", "RECORD_TEMPORARY", "SHARING_WAIT_S", "SOURCES",
-           "VERDICTS", "RunRecord", "brief", "find", "find_for_stem", "holds", "load",
-           "newest_verdict", "record_path"]
+__all__ = ["READ_SOURCES", "RECORD_SCHEMA", "RECORD_SUFFIX", "RECORD_TEMPORARY",
+           "SHARING_WAIT_S", "SOURCES", "VERDICTS", "RunRecord", "brief", "find",
+           "find_for_stem", "holds", "load", "newest_verdict", "record_path"]
 
 RECORD_SCHEMA = 1
 RECORD_SUFFIX = ".request.json"
@@ -53,7 +65,11 @@ RECORD_TEMPORARY = RECORD_SUFFIX + ".tmp"
 """The suffix of the file a record is written through before its rename (`_write`). It
 exists for a moment on every change, under the same stem as the record, so whatever
 leaves the record out of a stem's files leaves this out too (`naming.files_of`)."""
-SOURCES = ("agent", "window")
+SOURCES = ("mcp", "cli", "window")
+"""The routes a record is begun under now."""
+READ_SOURCES = (*SOURCES, "agent")
+"""Every `source` a record may carry: `agent` is a record from before 1.2.0, by `mcp` or
+`cli` without saying which."""
 
 SECTIONS = ("plans", "arms", "acquisitions", "files", "notes", "routines", "verdicts")
 
@@ -163,8 +179,9 @@ class RunRecord:
 
     @classmethod
     def open(cls, directory: str, stem: str, *, request_id: str, text: str,
-             source: str = "agent", initials: str = "") -> RunRecord:
-        """The record of `request_id` in `directory`, begun at `stem` if it has none."""
+             source: str, initials: str = "") -> RunRecord:
+        """The record of `request_id` in `directory`, begun at `stem` under the route
+        `source` if it has none; one it already has keeps the source it was begun with."""
         if source not in SOURCES:
             raise ValueError(f"a run record's source is one of {', '.join(SOURCES)}")
         with _GUARD:

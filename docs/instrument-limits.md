@@ -273,8 +273,15 @@ knob value and label, and the cold-start cautions; each acquisition; each file w
 summary of its frames, counts, base peak, pusher period and saturation; the notes the agent
 added with the `note` tool; and each person's verdict on a run given with the `verdict` tool, in
 their words and under their initials. A request continued in a later session by its identifier finds its
-record by that identifier and appends to it. A run started from the window records `window` as its
-source in the same document.
+record by that identifier and appends to it. The files are entered by the daemon that wrote them,
+before it reports the job's end, so the record lists every file even when the session or command
+that issued the request has ended.
+
+The record's `source` says the route the request came by: `mcp` for a session's tool call through
+`clockwork-mcp`, `cli` for a verb of `clockwork-cli`, and `window` for a run acquired at the window,
+whose record its first verdict begins. A request keeps the source its record was begun under. Note
+that records written before clockwork 1.2.0 say `agent` for both `mcp` and `cli`, without saying
+which; the audit log's `via` tells them apart.
 
 The file remains the primary record. Every file stamps its request's identifier, and the run
 record is what joins a request's files and says why each was made.

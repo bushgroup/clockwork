@@ -314,7 +314,8 @@ def test_a_record_being_rewritten_does_not_take_its_stem(tmp_path, monkeypatch):
 
     monkeypatch.setattr(record_module.os, "replace", replace)
     run = record_module.RunRecord.open(str(tmp_path), "261112_UBQ_005", request_id="r1",
-                                       text="a series", initials="UBQ")
+                                       text="a series", initials="UBQ",
+                                       source="mcp")
     run.append("notes", {"text": "while the series starts", "by": "session"})
     assert len(seen) == 2
     for listing, taken in seen:
