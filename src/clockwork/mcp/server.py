@@ -26,7 +26,8 @@ from typing import Any, TextIO
 
 from .. import __version__
 from ..envelope import Limits
-from ..instrument import UNCALIBRATED, Instrument, Vertical
+from ..instrument import UNCALIBRATED, Instrument
+from ..sitting import SIMULATED, instrument_and_limits
 from .audit import AuditLog
 from .tools import TOOLS, Tool, Toolbox, ToolFailure
 
@@ -39,15 +40,6 @@ ORIGIN = "Claude, through clockwork mcp"
 """How this server's jobs are named to the daemon's other clients (`Handle.origin`), so
 that the window can say whose acquisition it is showing. The lab's MCP client is Claude;
 the words would read wrongly for another client, and nothing depends on them."""
-
-SIMULATED = Instrument(
-    name="simulated instrument",
-    description="The stand-in a --fake session acquires under when given no document.",
-    vertical=Vertical(full_scale_v=0.5, offset_v=0.251, inverted=False))
-"""What `--fake` acquires under with no `--instrument`. The loop refuses a document that
-states no channel offset, as the window does, and a rehearsal has no instrument to have
-written one for; this states the lab's full scale and the stand-in console's own
-offset, and names itself so that no file mistakes it for a measurement."""
 
 INSTRUCTIONS = """\
 clockwork controls an ion mobility mass spectrometer: MIPS boxes that apply the
@@ -129,53 +121,6 @@ def fake_output() -> str:
     return os.path.join(base, "clockwork", "fake-runs")
 
 
-def instrument_and_limits(*, fake: bool, instrument_path: str = "", limits_path: str = "",
-                          project_limits_path: str = "") -> tuple[Instrument, Limits | None]:
-    """The instrument document runs are acquired under, and the limits in force.
-
-    `SIMULATED` under `fake` and `UNCALIBRATED` otherwise when no document is named.
-    `limits_path` defaults to the `limits.toml` beside `instrument_path` if there is one;
-    `project_limits_path`, never defaulted, is a project's limits, combined into those
-    (`clockwork.envelope.combine`). `ValueError` with one sentence for a document or
-    limits that were named or found and could not be read, and for a project's limits
-    with no standing limits to narrow: a server that quietly ran without the limits it
-    was pointed at would refuse every send and not say why. Shared by `clockwork mcp`
-    and the verbs."""
-    from .. import envelope
-    from .. import instrument as instrument_module
-
-    instrument = SIMULATED if fake else UNCALIBRATED
-    if instrument_path:
-        try:
-            instrument = instrument_module.load(instrument_path)
-        except (OSError, ValueError) as exc:
-            raise ValueError(f"the instrument document {instrument_path} could not be "
-                             f"read: {exc}") from exc
-    chosen = limits_path or envelope.default_path(instrument_path)
-    if not chosen or not (limits_path or os.path.isfile(chosen)):
-        if project_limits_path:
-            raise ValueError(f"the project's limits {project_limits_path} narrow the "
-                             "instrument's standing limits, and none were found: give "
-                             "--limits, or --instrument with a limits.toml beside it")
-        return instrument, None
-    try:
-        standing = envelope.load(chosen)
-    except (OSError, envelope.LimitsError) as exc:
-        raise ValueError(f"the standing limits {chosen} could not be read: {exc}") from exc
-    if not project_limits_path:
-        return instrument, standing
-    try:
-        project = envelope.load(project_limits_path, project=True)
-    except (OSError, envelope.LimitsError) as exc:
-        raise ValueError(f"the project's limits {project_limits_path} could not be read: "
-                         f"{exc}") from exc
-    try:
-        return instrument, envelope.combine(standing, project)
-    except envelope.LimitsError as exc:
-        raise ValueError(f"the project's limits {project_limits_path} would widen the "
-                         f"standing limits {chosen}: {exc}") from exc
-
-
 def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: str = "",
         instrument_path: str = "", limits_path: str = "", routines: str = "",
         project_limits_path: str = "", stream: TextIO | None = None) -> int:
@@ -189,10 +134,12 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
     where an instrument directory resolves (`clockwork.instrument_dir`) and to
     `fake_output()`. `library` may name several directories (`clockwork.library_dirs`).
     `routines` defaults to the `routines` directory beside the library's first.
-    `instrument_path` defaults, except under `fake` or over a daemon that is itself
-    `--fake`, to the instrument directory's document (`clockwork.instrument_file`), so
-    the limits beside it are in force. A `$CLOCKWORK_INSTRUMENT` that names nothing is
-    said on the line after the first (`clockwork.instrument_unresolved`).
+    `instrument_path`, `limits_path` and `project_limits_path` default to the daemon's
+    own (`hello`, `clockwork.sitting.from_daemon`). An instrument neither named nor the
+    daemon's defaults, except under `fake` or over a daemon that is itself `--fake`, to
+    the instrument directory's document (`clockwork.instrument_file`), so the limits
+    beside it are in force. A `$CLOCKWORK_INSTRUMENT` that names nothing is said on the
+    line after the first (`clockwork.instrument_unresolved`).
 
     `limits_path` is the instrument's standing limits (`clockwork.envelope`), by default
     the `limits.toml` beside `instrument_path` if there is one, and
@@ -207,50 +154,57 @@ def run(*, fake: bool = False, library: str = "", output: str = "", endpoint: st
     from .. import instrument_dir, instrument_file, instrument_unresolved
     from ..owner import LocalOwner, RemoteOwner, StartConsole
     from ..owner.remote import DEFAULT_COMMAND, DaemonError
-
-    # Read before any daemon is asked for, so a document that does not load is the
-    # sentence back; taken back below if the daemon turns out to be a rehearsal's.
-    defaulted = not fake and not instrument_path
-    if defaulted:
-        instrument_path = instrument_file() or ""
-    try:
-        instrument, limits = instrument_and_limits(
-            fake=fake, instrument_path=instrument_path, limits_path=limits_path,
-            project_limits_path=project_limits_path)
-    except ValueError as exc:
-        print(f"{PROGRAM}: {exc}", file=say)
-        return 1
+    from ..sitting import from_daemon
 
     simulated = fake
     if fake:
+        try:
+            instrument, limits = instrument_and_limits(
+                fake=True, instrument_path=instrument_path, limits_path=limits_path,
+                project_limits_path=project_limits_path)
+        except ValueError as exc:
+            print(f"{PROGRAM}: {exc}", file=say)
+            return 1
         owner: object = LocalOwner(fake=True, program=f"{PROGRAM} --fake").start()
+        owner.limits = limits  # type: ignore[attr-defined]
         owner.submit(StartConsole(label="starting the simulated console"))  # type: ignore[attr-defined]
         named_library = bool(library)
         library = library or instrument_dir("golden") or ""
         output = output or fake_output()
     else:
+        # Read before any daemon is asked for, as it always was: with no daemon to name
+        # a sitting, a document of this server's own or the default that does not load
+        # is the sentence back, rather than the daemon's absence. A daemon that answers
+        # then decides which documents are loaded, below.
+        early: ValueError | None = None
+        try:
+            instrument_and_limits(
+                fake=False, instrument_path=instrument_path or instrument_file() or "",
+                limits_path=limits_path, project_limits_path=project_limits_path)
+        except ValueError as exc:
+            early = exc
         owner = RemoteOwner(endpoint or DEFAULT_COMMAND, origin=ORIGIN)
         try:
             hello = owner.hello()  # type: ignore[attr-defined]
         except DaemonError as exc:
-            print(f"{PROGRAM}: {exc}", file=say)
+            print(f"{PROGRAM}: {early or exc}", file=say)
             owner.close()  # type: ignore[attr-defined]
             return 1
         simulated = bool(hello.fake)
-        if simulated and defaulted and instrument_path:
-            # `clockwork serve --fake` behind this server: its simulated boxes never run
-            # under the instrument's own document, as a verb's never do. Limits named
-            # with --limits stay, since a rehearsal of the limits is what naming them
-            # asks for.
-            instrument_path = ""
-            try:
-                instrument, limits = instrument_and_limits(
-                    fake=True, instrument_path="", limits_path=limits_path,
-                    project_limits_path=project_limits_path)
-            except ValueError as exc:
-                print(f"{PROGRAM}: {exc}", file=say)
-                owner.close()  # type: ignore[attr-defined]
-                return 1
+        # The daemon's sitting where this server names none of its own (lab record,
+        # task 165): every client of one daemon enforces one set of limits. Over
+        # `clockwork serve --fake` the instrument's own document is never defaulted.
+        instrument_path, limits_path, project_limits_path, _ = from_daemon(
+            hello, instrument_path=instrument_path, limits_path=limits_path,
+            project_limits_path=project_limits_path, default_instrument=instrument_file)
+        try:
+            instrument, limits = instrument_and_limits(
+                fake=simulated, instrument_path=instrument_path, limits_path=limits_path,
+                project_limits_path=project_limits_path)
+        except ValueError as exc:
+            print(f"{PROGRAM}: {exc}", file=say)
+            owner.close()  # type: ignore[attr-defined]
+            return 1
         named_library = bool(library or hello.library)
         library = library or hello.library
         output = output or hello.output or os.getcwd()

@@ -20,7 +20,8 @@ __all__ = ["APPLICATION", "KEYS", "ORGANISATION", "saved_settings"]
 ORGANISATION = "BushLab"
 APPLICATION = "clockwork"
 
-KEYS = ("library_dir", "instrument_path", "output_dir", "console_path")
+KEYS = ("library_dir", "instrument_path", "output_dir", "console_path", "limits_path",
+        "project_limits_path")
 """The settings a verb that starts a daemon or reads an instrument document needs."""
 
 

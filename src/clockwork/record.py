@@ -14,17 +14,26 @@ appends to it, so one request is one document however many sessions it spans. A 
 started from the window is the same document with `window` as its source (Matt,
 2026-09-24).
 
+**The format is `docs/run-record.md`**, which a reader outside clockwork writes against;
+this module follows it, and a change is made there first (lab record, task 165).
+
 **`source` is the route the request came by**: `mcp`, a session's tool call through
 `clockwork-mcp`; `cli`, a verb of `clockwork-cli`, typed by a person or run from an agent's
-shell; `window`, a verdict given at the window on a run that had no request. Records
-written before 1.2.0 say `agent` for both of the first two, undistinguished; a reader
-accepts it (`READ_SOURCES`) and nothing writes it again (Matt, 2026-11-18; lab record,
-task 164). The source is the request's, set when its record is begun: a request continued
-by its id over the other route keeps the first.
+shell; `window`, a run a person started at the window, whose record the owner begins when
+its job starts (`clockwork.owner.keeper.begin`), and before 1.2.0 a verdict given on a
+window run that had no record. Records written before 1.2.0 say `agent` for both of the
+first two, undistinguished; a reader accepts it (`READ_SOURCES`) and nothing writes it
+again (Matt, 2026-11-18; lab record, task 164). The source is the request's, set when its
+record is begun: a request continued by its id over the other route keeps the first.
 
 The files of a request's job are entered by the owner that wrote them
 (`clockwork.owner.keeper`), so a record stays whole when the process that issued the
 request ends before its job does.
+
+**`interventions` is begun by its first entry** (`LATER_SECTIONS`): a person's pause,
+resume, stop or guard change on a running job (lab record, tasks 165 and 167). A record
+with none has no such key, so an `mcp` or `cli` record is byte for byte what it was before
+the section existed, and `record_schema` stays 1.
 
 **A verdict is the person's judgement of one file, not the machine's outcome.** The run
 outcome stamped in the file (`completed`, `stopped`, `failed`, `incomplete`) says how the
@@ -48,6 +57,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import glob
+import hashlib
 import json
 import os
 import threading
@@ -55,9 +65,10 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
-__all__ = ["READ_SOURCES", "RECORD_SCHEMA", "RECORD_SUFFIX", "RECORD_TEMPORARY",
-           "SHARING_WAIT_S", "SOURCES", "VERDICTS", "RunRecord", "brief", "find",
-           "find_for_stem", "holds", "load", "newest_verdict", "record_path"]
+__all__ = ["LATER_SECTIONS", "READ_SOURCES", "RECORD_SCHEMA", "RECORD_SUFFIX",
+           "RECORD_TEMPORARY", "SECTIONS", "SHARING_WAIT_S", "SOURCES", "VERDICTS",
+           "RunRecord", "brief", "find", "find_for_stem", "holds", "load", "mint_id",
+           "newest_verdict", "record_path"]
 
 RECORD_SCHEMA = 1
 RECORD_SUFFIX = ".request.json"
@@ -72,6 +83,9 @@ READ_SOURCES = (*SOURCES, "agent")
 `cli` without saying which."""
 
 SECTIONS = ("plans", "arms", "acquisitions", "files", "notes", "routines", "verdicts")
+"""The sections every record is begun with, each an empty list."""
+LATER_SECTIONS = ("interventions",)
+"""Sections a record gains with their first entry, and lacks until then."""
 
 VERDICTS = {
     "worked": "the run gave the data it was taken for",
@@ -110,6 +124,14 @@ def _shared[T](attempt: Callable[[], T]) -> T:
 
 def _now() -> str:
     return _dt.datetime.now().isoformat(timespec="seconds")
+
+
+def mint_id(words: str = "") -> str:
+    """A new request id, `YYMMDD-HHMMSS-xxxxxx`: the time, and six hexadecimal digits of
+    a hash over the time in nanoseconds and the request's words. Every route mints its
+    ids here, so a reader can take the time off any of them."""
+    digest = hashlib.sha256(f"{time.time_ns()}{words}".encode()).hexdigest()[:6]
+    return f"{_dt.datetime.now():%y%m%d-%H%M%S}-{digest}"
 
 
 def record_path(directory: str, stem: str) -> str:
@@ -179,9 +201,11 @@ class RunRecord:
 
     @classmethod
     def open(cls, directory: str, stem: str, *, request_id: str, text: str,
-             source: str, initials: str = "") -> RunRecord:
+             source: str, initials: str = "", at_window: str = "") -> RunRecord:
         """The record of `request_id` in `directory`, begun at `stem` under the route
-        `source` if it has none; one it already has keeps the source it was begun with."""
+        `source` if it has none; one it already has keeps the source it was begun with.
+        `at_window` is the person who pressed Start at the window, for a `window` record
+        alone: the request block of any other carries no such key."""
         if source not in SOURCES:
             raise ValueError(f"a run record's source is one of {', '.join(SOURCES)}")
         with _GUARD:
@@ -193,10 +217,14 @@ class RunRecord:
                 # Another request's, begun at the same stem: never written over.
                 path = record_path(directory, f"{stem}-{request_id}")
             record = cls(path)
+            request: dict[str, object] = {"id": request_id, "text": text, "source": source,
+                                          "initials": initials, "opened": _now(),
+                                          "stem": stem}
+            if source == "window":
+                request["at_window"] = at_window
             record._write({
                 "record_schema": RECORD_SCHEMA,
-                "request": {"id": request_id, "text": text, "source": source,
-                            "initials": initials, "opened": _now(), "stem": stem},
+                "request": request,
                 **{section: [] for section in SECTIONS},
             })
             return record
@@ -205,9 +233,11 @@ class RunRecord:
         return load(self.path)
 
     def append(self, section: str, entry: Mapping[str, object]) -> None:
-        """Add `entry` to `section`, stamped with the time."""
-        if section not in SECTIONS:
-            raise ValueError(f"a run record's sections are {', '.join(SECTIONS)}")
+        """Add `entry` to `section`, stamped with the time; a section of
+        `LATER_SECTIONS` is begun by its first entry."""
+        if section not in SECTIONS + LATER_SECTIONS:
+            raise ValueError("a run record's sections are "
+                             f"{', '.join(SECTIONS + LATER_SECTIONS)}")
         with _GUARD:
             data = self.read()
             data.setdefault(section, []).append({"time": _now(), **entry})

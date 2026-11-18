@@ -428,8 +428,8 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
     from .. import instrument_file, instrument_unresolved
     from ..owner import RemoteOwner
     from ..owner.remote import DEFAULT_COMMAND, DaemonError
+    from ..sitting import from_daemon, instrument_and_limits
     from .audit import AuditLog
-    from .server import instrument_and_limits
 
     saved: dict[str, str] = {}
     if verb.tool.name in SAVED or verb.tool.name in SAVED_INSTRUMENT:
@@ -452,7 +452,10 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
             _, started = connect_or_start(endpoint, serve_command(
                 output=args.output or saved.get("output_dir", ""),
                 library=args.library or saved.get("library_dir", ""),
-                console=args.console or saved.get("console_path", "")),
+                console=args.console or saved.get("console_path", ""),
+                instrument=instrument_path,
+                limits=args.limits or saved.get("limits_path", ""),
+                project_limits=args.project_limits or saved.get("project_limits_path", "")),
                 say=lambda line: _say(err, line))
         except DaemonError as exc:
             _say(err, f"{program}: {exc}")
@@ -470,23 +473,30 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
         except DaemonError as exc:
             _say(err, f"{program}: {exc}")
             return 1
-        defaulted = not instrument_path and not hello.fake
-        if defaulted:
-            # The instrument directory's own document, and so the limits beside it,
-            # unless one was named or saved; never under a rehearsal's simulated boxes.
-            instrument_path = instrument_file() or ""
-            if not instrument_path:
-                # Looked for and not found because the variable names nothing: said
-                # here, since the refusal that follows from it comes much later.
-                unresolved = instrument_unresolved(when_unset=False)
-                if unresolved:
-                    _say(err, f"{program}: {unresolved}")
+        if not args.instrument and hello.instrument:
+            # The daemon's sitting before the window's saved document (lab record,
+            # task 165): every client of one daemon enforces one set of limits.
+            instrument_path = ""
+            if "instrument_path" in took:
+                took.remove("instrument_path")
+        # The instrument directory's own document, and so the limits beside it, where
+        # neither this verb, the daemon nor the window's settings name one; never under
+        # a rehearsal's simulated boxes.
+        instrument_path, limits_path, project_limits_path, defaulted = from_daemon(
+            hello, instrument_path=instrument_path, limits_path=args.limits,
+            project_limits_path=args.project_limits, default_instrument=instrument_file)
+        if not instrument_path and not hello.fake:
+            # Looked for and not found because the variable names nothing: said
+            # here, since the refusal that follows from it comes much later.
+            unresolved = instrument_unresolved(when_unset=False)
+            if unresolved:
+                _say(err, f"{program}: {unresolved}")
         try:
             instrument, limits = instrument_and_limits(
                 fake=bool(hello.fake), instrument_path=instrument_path,
-                limits_path=args.limits, project_limits_path=args.project_limits)
+                limits_path=limits_path, project_limits_path=project_limits_path)
         except ValueError as exc:
-            if instrument_path and not args.instrument and not defaulted:
+            if instrument_path and "instrument_path" in took and not defaulted:
                 # The path was never typed: a trainee reading "could not be read" looks
                 # for a flag they did not give (lab record, task 96).
                 exc = ValueError(f"{exc}. That path is the window's saved instrument "

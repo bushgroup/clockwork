@@ -29,14 +29,17 @@ lines can drive one daemon.
 directories joined by `;` (`:` off Windows), and `--output` is where runs are written and where
 the data tools read by default. Both default to the daemon's own `--library` and `--output`.
 `--instrument` is the instrument document runs are acquired under
-([instrument file](instrument-file-format.md)), by default the one in the
-[instrument directory](#the-instrument-directory); the acquisition loop refuses a document that
+([instrument file](instrument-file-format.md)); the acquisition loop refuses a document that
 states no channel offset, exactly as it does from the window. `--limits` is the instrument's
-[standing limits](instrument-limits.md), by default the `limits.toml` beside the instrument
-document; limits named and not found, or found and not valid, stop the server with the problems
-on standard error. `--project-limits` is a research project's own
+[standing limits](instrument-limits.md), and `--project-limits` is a research project's own
 [limits](instrument-limits.md#a-projects-limits), which admit the project's templates and narrow
-the standing ones, and a project file that would widen them stops the server in the same way.
+the standing ones. All three default to the daemon's sitting, which `clockwork serve` is started
+with and reports in `hello` ([daemon protocol](daemon-protocol.md#starting-it)), so the server
+enforces the limits every other client of that daemon enforces. Where the daemon names no
+instrument document either, it is the one in the [instrument directory](#the-instrument-directory),
+and where the server names its own instrument document, its standing limits are the `limits.toml`
+beside that document. Limits named and not found, found and not valid, or a project file that
+would widen the standing ones stop the server with the problems on standard error.
 `--routines` is the directory of the instrument's [routines](routines.md), by
 default the `routines` directory beside the library's first directory.
 
@@ -322,9 +325,9 @@ seed and order, each arming with the
 template's hash and knob values, each acquisition, each file with a summary of its numbers, and
 the notes added with `note`, and the verdicts given with `verdict`. Its `source` is `mcp` for a
 request made through these tools, `cli` for one made through `clockwork-cli`, and `window` for a run
-acquired at the window. The server writes it, the daemon enters each file as it writes it, and
-nothing edits it by hand; [the standing limits](instrument-limits.md#the-run-record) describe it in
-full. `list_files` names each run's record.
+a person started at the window, whose record the daemon begins when the job starts. The server
+writes it, the daemon enters each file as it writes it, and nothing edits it by hand;
+[the run record](run-record.md) describes it in full. `list_files` names each run's record.
 
 A verdict is a person's judgement of one run, and it is a different thing from the run's outcome.
 The outcome is stamped in the file by the acquisition itself and says how it ended: `completed`,
@@ -344,9 +347,9 @@ can be filtered:
 `initials` are those of the person who gave the verdict, and `words` are theirs too. A verdict
 names a run by either of its files or by its stem, and a run's raw and summed files share one
 verdict. A later verdict on the same run takes the place of the earlier one, and the record keeps
-both with their times. A run the window acquired has no run record, so its first verdict begins one
-with `window` as its source; a run whose request's record does not yet list its file is refused
-until it does.
+both with their times. A run the window acquired before clockwork 1.2.0 has no run record, so its
+first verdict begins one with `window` as its source; a run whose request's record does not yet
+list its file is refused until it does.
 
 ## The manifest
 
@@ -386,7 +389,7 @@ SHA-256 and length rather than quoted, and a result is summarised to its numbers
 of its lists. The files and their logs hold everything else, so a person who was away can read
 what an agent did, and why, from the audit log and the files alone. Only this server and the
 command line write the log: a run started at the window leaves no line in it, and is recorded by
-its files and their logs alone.
+its files, their logs and the run record the daemon begins for it.
 
 The log is kept in segments, so that a folder can be listed and archived while the day goes on.
 `mcp-calls.log` is the live segment, the only one written to. `seal_calls` ends it: its own line
@@ -394,8 +397,10 @@ is written last, and the file is renamed to `mcp-calls.<YYYYMMDD-HHMMSS>.log`, t
 sealing, with `-2`, `-3` and so on added if that name is taken. Nothing writes to a sealed segment
 again, and the next call starts a new live file. A seal with no live file still seals the file its
 own line starts, so when `seal_calls` answers there is never a live file in the folder. The answer
-gives the segment's name, size in bytes and MD5. `stand_down` seals in the same way after its own
-line, and reports the segment under `sealed`. A day's folder is therefore listed by sealing first
+gives the segment's name, size in bytes and MD5. The daemon's
+[day record](run-record.md#the-day-record) in the same folder is sealed with it, and its segment is
+answered under `sealed_day`. `stand_down` seals both in the same way after its own line, and
+reports the segments under `sealed` and `sealed_day`. A day's folder is therefore listed by sealing first
 and listing second; a call made after the listing lands in a new live file that the listing never
 held. On Windows a segment cannot be renamed while another process has it open, so the seal
 retries for a few seconds and then fails with the operating system's error, leaving its own line

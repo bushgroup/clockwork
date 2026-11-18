@@ -433,6 +433,25 @@ def test_a_queue_row_run_through_the_daemon_is_done(
     (row,) = made.queue.rows
     assert row.state == runqueue.DONE, row.outcome
     assert len(row.stems) == 1 and (tmp_path / f"{row.stems[0]}.uimf").is_file()
+    # The daemon began the row's run record, with the person at the window in it
+    # (lab record, task 165).
+    from clockwork.record import load
+    data = load(str(tmp_path / f"{row.stems[0]}.request.json"))
+    assert data["request"]["source"] == "window"
+    assert data["request"]["at_window"] == "ZZ"
+    assert [entry["stem"] for entry in data["files"]] == list(row.stems)
+
+
+def test_a_plain_window_following_a_fake_daemon_says_it_is_simulated(
+        qtbot, scratch_settings, daemon):
+    """A6: a window that is not `--fake` follows a `clockwork serve --fake` as it
+    follows a real daemon, and says, in its title and its run log, that it is not."""
+    made = remote_window(qtbot, daemon.endpoint)
+    qtbot.waitUntil(lambda: "simulated instrument" in made.windowTitle(), timeout=30_000)
+    lines = [made.run_panel.log.topLevelItem(index).text(1)
+             for index in range(made.run_panel.log.topLevelItemCount())]
+    assert any("is --fake" in line for line in lines), lines
+    assert not made.fake
 
 
 @pytest.mark.skipif(os.name != "nt", reason="the job object is Windows's")

@@ -45,6 +45,7 @@ __all__ = [
     "OwnerStatus",
     "PointStarted",
     "Progress",
+    "RecordBegun",
     "RunDone",
     "Said",
     "StaleHandle",
@@ -218,6 +219,24 @@ class LogsOpened(Event):
     @property
     def text(self) -> str:
         return f"logging {self.stem} to {os.path.basename(self.transcript)}"
+
+
+@dataclass(frozen=True, slots=True)
+class RecordBegun(Event):
+    """The owner has begun the run record of the job it is starting, a window run's
+    (`clockwork.owner.keeper.begin`, lab record, task 165): the request id it minted,
+    which every file of the job stamps as `ClockworkSeriesId`, and the record's path.
+
+    An event of its own, after `JobStarted`, rather than the id written into the job
+    that `JobStarted` carries: a front end knows its own jobs by the object it submitted,
+    and a job replaced on the way in was a job the window's queue never saw come back."""
+
+    request_id: str
+    path: str
+
+    @property
+    def text(self) -> str:
+        return f"run record {os.path.basename(self.path)}, request {self.request_id}"
 
 
 @dataclass(frozen=True, slots=True)

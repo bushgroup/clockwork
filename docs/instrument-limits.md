@@ -156,11 +156,15 @@ narrow is refused. A refusal names whose limits refused, the standing or the pro
 
 ## Where the document lives
 
-`clockwork mcp --limits PATH` names the document. Without the flag, the server looks for
-`limits.toml` beside the document given to `--instrument`, which is by default the instrument
-directory's own ([MCP server](mcp-server.md#the-instrument-directory)), so an instrument keeps its
-limits beside its document at the directory's root. `--project-limits PATH` adds a project's, and
-has no default. The [command line](command-line.md)'s verbs take both flags. Against the
+The limits belong to the sitting, which the daemon carries: `clockwork serve --limits PATH`
+names the document, `hello` reports it, and every client of that daemon enforces the same one
+unless it names its own ([daemon protocol](daemon-protocol.md#starting-it)).
+`clockwork mcp --limits PATH` and the verbs' `--limits` name a client's own. Where neither the client nor the
+daemon names one, `limits.toml` beside the instrument document is used, which is by default the
+instrument directory's own ([MCP server](mcp-server.md#the-instrument-directory)), so an
+instrument keeps its limits beside its document at the directory's root. `--project-limits PATH`
+adds a project's, in the same places, and has no default. The
+[command line](command-line.md)'s verbs take both flags. Against the
 instrument, a server with no limits refuses every send, and says so under `status`. Under `--fake`
 a server with no limits refuses nothing, so that the tools can be exercised on a machine with no
 instrument, while a rehearsal given limits is held to them exactly as the instrument would be.
@@ -264,24 +268,10 @@ either.
 
 ## The run record
 
-Every request leaves one small document beside its files, `<stem>.request.json`, where the stem is
-that of the request's first file. The server writes it as the request proceeds and nothing edits
-it by hand. It holds the request in the words of the person it was for, their initials and its
-identifier; the plan the agent stated when it armed, and for a series the plan's text, its
-seed and the order drawn from it; each arming, with the template's hash, every
-knob value and label, and the cold-start cautions; each acquisition; each file written, with a
-summary of its frames, counts, base peak, pusher period and saturation; the notes the agent
-added with the `note` tool; and each person's verdict on a run given with the `verdict` tool, in
-their words and under their initials. A request continued in a later session by its identifier finds its
-record by that identifier and appends to it. The files are entered by the daemon that wrote them,
-before it reports the job's end, so the record lists every file even when the session or command
-that issued the request has ended.
-
-The record's `source` says the route the request came by: `mcp` for a session's tool call through
-`clockwork-mcp`, `cli` for a verb of `clockwork-cli`, and `window` for a run acquired at the window,
-whose record its first verdict begins. A request keeps the source its record was begun under. Note
-that records written before clockwork 1.2.0 say `agent` for both `mcp` and `cli`, without saying
-which; the audit log's `via` tells them apart.
-
-The file remains the primary record. Every file stamps its request's identifier, and the run
-record is what joins a request's files and says why each was made.
+Every request leaves a run record beside its files, `<stem>.request.json`, whose format is
+[the run record](run-record.md). Two parts of it concern these limits. Each arming an agent makes
+records the template's hash, every knob value and label, and the cold-start cautions; a run a
+person starts at the window from a template records, under `outside_limits`, each knob value
+these limits would have refused an agent, since a person is shown the limits and never held to
+them. The limits in force are those of the daemon, which every client takes unless it names its
+own, and the day record keeps their path and SHA-256 for every sitting.

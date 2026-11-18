@@ -42,15 +42,18 @@ From a source checkout, run each verb as `uv run clockwork <verb>`.
 | `--endpoint ADDRESS` | The daemon's command socket, `tcp://127.0.0.1:5570` by default |
 | `--library DIR` | The method and template library, or several directories joined by `;`, by default the daemon's `--library` |
 | `--output DIR` | Where runs are written and read back, by default the daemon's `--output` |
-| `--instrument PATH` | The [instrument file](instrument-file-format.md) runs are acquired under, by default the window's saved one where the verb reads it, then the `instrument.toml` of the [instrument directory](mcp-server.md#the-instrument-directory) |
-| `--limits PATH` | The standing limits, by default the `limits.toml` beside `--instrument` |
-| `--project-limits PATH` | A project's limits, which admit its own templates and narrow the standing ones ([standing limits](instrument-limits.md#a-projects-limits)); none by default |
+| `--instrument PATH` | The [instrument file](instrument-file-format.md) runs are acquired under, by default the daemon's, then the window's saved one where the verb reads it, then the `instrument.toml` of the [instrument directory](mcp-server.md#the-instrument-directory) |
+| `--limits PATH` | The standing limits, by default the daemon's, or the `limits.toml` beside `--instrument` where that is given |
+| `--project-limits PATH` | A project's limits, which admit its own templates and narrow the standing ones ([standing limits](instrument-limits.md#a-projects-limits)); by default the daemon's |
 | `--routines DIR` | The instrument's [routines](routines.md), by default the `routines` directory beside the library's first directory |
 
 `--instrument`, `--limits` and `--project-limits` matter to `arm` and `acquire` and are accepted
 by every verb, so a
-shell alias or a script can pass them once for a whole session. Against the instrument, a verb
-given no limits is refused every send, as the MCP server is.
+shell alias or a script can pass them once for a whole session. Without them a verb enforces the
+limits the daemon was started with ([daemon protocol](daemon-protocol.md#starting-it)), as every
+other client of that daemon does. A verb that starts the daemon, such as `warm-up`, passes it the
+window's saved instrument document and limits. Against the instrument, a verb given no limits is
+refused every send, as the MCP server is.
 
 ## Flags
 

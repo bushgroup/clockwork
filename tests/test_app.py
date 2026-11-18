@@ -1467,6 +1467,33 @@ def test_a_whole_run_with_a_replicate_names_two_files_and_folds_both(
                    for name in written)
 
 
+def test_a_window_run_needs_its_person_and_records_its_purpose(
+        window, tmp_path, qtbot, scratch_settings):
+    """A1 and A2 of the window revision (lab record, task 165): the person at the window
+    is required, prefilled from the file initials and remembered; the purpose line is
+    the request in the run record the owner begins, empty or not."""
+    from clockwork.record import load
+
+    ready_to_acquire(window, qtbot, tmp_path)
+    assert window.run_panel.at_window.text() == "ZZ"
+    window.run_panel.at_window.setText("")
+    assert window.acquire() is None
+    window.run_panel.at_window.setText(" m.b ")
+    window.run_panel.purpose.setText("  the standard, before the series ")
+    runs: list[object] = []
+    window.worker.run_done.connect(runs.append)
+    job = window.acquire()
+    assert job is not None and job.source == "window" and job.at_window == "MB"
+    assert job.request == "the standard, before the series"
+    assert Settings(scratch_settings).at_window == "MB"
+    until(qtbot, lambda: runs and idle(window), timeout=180_000)
+    [name] = [name for name in os.listdir(tmp_path) if name.endswith(".request.json")]
+    data = load(str(tmp_path / name))
+    assert data["request"]["text"] == "the standard, before the series"
+    assert data["request"]["at_window"] == "MB" and data["request"]["initials"] == "ZZ"
+    assert len(data["files"]) == 1
+
+
 def test_the_console_settings_a_run_sends_are_in_that_run_s_transcript(
         window, tmp_path, qtbot):
     """The prologue of an acquisition -- `init`, `horizontal`, `vertical`, `invert`,

@@ -566,6 +566,18 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--console", metavar="PATH", default="",
                        help="the acquisition console executable, or a directory holding "
                             "it (default: $CLOCKWORK_CONSOLE, then the installer's)")
+    serve.add_argument("--instrument", metavar="PATH", default="",
+                       help="the instrument document every client acquires under, which "
+                            "hello reports (default: instrument.toml in "
+                            "$CLOCKWORK_INSTRUMENT when that is set, in ../slimphony beside "
+                            "a checkout when it is not; none under --fake)")
+    serve.add_argument("--limits", metavar="PATH", default="",
+                       help="the instrument's standing limits every client enforces "
+                            "(default: limits.toml beside --instrument; "
+                            "docs/instrument-limits.md)")
+    serve.add_argument("--project-limits", metavar="PATH", default="",
+                       help="a project's limits, combined into the standing ones "
+                            "(default: none)")
     serve.add_argument("--kept", metavar="DIR", default=None,
                        help="where a failed run's files are copied (default: "
                             "$CLOCKWORK_REPORTS, then the per-user folder)")
@@ -591,16 +603,17 @@ def main(argv: list[str] | None = None) -> int:
     mcp.add_argument("--output", metavar="DIR", default="",
                      help="where runs are written and read back (default: the daemon's)")
     mcp.add_argument("--instrument", metavar="PATH", default="",
-                     help="the instrument document runs are acquired under (default: "
-                          "instrument.toml in $CLOCKWORK_INSTRUMENT when that is set, in "
-                          "../slimphony beside a checkout when it is not; none under "
-                          "--fake or over a daemon that is --fake)")
+                     help="the instrument document runs are acquired under (default: the "
+                          "daemon's when it names one, else instrument.toml in "
+                          "$CLOCKWORK_INSTRUMENT when that is set, in ../slimphony beside a "
+                          "checkout when it is not; none under --fake or over a daemon that "
+                          "is --fake)")
     mcp.add_argument("--limits", metavar="PATH", default="",
-                     help="the instrument's standing limits (default: limits.toml beside "
-                          "--instrument; docs/instrument-limits.md)")
+                     help="the instrument's standing limits (default: the daemon's, else "
+                          "limits.toml beside --instrument; docs/instrument-limits.md)")
     mcp.add_argument("--project-limits", metavar="PATH", default="",
                      help="a project's limits, which admit its own templates and narrow "
-                          "the standing ones but never widen them (default: none)")
+                          "the standing ones but never widen them (default: the daemon's)")
     mcp.add_argument("--routines", metavar="DIR", default="",
                      help="the instrument's routines (default: routines beside the "
                           "library's first directory; docs/routines.md)")
@@ -687,7 +700,9 @@ def main(argv: list[str] | None = None) -> int:
 
         return daemon.run(fake=args.serve_fake, output=args.output, library=args.library,
                           console=args.console, kept_root=args.kept,
-                          errors_log=args.errors_log, contain=True)
+                          errors_log=args.errors_log, instrument=args.instrument,
+                          limits=args.limits, project_limits=args.project_limits,
+                          contain=True)
 
     if args.command == "mcp":
         # The protocol is stdin and stdout, and the SDK claims the real streams by their

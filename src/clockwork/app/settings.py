@@ -69,6 +69,36 @@ class Settings:
         self._settings.setValue("instrument_path", value)
 
     @property
+    def limits_path(self) -> str:
+        """The standing limits the daemon this window starts carries, or empty for the
+        `limits.toml` beside the instrument document (lab record, task 165; the Setup
+        tab that edits it is task 169's)."""
+        return str(self._settings.value("limits_path", "") or "")
+
+    @limits_path.setter
+    def limits_path(self, value: str) -> None:
+        self._settings.setValue("limits_path", value)
+
+    @property
+    def project_limits_path(self) -> str:
+        """A project's limits the daemon this window starts carries, or empty for none."""
+        return str(self._settings.value("project_limits_path", "") or "")
+
+    @project_limits_path.setter
+    def project_limits_path(self, value: str) -> None:
+        self._settings.setValue("project_limits_path", value)
+
+    @property
+    def at_window(self) -> str:
+        """The initials last typed in "at the window", the person who presses Start;
+        empty until one is, when the window offers the file initials instead."""
+        return str(self._settings.value("at_window", "") or "")
+
+    @at_window.setter
+    def at_window(self, value: str) -> None:
+        self._settings.setValue("at_window", value)
+
+    @property
     def console_path(self) -> str:
         return str(self._settings.value("console_path", "") or "")
 

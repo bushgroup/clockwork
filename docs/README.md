@@ -25,8 +25,13 @@
 - [**Standing limits**](instrument-limits.md). The `limits.toml` beside the instrument file that
   bounds what an agent may send: the largest potential difference between any two electrodes
   and the RF drive, the templates it may run and how far each knob may turn, the boxes it may
-  address, a project's own file that narrows them, the cold-start check against what the boxes
-  hold, and the run record every request leaves beside its files.
+  address, a project's own file that narrows them, and the cold-start check against what the
+  boxes hold.
+- [**Run record and day record**](run-record.md). The JSON document every request leaves beside
+  its files, whether an agent, a command line or a person at the window started it: what it was
+  for and who asked, how it was planned and sent, each file with its numbers, notes, verdicts and
+  a person's acts on a running job; and the daemon's record of the sitting and the console for the
+  day.
 - [**Method file and provenance**](method-file-format.md). The flat TOML document a trainee loads
   to run an experiment: each box's strings in three phases, the ordered sequence that starts and
   restarts them, and the stamp that traces every acquisition back to the method that produced it.

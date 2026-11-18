@@ -78,7 +78,8 @@ from ..acq import (
 )
 from ..acq.fake import INSTRUMENT_PERIOD_SAMPLES
 from ..acq.standing import stand_down, warm_up
-from ..envelope import cold_start, judge
+from ..dayrecord import DayRecord
+from ..envelope import Limits, cold_start, judge
 from ..instrument import Instrument
 from ..method import Method
 from ..method.template import Rendered, loads_template, render
@@ -107,6 +108,7 @@ from .interface import (
     OwnerStatus,
     PointStarted,
     Progress,
+    RecordBegun,
     RunDone,
     Said,
     StaleHandle,
@@ -133,7 +135,7 @@ from .jobs import (
     matches_wire,
     wire_fingerprint,
 )
-from .keeper import RecordKeeper
+from .keeper import RecordKeeper, begin
 from .lock import Holder, InstrumentLock, LockError
 from .wire import to_wire
 
@@ -302,6 +304,13 @@ class LocalOwner:
         self._records = RecordKeeper()
         """Enters each file a request's job writes, and the note a failure or a stopped
         series leaves, into that request's run record (`keeper`, lab record, task 164)."""
+        self.limits: Limits | None = None
+        """The limits the sitting carries (`clockwork.sitting`), against which a window
+        run's record says which knobs lie outside an agent's range; None for none. Set
+        by the daemon from its flags, and read on this owner's thread."""
+        self.day: DayRecord | None = None
+        """The day record this owner writes its console's starts and stops into, or None
+        for none: the daemon's, in its output directory (`clockwork.dayrecord`)."""
         self._point: PointStarted | None = None
         """The series point under way, for the note a failure leaves in its record."""
 
@@ -469,7 +478,11 @@ class LocalOwner:
                 self._running = self._current = handle
                 self._kept = ""
                 self._point = None
-                self._report(JobStarted(handle=handle, job=job))
+                # Every event names the job as it was submitted, the object a front end
+                # knows its own by; the one run is a window run's with its request id.
+                submitted = job
+                self._report(JobStarted(handle=handle, job=submitted))
+                job = self._begin_record(handle, job)
                 try:
                     result = self._do(job)
                 except Exception as exc:  # noqa: BLE001 -- a message, not a traceback
@@ -480,14 +493,44 @@ class LocalOwner:
                     if self._kept:
                         message = f"{message.rstrip('.')}. Files kept in {self._kept}"
                     self._record_end(handle, job, failed=message)
-                    self._report(JobFailed(handle=handle, job=job, message=message))
+                    self._report(JobFailed(handle=handle, job=submitted, message=message))
                 else:
                     self._running = None
                     self._record_end(handle, job, result=result)
-                    self._report(JobFinished(handle=handle, job=job, result=result))
+                    self._report(JobFinished(handle=handle, job=submitted, result=result))
         finally:
             self._records.close(RECORD_DRAIN_S)
             self._close_everything()
+
+    def _begin_record(self, handle: Handle, job: Job) -> Job:
+        """The job as it runs: a window run's with its request id minted and its record
+        begun (`keeper.begin`), said in a `RecordBegun` so every client following it
+        learns the id; anything else as it came. A record that cannot be begun is said,
+        and the run goes on without one."""
+        if not isinstance(job, (Acquire, SeriesJob)) or not job.source or job.series:
+            return job
+        try:
+            running, path = begin(job, handle.id, limits=self.limits)
+        except Exception as exc:  # noqa: BLE001 -- the record is the run's, never its end
+            self._report(Warned(f"the run record was not begun, and this run has none: "
+                                f"{sentence(exc)}"))
+            return job
+        self._report(RecordBegun(request_id=running.series, path=path))
+        return running
+
+    def day_line(self, kind: str, **fields: object) -> None:
+        """A line in the day record, if this owner keeps one; any thread, never raises."""
+        if self.day is not None:
+            self.day.write(kind, **fields)
+
+    def _console_line(self, event: str, detail: str = "") -> None:
+        """A console line in the day record, naming the job and the client it came from."""
+        running = self._running
+        self.day_line("console", event=event,
+                      job=running.id if running is not None else None,
+                      by=(running.origin if running is not None and running.origin
+                          else self.program),
+                      detail=detail)
 
     def _record_end(self, handle: Handle, job: Job, *, failed: str = "",
                     result: object = None) -> None:
@@ -661,14 +704,20 @@ class LocalOwner:
         elif job.command:
             self.console = ConsoleProcess(job.command)
         else:
+            self._console_line("failed", "no acquisition console is configured")
             raise AcqError(
                 "no acquisition console is configured. Point Settings at the console "
                 "executable the installer put beside clockwork, or set "
                 "$CLOCKWORK_CONSOLE.")
-        self.console.start()
-        self._hold_fake_frames()
-        seconds = self.console.wait_ready()
+        try:
+            self.console.start()
+            self._hold_fake_frames()
+            seconds = self.console.wait_ready()
+        except Exception as exc:
+            self._console_line("failed", sentence(exc))
+            raise
         self._set_status(self._status_now(seconds))
+        self._console_line("started", f"ready in {seconds:.1f} s")
         return self.console_status
 
     def _hold_fake_frames(self) -> None:
@@ -688,9 +737,16 @@ class LocalOwner:
             config.save()
             self._say(f"wrote {', '.join(sorted(job.values))} to config.txt")
         self._set_status(ConsoleStatus(state="starting"))
-        seconds = self.console.restart()
+        try:
+            seconds = self.console.restart()
+        except Exception as exc:
+            self._console_line("failed", f"{job.label}: {sentence(exc)}")
+            raise
         self._hold_fake_frames()
         self._set_status(self._status_now(seconds))
+        written = (f"; wrote {', '.join(sorted(job.values))} to config.txt"
+                   if job.values else "")
+        self._console_line("restarted", f"{job.label}, ready in {seconds:.1f} s{written}")
         return self.console_status
 
     def _recover(self, console: Console, stream: DataStream, job: Acquire) -> TofWidth:
@@ -723,9 +779,14 @@ class LocalOwner:
         if self.console is None:
             raise AcqError("there is no console to restart")
         self._set_status(ConsoleStatus(state="starting"))
-        seconds = self.console.restart()
+        try:
+            seconds = self.console.restart()
+        except Exception as exc:
+            self._console_line("failed", f"restarting under a run: {sentence(exc)}")
+            raise
         self._hold_fake_frames()
         self._set_status(self._status_now(seconds))
+        self._console_line("restarted", f"under a run, ready in {seconds:.1f} s")
         console.reconnect(self.console.command_endpoint)
         stream.reconnect(self.console.data_endpoint)
         info = console.info()
@@ -1423,6 +1484,8 @@ class LocalOwner:
             except Exception:  # noqa: BLE001
                 pass
             self.console = None
+            self._console_line("stopped", f"the owner closed: {self._stop_reason}"
+                               if self._stop_reason else "the owner closed")
         if self._lock is not None:
             self._lock.release()
 

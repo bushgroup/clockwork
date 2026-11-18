@@ -188,7 +188,10 @@ class MainWindow(QMainWindow):
             command = serve_command(
                 output=self.settings.output_dir, library=self.settings.library_dir,
                 console=self.settings.console_path, kept=self.kept_root(),
-                errors_log=errors.errors_log_path())
+                errors_log=errors.errors_log_path(),
+                instrument=self.settings.instrument_path,
+                limits=self.settings.limits_path,
+                project_limits=self.settings.project_limits_path)
             self.worker = client(self.mailbox) if client is not None else RemoteWorker(
                 mailbox=self.mailbox, launch=lambda: start_serve(command),
                 console_path=self.settings.console_path)
@@ -756,6 +759,7 @@ class MainWindow(QMainWindow):
         self.queue_panel.guard_requested.connect(self.queue_guard)
 
         self.initials.editingFinished.connect(self._initials_changed)
+        self.run_panel.at_window.editingFinished.connect(lambda: self._at_window())
         self.output_dir.editingFinished.connect(self._refresh_stem)
         self.repetition_mode.currentTextChanged.connect(lambda _: self._refresh_actions())
         for spin in (self.frames, self.scans, self.accumulations):
@@ -766,6 +770,9 @@ class MainWindow(QMainWindow):
         if not geometry.isEmpty():
             self.restoreGeometry(geometry)
         self.initials.setText(self.settings.initials)
+        # The person's own, remembered per machine; the file initials until one is typed.
+        self.run_panel.at_window.setText(self.settings.at_window
+                                         or clean_initials(self.settings.initials))
         self.output_dir.setText(self.settings.output_dir)
         self.replicates.setValue(self.settings.replicates)
         self.conditions.setPlainText(self.settings.conditions)
@@ -1231,8 +1238,20 @@ class MainWindow(QMainWindow):
 
     def acquire(self, *, replicate_only: bool = False,
                 beam_guard: BeamGuard | None = None) -> Acquire | None:
+        """Queue an acquisition of the panes, and hand the job back.
+
+        Every one is a request of its own with a run record, begun by the owner when the
+        job starts (`source="window"`, lab record, task 165): the purpose line is its
+        request and "at the window" names who started it, which a run needs before it
+        starts."""
         method = self.build_method()
         if method is None:
+            return None
+        person = self._at_window()
+        if not person:
+            self.run_panel.say("type your initials in \"At the window\" first: every run "
+                               "you start records who started it", warn=True)
+            self.run_panel.at_window.setFocus()
             return None
         if not self.worker.console_alive:
             self.run_panel.say("starting the acquisition console first")
@@ -1257,9 +1276,20 @@ class MainWindow(QMainWindow):
             knobs=dict(rendered.knobs) if rendered is not None else {},
             labels=dict(rendered.labels) if rendered is not None else {},
             beam_guard=beam_guard,
+            request=self.run_panel.purpose.text().strip(),
+            source="window",
+            at_window=person,
         )
         self.worker.submit(job)
         return job
+
+    def _at_window(self) -> str:
+        """The person at the window, cleaned and remembered, or empty for nobody."""
+        person = clean_initials(self.run_panel.at_window.text())
+        self.run_panel.at_window.setText(person)
+        if person:
+            self.settings.at_window = person
+        return person
 
     def replicate(self) -> None:
         self._refresh_stem()
@@ -1477,6 +1507,11 @@ class MainWindow(QMainWindow):
     def start_queue(self) -> None:
         """Walk every waiting row in order: load it, send it, acquire its replicates."""
         if self.queue.running or self._job is not None:
+            return
+        if not self._at_window():
+            self.run_panel.say("type your initials in \"At the window\" first: every row "
+                               "the queue runs records who started it", warn=True)
+            self.run_panel.at_window.setFocus()
             return
         row = self.queue.begin()
         self.queue_panel.refresh()
@@ -1812,7 +1847,12 @@ class MainWindow(QMainWindow):
             self.run_panel.say(f"connected to clockwork serve (pid {pid}, since "
                                f"{getattr(hello, 'started', '?')}), which owns the boxes "
                                "and the console")
-        if getattr(hello, "fake", False):
+        simulated = bool(getattr(hello, "fake", False))
+        # The title a `--fake` window has, for a plain window following a `clockwork
+        # serve --fake`: the L3 replay is watched in one (lab record, task 165, A6).
+        self.setWindowTitle(f"clockwork {clockwork.__version__}"
+                            + ("  — simulated instrument" if self.fake or simulated else ""))
+        if simulated:
             self.run_panel.say("that clockwork serve is --fake: nothing it reports is "
                                "evidence about a MIPS box or a digitizer", warn=True)
         status = getattr(self.worker, "status", None)
@@ -1992,6 +2032,9 @@ class MainWindow(QMainWindow):
         cleaned = clean_initials(self.initials.text())
         self.initials.setText(cleaned)
         self.settings.initials = cleaned
+        if not self.run_panel.at_window.text().strip():
+            # Prefilled, never overwritten: the person types their own once (A2).
+            self.run_panel.at_window.setText(cleaned)
         self._refresh_stem()
 
     def _refresh_stem(self) -> None:

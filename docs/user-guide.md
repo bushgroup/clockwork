@@ -428,7 +428,22 @@ removed the raw file. mainspring shows the outcome in its Info panel, and
 `uimf-info <folder> --list --outcome completed,stopped` lists only the files whose runs
 ended one of those ways; a file written before clockwork recorded outcomes reads `unknown`.
 
-**Open the log**, beside the acquire buttons, opens both at once. When something goes wrong, the
+Every acquisition also leaves a run record, `<stem>.request.json`, named after its first file. It
+says what the run was for, in the words typed in the **Purpose** line above the run log, and who
+started it, from the **At the window** field beside it; with the file initials, the method's hash,
+for a method rendered from a template the template's hash and every knob value, and an entry for
+each file with its frame count, total counts, base peak and pusher period. **At the window** takes
+your initials, starts out as the file initials, is remembered on the PC, and must be filled in
+before Acquire or the run queue's Start will run; the purpose may be left empty, and is recorded
+empty. One press of Acquire is one record, however many replicates it asks for. The record is
+written by `clockwork serve` as the run proceeds, so it is whole even if the window is closed
+while the run goes on, and where a template's knob value lies outside the limits an agent is held
+to, the record says so; a person at the window is never held to them. An agent's run leaves the
+same document, which [the run record](run-record.md) describes in full. The output directory also
+holds `day-record.jsonl`, the daemon's record of the day: the instrument document and limits it
+was started with, and each start and restart of the daemon and the acquisition console.
+
+**Open the log**, beside the acquire buttons, opens the send log and the transcript at once. When something goes wrong, the
 send log is where to start: it is what a trainee reads, and it already carries the boxes' own
 answers. Escalate with the transcript attached when the question is about the wire itself, a
 timing fault, a chunk boundary, a reply that does not match what the send log shows; it is the

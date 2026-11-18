@@ -11,8 +11,9 @@ owner the window uses, so a caller written against one runs against the other un
 ## Starting it
 
 ```
-clockwork serve [--fake] [--output DIR] [--library DIR] [--console PATH] [--kept DIR]
-                [--errors-log PATH] [--detached]
+clockwork serve [--fake] [--output DIR] [--library DIR] [--instrument PATH] [--limits PATH]
+                [--project-limits PATH] [--console PATH] [--kept DIR] [--errors-log PATH]
+                [--detached]
 ```
 
 The window starts the daemon itself when it opens and none is answering (under The window as a
@@ -32,7 +33,18 @@ default. `--library` is the method library a client may list, reported by `hello
 unused by the daemon. It may name several directories joined by `;` (`:` off Windows), searched
 in order, and defaults to the `golden` directory of the
 [instrument directory](mcp-server.md#the-instrument-directory) when that resolves; the daemon
-logs the library it serves when it starts. `--fake` runs everything above over simulated boxes
+logs the library it serves when it starts.
+
+`--instrument`, `--limits` and `--project-limits` are the sitting: the instrument document runs
+are acquired under, the instrument's [standing limits](instrument-limits.md) and a project's
+limits combined into them. The daemon loads them when it starts, logs them, and reports them in
+`hello`, and the MCP server and every verb of the command line take the daemon's wherever their
+own flags are absent, so every client of one daemon shows and enforces one set of limits. The
+instrument document defaults, except under `--fake`, to the
+[instrument directory](mcp-server.md#the-instrument-directory)'s `instrument.toml`, and the
+standing limits to the `limits.toml` beside it. A document or limits that are named or found and
+do not load are one sentence in the log and exit code 1, before anything else is done.
+`--fake` runs everything above over simulated boxes
 and a simulated
 console: it takes no lock, stops nothing, opens no port but its own two, and nothing it reports is
 evidence about a MIPS box or a digitizer. `--kept` is the folder a failed run's files are copied
@@ -96,7 +108,7 @@ One command per call of the owner protocol, and `hello`.
 
 | `cmd` | `args` | `result` |
 |---|---|---|
-| `hello` | none | An object naming the daemon: `program`, `version` (clockwork's), `protocol` (1), `session`, `pid`, `started`, `fake`, `events` (the event socket's address), `output`, `library`, and `holder`, the lock holder's own description or null under `--fake` |
+| `hello` | none | An object naming the daemon: `program`, `version` (clockwork's), `protocol` (1), `session`, `pid`, `started`, `fake`, `events` (the event socket's address), `output`, `library`, `holder`, the lock holder's own description or null under `--fake`, and the sitting, `instrument`, `limits` and `project_limits`, each an absolute path or empty for none |
 | `submit` | `job`, `origin` (optional) | A `Handle`. The job is queued and runs after every job before it, one at a time. `origin` is a few words naming the client, such as `the clockwork window (pid 5120)` or `Claude, through clockwork mcp`, and is carried unexamined in the handle's own `origin` so that every other client can say whose job it is |
 | `events` | `handle`, `after` (default 0) | That job's progress numbered after `after`, oldest first, as a list of `Progress` |
 | `stop` | `reason` (optional) | null. The run in flight ends after its current repetition and its fold |
@@ -105,9 +117,9 @@ One command per call of the owner protocol, and `hello`.
 | `shutdown` | `reason` (optional) | null, sent before the shutdown begins (under Shutting down) |
 
 A client checks `protocol` in the `hello` reply and refuses to go on if it is not the version it
-was written for. This document describes protocol 1. `origin` and `issued` were added to it
-without a new version: both have defaults, an empty string and 0, that a client written before
-them never reads and a daemon written before them never sends.
+was written for. This document describes protocol 1. `origin`, `issued` and the sitting's three
+paths were added to it without a new version: each has a default, an empty string or 0, that a
+client written before it never reads and a daemon written before it never sends.
 
 Handle ids are counted from 1 for each session with no gaps, which with `issued` lets a client
 follow every job whatever client submitted it: every id up to `issued` is a job, and `events`
@@ -216,7 +228,8 @@ The clockwork window is a client of the daemon like any other, and on an instrum
 usual way a daemon starts. When it opens it asks `hello` on the command socket. If a daemon
 answers, the window follows it. If none does, the window starts `clockwork serve` itself, the
 installed executable with the subcommand, passing its output directory, method library, console,
-kept-files folder and error log on the command line, and waits for `hello`. The daemon it starts
+kept-files folder, error log and sitting (its instrument document, and the limits files where it
+has any) on the command line, and waits for `hello`. The daemon it starts
 has no console window, runs in a process group of its own, breaks away from any job the window is
 in, and logs to `serve.log` alone; it is stopped by `shutdown` and never by a console signal.
 `--detached` on its command line keeps its log out of the console of whatever started it, which
@@ -228,7 +241,8 @@ instrument lock, the window shows the last line of `serve.log`, which names the 
 The window follows every job in the daemon, whichever client submitted it. It reads `status` a few
 times a second and the progress of every handle up to `issued`, and shows another client's job in
 its run log and status bar exactly as it shows its own, with the job's `origin` beside it, and
-lists another client's running and queued jobs under its run queue. It greys out its sending and
+lists another client's running and queued jobs under its run queue. A daemon that is `--fake`
+is followed in the same way, and the window says so in its title and its run log. It greys out its sending and
 acquiring buttons while any job runs, since the daemon runs one job at a time, and its Stop button
 stops whichever run is in flight.
 
@@ -259,3 +273,16 @@ it found, every request that changes something (`submit`, `stop`, `shutdown`) wi
 named, each job's start and end, the console's starts and restarts, and anything it stopped. The window's `errors.log` in the same
 directory is left to the window. Each send and each run also leaves its wire transcript and its
 send log beside its files in the output directory, exactly as a run started from the window does.
+
+`serve.log` is the daemon's own account, kept on the PC and never beside the data. Two records
+the daemon writes do go beside the data, in its output directory, and are described in
+[the run record](run-record.md). A run started at the window leaves a run record that the daemon
+begins when the job starts, since the window begins none of its own: a `submit` whose
+`Acquire` names `source` `window` and no request has the daemon mint the request, stamp it into
+every file, and record who was at the window and what the run was for. It reports the
+request's identifier and the record's path to every client in a `RecordBegun` event, after the
+job's `JobStarted`. The day record,
+`day-record.jsonl`, holds the sitting the daemon was started with, with the SHA-256 of each
+document, the daemon's own start and stop, and each console start, restart, stop and failure with
+the client whose job caused it, so that a console restart between two runs is recorded beside the
+runs it fell between.

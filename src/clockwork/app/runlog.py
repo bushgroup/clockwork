@@ -64,6 +64,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QProgressBar,
     QPushButton,
     QTreeWidget,
@@ -258,6 +259,28 @@ class RunPanel(QWidget):
         self.log.header().setStretchLastSection(True)
         self.log.setColumnWidth(0, 64)
 
+        # The two fields a person's Start writes into its run record (lab record, task
+        # 165; the window revision's A1 and A2). Here, beside the bar, because the run
+        # strip task 169 builds over the tabs keeps them where they are now.
+        self.purpose = QLineEdit()
+        self.purpose.setPlaceholderText("what this run is for (optional)")
+        self.purpose.setToolTip(
+            "One line on what the run is for, kept as the request in its run record "
+            "beside the files. Empty is recorded empty. It is not the conditions note, "
+            "which is stamped into every file.")
+        self.at_window = QLineEdit()
+        self.at_window.setMaximumWidth(80)
+        self.at_window.setToolTip(
+            "Your initials, as the person at the window: written into the run record of "
+            "every run you start. Required to start one. Not the initials in the file "
+            "name, which say whatever the lab's naming puts there.")
+        fields = QHBoxLayout()
+        fields.setContentsMargins(0, 0, 0, 0)
+        fields.addWidget(QLabel("Purpose"))
+        fields.addWidget(self.purpose, 1)
+        fields.addWidget(QLabel("At the window"))
+        fields.addWidget(self.at_window)
+
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
         top.addWidget(self.caption, 1)
@@ -267,6 +290,7 @@ class RunPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
+        layout.addLayout(fields)
         layout.addWidget(self.bar)
         layout.addLayout(top)
         layout.addWidget(self.log, 1)

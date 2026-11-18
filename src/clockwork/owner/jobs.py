@@ -172,6 +172,14 @@ class Acquire(Job):
     """End each run whose beam is lost (`run_acquisition`'s `beam_guard`); None, the
     default, watches nothing. The window's run queue sets it on its rows when the
     guard is armed (lab record, task 134)."""
+    source: str = ""
+    """The route whose run record the owner begins for this job when it starts:
+    `window`, for a client that begins none itself. The owner mints the request id,
+    stamps it as `series`, and enters the job and every file in the record
+    (`clockwork.owner.keeper.begin`, lab record, task 165). Empty for a job whose client
+    began its record (an MCP server, a command line) or that has none (a bench script)."""
+    at_window: str = ""
+    """The initials of the person at the window who pressed Start, for its record."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +237,9 @@ class SeriesJob(Job):
     """The template text every point was rendered from."""
     labels: Mapping[str, str] = field(default_factory=dict)
     cold_start: str = ""
+    source: str = ""
+    """As `Acquire.source`: `window` has the owner begin the series' record."""
+    at_window: str = ""
 
 
 @dataclass(frozen=True, slots=True)

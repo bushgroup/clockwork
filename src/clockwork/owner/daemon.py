@@ -29,6 +29,18 @@ runs in ends it with a `CTRL_CLOSE_EVENT` the Ctrl-C handler never sees, and bef
 its console was left holding the digitizer (lab record, task 75); the job object ends
 the console with the daemon however the daemon ends.
 
+**It carries the sitting** (lab record, task 165; the window revision's E6):
+`--instrument`, `--limits` and `--project-limits`, loaded at start through
+`clockwork.sitting` and reported by `hello`, so the MCP server and every verb of the
+command line default to the daemon's and every client enforces one set of limits. The
+instrument document defaults as a client's does: the instrument directory's, except
+under `--fake`. Limits that were named or found and do not load are one sentence and
+exit code 1, before the lock is taken.
+
+**It keeps the day record** (`clockwork.dayrecord`) in its output directory: the sitting at
+the head of each segment, its own start and stop, and every console start, restart, stop
+and failure, the owner's and the console watch's alike.
+
 Qt-free: `clockwork serve` never builds a window and never imports PySide6.
 """
 
@@ -46,13 +58,16 @@ from typing import TextIO
 from .. import (
     __version__,
     instrument_dir,
+    instrument_file,
     instrument_unresolved,
     library_dirs,
     library_setting,
 )
+from .. import sitting as sitting_module
 from ..acq import ClockLockRetried, Event, PusherPeriodChecked, Warned
 from ..acq.process import listening_on, stop_listener
 from ..acq.wire import COMMAND_PORT
+from ..dayrecord import DayRecord
 from ..mips import Discovery
 from .interface import ConsoleChanged, Handle, JobFailed, JobFinished, JobStarted, RunDone, Said
 from .jobs import Discover, RestartConsole, StartConsole
@@ -66,6 +81,9 @@ PROGRAM = "clockwork serve"
 """What the lock tells a refused owner holds the instrument."""
 
 LOG_NAME = "serve.log"
+
+WATCH = "the console watch"
+"""How the watch names itself in the day record and in the restart it submits."""
 
 WATCH_S = 2.0
 """How often the console is looked at. A dead console costs nothing until a job needs
@@ -103,6 +121,9 @@ def run(
     kept_root: str | None = None,
     errors_log: str = "",
     contain: bool = False,
+    instrument: str = "",
+    limits: str = "",
+    project_limits: str = "",
 ) -> int:
     """Take the instrument and serve it until shut down. Returns the exit code.
 
@@ -117,6 +138,10 @@ def run(
     failed run's files are copied into, the configured default when None, and a front
     end's error log to copy with them. `contain` is `contain_children`, which the command
     line asks for and a test in pytest's own process must not.
+
+    `instrument`, `limits` and `project_limits` are the sitting (`clockwork.sitting`),
+    which `hello` reports and every client defaults to; the instrument document defaults
+    to the instrument directory's except under `fake`.
     """
     log = _logger(stream if stream is not None else sys.stdout, log_file or log_path())
     if contain and not contain_children():
@@ -127,7 +152,8 @@ def run(
                     command=command, events=events, lock_path=lock_path, on_ready=on_ready,
                     handle_signals=handle_signals, discover=discover,
                     clear_port=clear_port, start_console=start_console,
-                    kept_root=kept_root, errors_log=errors_log)
+                    kept_root=kept_root, errors_log=errors_log, instrument=instrument,
+                    limits=limits, project_limits=project_limits)
     except Exception:  # noqa: BLE001 -- the log is the only place this can be read
         log.error("clockwork serve failed:\n%s", traceback.format_exc().rstrip())
         return 1
@@ -142,7 +168,8 @@ def _run(log: logging.Logger, *, fake: bool, output: str, library: str, console:
          on_ready: Callable[[DaemonServer], None] | None,
          handle_signals: bool, discover: Callable[..., Discovery] | None,
          clear_port: bool, start_console: bool, kept_root: str | None,
-         errors_log: str) -> int:
+         errors_log: str, instrument: str = "", limits: str = "",
+         project_limits: str = "") -> int:
     def on_event(handle: Handle, event: Event) -> None:
         if isinstance(event, _LOGGED):
             prefix = f"job {handle.id}: " if handle.id else ""
@@ -153,20 +180,28 @@ def _run(log: logging.Logger, *, fake: bool, output: str, library: str, console:
     # its own (`hello`), and where the routines beside it are found.
     named_library = bool(library)
     library = library_setting(library_dirs(library or instrument_dir("golden") or ""))
+    try:
+        sitting = sitting_module.load(
+            fake=fake, instrument_path=instrument or ("" if fake else instrument_file() or ""),
+            limits_path=limits, project_limits_path=project_limits)
+    except ValueError as exc:
+        log.error("%s", exc)
+        return 1
     owner = LocalOwner(fake=fake, program=PROGRAM, lock_path=lock_path, on_event=on_event,
                        kept_root=kept_root, errors_log=errors_log,
                        **({"discover": discover} if discover is not None else {}))
     if owner.refused:
         log.error("%s", owner.refused)
         return 1
+    owner.limits = sitting.limits
 
     if not fake and clear_port:
         _clear_console_port(log)
 
     try:
         server = DaemonServer(owner, command=command, events=events,
-                              info={"library": library}, directory=output,
-                              on_request=log.info)
+                              info={"library": library, **sitting.hello()},
+                              directory=output, on_request=log.info)
     except DaemonError as exc:
         log.error("%s", exc)
         owner.shutdown("could not listen")
@@ -180,6 +215,15 @@ def _run(log: logging.Logger, *, fake: bool, output: str, library: str, console:
     log.info("commands on %s, events on %s; files to %s", server.command_endpoint,
              server.events_endpoint, output)
     log.info("library %s", library or "(none)")
+    log.info("instrument %s, limits %s%s", sitting.instrument_path or "(none)",
+             sitting.limits_path or "(none)",
+             f" with {sitting.project_limits_path}" if sitting.project_limits_path else "")
+    day = DayRecord(output, sitting=lambda: {
+        "version": __version__, "session": server.session, "pid": os.getpid(),
+        "fake": fake, "output": output, "library": library, **sitting.entry()})
+    owner.day = day
+    day.write("daemon", event="started", session=server.session, by=PROGRAM,
+              reason="")
     # Said once, here: a variable that names nothing whatever library was given, and no
     # instrument directory at all only where it has left this daemon without a library.
     unresolved = instrument_unresolved(when_unset=not named_library)
@@ -216,6 +260,8 @@ def _run(log: logging.Logger, *, fake: bool, output: str, library: str, console:
     finally:
         watch.stop()
     owner.join(30)
+    day.write("daemon", event="stopped", session=server.session, by=PROGRAM,
+              reason=server.shutdown_reason)
     log.info("clockwork serve stopped")
     return 0
 
@@ -260,7 +306,10 @@ class ConsoleWatch:
                 for handle in status.queued):
             return False
         self.log.warning("the acquisition console stopped on its own; restarting it")
-        owner.submit(RestartConsole(label="restarting the console, which had stopped"))
+        owner.day_line("console", event="stopped", job=None, by=WATCH,
+                       detail="stopped on its own while no job was running")
+        owner.submit(RestartConsole(label="restarting the console, which had stopped"),
+                     origin=WATCH)
         return True
 
     def _watch(self) -> None:

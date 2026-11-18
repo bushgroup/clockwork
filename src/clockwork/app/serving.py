@@ -4,8 +4,9 @@ The window is a client of the daemon (lab record, task 77): when it opens and no
 answers on the command socket it starts one itself, the installed executable with the
 subcommand, or this checkout's interpreter running the same entry point. What the
 daemon needs from the window -- the output directory, the library, the console, the
-kept-files folder and the window's own error log -- goes on its command line, since the
-daemon reads no window setting of its own.
+kept-files folder, the window's own error log, and the sitting (the instrument document
+and the limits) -- goes on its command line, since the daemon reads no window setting
+of its own.
 
 **Started with no console of its own and outside the window's job.** A daemon the window
 started is stopped by the protocol's `shutdown`, never by a console signal: under the
@@ -68,8 +69,13 @@ def window_origin() -> str:
 
 
 def serve_command(*, output: str = "", library: str = "", console: str = "",
-                  kept: str = "", errors_log: str = "") -> list[str]:
+                  kept: str = "", errors_log: str = "", instrument: str = "",
+                  limits: str = "", project_limits: str = "") -> list[str]:
     """The command line that starts a daemon with the window's settings, detached.
+
+    `instrument`, `limits` and `project_limits` are the sitting the daemon carries for
+    every client (`clockwork.sitting`, lab record, task 165): what the window's settings
+    hold, each left to the daemon's own default where empty.
 
     Frozen, always the windowed `clockwork.exe`, even from the console-subsystem
     `clockwork-cli.exe` beside it that the desktop shortcuts run: numba stamps a frozen
@@ -86,7 +92,8 @@ def serve_command(*, output: str = "", library: str = "", console: str = "",
     command.append("--detached")
     for flag, value in (("--output", output), ("--library", library),
                         ("--console", console), ("--kept", kept),
-                        ("--errors-log", errors_log)):
+                        ("--errors-log", errors_log), ("--instrument", instrument),
+                        ("--limits", limits), ("--project-limits", project_limits)):
         if value:
             command += [flag, value]
     return command

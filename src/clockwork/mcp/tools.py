@@ -53,7 +53,6 @@ import contextlib
 import dataclasses
 import datetime as _dt
 import glob
-import hashlib
 import inspect
 import os
 import threading
@@ -79,6 +78,7 @@ from ..acq import BatchSeen, Event, Run, Snapshot, Warned, cautions, refusals
 from ..acq.standing import RampStepped, StandDownDone
 from ..acq.uimf import RAW_SUFFIX, SUMMED_SUFFIX
 from ..app import methodlib
+from ..dayrecord import DayRecord
 from ..envelope import Limits
 from ..instrument import UNCALIBRATED, Instrument
 from ..method import Method, MethodError
@@ -116,7 +116,15 @@ from ..owner import (
 from ..owner.keeper import stem_of
 from ..owner.remote import DaemonError
 from ..owner.wire import TYPE_KEY, to_wire
-from ..record import RECORD_SUFFIX, VERDICTS, RunRecord, brief, find_for_stem, newest_verdict
+from ..record import (
+    RECORD_SUFFIX,
+    VERDICTS,
+    RunRecord,
+    brief,
+    find_for_stem,
+    mint_id,
+    newest_verdict,
+)
 from ..record import find as find_record
 from ..record import load as load_record
 from ..routine import Routine, RoutineError
@@ -167,7 +175,8 @@ read back to two decimals."""
 
 SEALS = ("seal_calls", "stand_down")
 """The tools that end the audit log's live segment once their own line is in it, and
-answer the segment under `sealed` (lab record, task 161)."""
+answer the segment under `sealed` (lab record, task 161); and the day record's, under
+`sealed_day` (lab record, task 165)."""
 
 
 class ToolFailure(ValueError):
@@ -320,7 +329,19 @@ class Toolbox:
                 if name == "seal_calls":
                     raise ToolFailure(str(exc)) from exc
                 result["sealed"] = {"error": str(exc)}
+            # The day record the daemon keeps beside it is sealed with it, so a folder
+            # sealed and then listed holds neither live file (lab record, task 165).
+            try:
+                result["sealed_day"] = DayRecord.beside(self.log_directory).seal()
+            except OSError as exc:
+                result["sealed_day"] = {"error": f"the day record could not be sealed: "
+                                                 f"{exc.strerror or exc}"}
         return result
+
+    @property
+    def log_directory(self) -> str:
+        """The folder the audit log is in, and the day record beside it."""
+        return os.path.dirname(self.log.path) if self.log.path else ""
 
     def _request_for_log(self, arguments: Mapping[str, object],
                          result: Mapping[str, object] | None) -> dict[str, str] | None:
@@ -1188,7 +1209,9 @@ class Toolbox:
         the next call starts a new live file. Every reader of the log reads all its
         segments, so nothing is lost to `status`, `list_files` or a request's words.
         Seal before listing or archiving a day's folder. Answers the segment under
-        `sealed`: its name, size in bytes and MD5. Needs no daemon.
+        `sealed`: its name, size in bytes and MD5. The daemon's day record beside it,
+        `day-record.jsonl`, is sealed the same way and answered under `sealed_day`.
+        Needs no daemon.
         """
         if not self.log.path:
             raise ToolFailure("this server keeps no audit log, so there is nothing to seal")
@@ -1372,7 +1395,8 @@ class Toolbox:
         then the run ends after its current repetition (`reason` goes in its log) and the
         stand-down follows. This ends the session's daemon: every later tool call finds
         none until one is started again. Its own line ends the audit log's live file,
-        which it then seals as `seal_calls` does, answering the segment under `sealed`.
+        which it then seals as `seal_calls` does, answering the segment under `sealed`
+        and the day record's under `sealed_day`.
         """
         self._settle()
         busy = self._busy()
@@ -1761,8 +1785,7 @@ class Toolbox:
             if known is None:
                 known = self._ids.get(words)
             if known is None:
-                digest = hashlib.sha256(f"{time.time_ns()}{words}".encode()).hexdigest()[:6]
-                known = f"{_dt.datetime.now():%y%m%d-%H%M%S}-{digest}"
+                known = mint_id(words)
             self._ids.setdefault(words, known)
             self._words.setdefault(known, words)
             return known, words

@@ -123,7 +123,8 @@ class DaemonServer:
     served on another is fine, as long as only the serving thread touches it afterwards.
 
     `owner` is a `LocalOwner`, or anything with the protocol's six calls plus `listen`,
-    `join` and `closing`. `info` is added to what `hello` answers (`output`, `library`).
+    `join` and `closing`. `info` is added to what `hello` answers (`library`, and the
+    sitting's `instrument`, `limits` and `project_limits`).
     `defaults` fills the `directory` of a `Send`, an `Acquire` or a `SeriesJob` that names
     none.
     `on_request` is told, in one line, every request that changes something.
@@ -209,6 +210,11 @@ class DaemonServer:
     @property
     def shutting_down(self) -> bool:
         return self._shutdown_asked.is_set()
+
+    @property
+    def shutdown_reason(self) -> str:
+        """Why the shutdown was asked for, or empty before one was."""
+        return self._shutdown_reason or ""
 
     # -- publishing --------------------------------------------------------------
 
@@ -414,6 +420,12 @@ class Hello:
     output: str = ""
     library: str = ""
     holder: str | None = None
+    instrument: str = ""
+    """The sitting's instrument document, its standing limits and a project's, as
+    absolute paths, each empty for none (`clockwork.sitting`). A daemon from before them
+    sends none, and a client then reads them empty."""
+    limits: str = ""
+    project_limits: str = ""
 
 
 @dataclass

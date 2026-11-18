@@ -79,6 +79,7 @@ __all__ = [
     "judge",
     "load",
     "loads",
+    "outside_limits",
 ]
 
 SCHEMA_VERSION = 2
@@ -639,6 +640,18 @@ def check(method: Method | None, rendered: Rendered | None, limits: Limits | Non
         if limits.rf_drive is not None:
             problems += _electrodes.rf_refusals(method, limits.rf_drive)
     return problems
+
+
+def outside_limits(rendered: Rendered, limits: Limits) -> list[str]:
+    """Where a render lies outside `limits`, as an agent's refusal would say it: a
+    template the limits do not admit, or each knob value outside its range, its fixed
+    value or a standing cap. Empty when an agent could have sent it on these counts.
+
+    For a run a person started at the window, who is never held to the agent's limits:
+    its run record keeps these sentences (the window revision's R10; lab record, task
+    165). The boxes, electrodes and RF drive an agent's send is also checked against are
+    not knobs, and are not said here."""
+    return _template_problems(rendered, limits)
 
 
 def _template_problems(rendered: Rendered, limits: Limits) -> list[str]:

@@ -14,10 +14,22 @@ On a thread of its own, because an entry carries the file's summary, which reads
 frame: the owner's loop goes on to the next replicate while the last one is summarized.
 `drain` is called before the job's end is reported, so a client that waits for the end
 and then reads the record finds it whole. A job with no request id, or whose request has
-no record in its directory (a window run, a bench script), is left alone; an entry that
-cannot be written is dropped, never raised, since the record is the run's and never a
-reason to disturb it. Entries replace by stem, so a client that also enters a file
-(a `progress` follower of an older release) enters it once.
+no record in its directory (a bench script), is left alone; an entry that cannot be
+written is dropped, never raised, since the record is the run's and never a reason to
+disturb it. Entries replace by stem, so a client that also enters a file (a `progress`
+follower of an older release) enters it once.
+
+**A window run's record is begun here too** (`begin`, lab record, task 165): the window
+is a client that begins no record of its own, so a job that names a `source` and no
+request id has the owner mint the id, stamp it as the files' series id, and open the
+record before the job's first file exists. The decision for the owner rather than the
+window is A3 of the window revision: the daemon writes, so the record is whole however
+the window ends, and a `--fake` window's in-process owner writes the same document
+(A6). Its request block is the person's Start: the purpose line as the request's words,
+the file initials, and who was at the window; its acquisition entry adds the method's
+hash, and for a rendered method the rendered method's hash and every knob outside the
+limits the sitting carries (R10). An `mcp` or `cli` record is begun as before, by its
+client, and is byte for byte what it was.
 """
 
 from __future__ import annotations
@@ -27,14 +39,20 @@ import os
 import queue
 import threading
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
-from .. import summary
+from .. import envelope, summary
+from .. import method as method_module
 from ..acq.loop import Run
 from ..acq.uimf import RAW_SUFFIX, SUMMED_SUFFIX
-from ..record import RunRecord, brief, find
+from ..envelope import Limits
+from ..method.template import loads_template, render
+from ..naming import next_stem
+from ..record import RunRecord, brief, find, mint_id
+from .jobs import Acquire, SeriesJob
 
-__all__ = ["RecordKeeper", "file_entry", "stem_of"]
+__all__ = ["RecordKeeper", "begin", "file_entry", "stem_of"]
 
 _log = logging.getLogger(__name__)
 
@@ -62,6 +80,74 @@ def file_entry(run: Run) -> dict[str, Any]:
             "complete": run.complete, "stopped_early": run.stopped_early,
             "replicate": run.replicate, "seconds": round(run.seconds, 2),
             "summary": numbers}
+
+
+def begin(job: Acquire | SeriesJob, job_id: int, *,
+          limits: Limits | None) -> tuple[Acquire | SeriesJob, str]:
+    """Open the run record of a job that names a `source` and no request id, and answer
+    the job as the owner runs it: its request id minted and stamped as `series`, and an
+    `Acquire`'s first stem fixed, so the record is named for the file that follows it;
+    and the record's path.
+
+    `limits` are the sitting's (`LocalOwner.limits`): a rendered run records, under
+    `outside_limits`, each knob an agent's refusal would name, and null where the sitting
+    carries no limits at all. `OSError` where the record cannot be written; the caller
+    goes on without it."""
+    directory = job.directory or os.getcwd()
+    identity = mint_id(job.request)
+    if isinstance(job, SeriesJob):
+        # The plan runner's entry, with the plan and its hash, is task 166's to write.
+        record = RunRecord.open(directory, next_stem(directory, job.initials),
+                                request_id=identity, text=job.request, source=job.source,
+                                initials=job.initials, at_window=job.at_window)
+        record.append("acquisitions", {
+            "job": job_id, "series": True, "first_place": max(1, job.first_position),
+            "points": len(job.points),
+            "replicates": sum(point.replicates for point in job.points)})
+        return replace(job, series=identity), record.path
+    stem = job.stem or next_stem(directory, job.initials)
+    record = RunRecord.open(directory, stem, request_id=identity, text=job.request,
+                            source=job.source, initials=job.initials,
+                            at_window=job.at_window)
+    record.append("acquisitions", _acquisition_entry(job, job_id, limits))
+    return replace(job, series=identity, series_index=1, stem=stem), record.path
+
+
+def _acquisition_entry(job: Acquire, job_id: int, limits: Limits | None) -> dict[str, Any]:
+    """A window `Acquire` as its record's `acquisitions` keeps it."""
+    method = job.method
+    entry: dict[str, Any] = {
+        "job": job_id, "replicates": max(1, job.replicates), "first_place": 1,
+        "method": method.metadata.name if method is not None else "",
+        "method_hash": _hash(method), "template": None}
+    if not job.template:
+        return entry
+    template: dict[str, Any] = {"path": job.method_path, "hash": "",
+                                "knobs": dict(job.knobs), "labels": dict(job.labels),
+                                "method_hash": ""}
+    try:
+        rendered = render(loads_template(job.template), dict(job.knobs), dict(job.labels))
+    except Exception as exc:  # noqa: BLE001 -- the run refuses it; the record says why
+        from .local import sentence
+        template["problem"] = sentence(exc)
+        entry["template"] = template
+        return entry
+    template.update(hash=rendered.template_hash, knobs=dict(rendered.knobs),
+                    labels=dict(rendered.labels), method_hash=_hash(rendered.method))
+    entry["template"] = template
+    entry["outside_limits"] = (envelope.outside_limits(rendered, limits)
+                               if limits is not None else None)
+    return entry
+
+
+def _hash(method: object) -> str:
+    """The method's SHA-256 as its files stamp it, or empty."""
+    if method is None:
+        return ""
+    try:
+        return str(method_module.stamp(method)["method_hash"])  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001 -- a hash the record cannot take is left empty
+        return ""
 
 
 class RecordKeeper:
