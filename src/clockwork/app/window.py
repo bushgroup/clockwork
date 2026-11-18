@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -63,11 +64,14 @@ from PySide6.QtWidgets import (
 import clockwork
 
 from .. import instrument as instrument_module
-from .. import keep
+from .. import keep, library_dirs, planning
 from .. import method as method_module
-from ..acq import BeamGuard, StateRead, find_console
+from .. import series as series_module
+from ..acq import BeamGuard, StateRead, Warned, find_console
 from ..acq.loop import WHEN_ARMED, RunBegun, cautions, refusals
+from ..envelope import Limits
 from ..instrument import UNCALIBRATED, Instrument
+from ..mcp.audit import AuditLog
 from ..method import (
     MAX_ACCUMULATIONS,
     MAX_FRAMES,
@@ -85,7 +89,8 @@ from ..method import (
 from ..method import template as templates
 from ..method.template import Rendered
 from ..method.text import PaneResult, render_pane, split_trainee_file, start_order
-from ..owner import LogsOpened, SeriesJob, SeriesResult
+from ..owner import LogsOpened, PointStarted, RecordBegun, SeriesJob, SeriesResult
+from ..sitting import instrument_and_limits
 from . import errors, runqueue
 from .boxstate import Reading
 from .builder import BuildDialog
@@ -100,6 +105,7 @@ from .launch import (
 from .librarypanel import LibraryDialog
 from .naming import clean_initials, next_stem
 from .panes import BoxPane
+from .planpanel import FollowedSeries, PlanPanel, SeriesFollow
 from .queuepanel import BeamGuardDialog, QueuePanel, RandomizeDialog
 from .runlog import RunPanel
 from .runqueue import FAILED, STOPPED, QueueRow, RunQueue, outcome_of
@@ -259,6 +265,14 @@ class MainWindow(QMainWindow):
         """The job the queue is waiting on, so the sequencer reacts to its own work and
         not to a discovery or a state reading that happened to land in between."""
 
+        self._plan_job: SeriesJob | None = None
+        """The series a person started here off an open plan, until it comes back."""
+        self._prefilled = ""
+        """The purpose line a plan's `description` filled in, so a second plan replaces
+        it and a purpose the person typed is left alone (A1)."""
+        self.followed: FollowedSeries | None = None
+        """The series the followed table shows: the last any client started (R5)."""
+
         self._last_run_paths: tuple[str, str, str] = ("", "", "")
         """`(raw, summed, stem)` of the last run, for Open in mainspring and Open the
         log. The summed path is only offered once the fold has written it, and the
@@ -390,9 +404,22 @@ class MainWindow(QMainWindow):
         # width of the window under the run log, where an overnight series is read
         # beside the warnings it produced.
         self.queue_panel = QueuePanel(self.queue)
+        # A series plan is the dock's second kind of entry (lab record, task 166), and the
+        # followed table sits under both, since it follows any client's series; three
+        # widgets task 169 moves into its Queue tab as they are.
+        self.plan_panel = PlanPanel()
+        self.follow = SeriesFollow()
+        self.queue_tabs = QTabWidget()
+        self.queue_tabs.addTab(self.queue_panel, "Rows")
+        self.queue_tabs.addTab(self.plan_panel, "Series plan")
+        queue_box = QWidget()
+        queue_column = QVBoxLayout(queue_box)
+        queue_column.setContentsMargins(0, 0, 0, 0)
+        queue_column.addWidget(self.queue_tabs, 1)
+        queue_column.addWidget(self.follow, 1)
         self.queue_dock = QDockWidget("Run queue", self)
         self.queue_dock.setObjectName("run_queue")
-        self.queue_dock.setWidget(self.queue_panel)
+        self.queue_dock.setWidget(queue_box)
         self.queue_dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea
                                         | Qt.DockWidgetArea.TopDockWidgetArea)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.queue_dock)
@@ -757,6 +784,10 @@ class MainWindow(QMainWindow):
         self.queue_panel.save_requested.connect(self.save_queue)
         self.queue_panel.open_requested.connect(self.open_queue)
         self.queue_panel.guard_requested.connect(self.queue_guard)
+        self.plan_panel.open_requested.connect(lambda: self.open_plan())
+        self.plan_panel.start_requested.connect(lambda: self.start_plan())
+        self.plan_panel.stop_requested.connect(lambda: self.stop())
+        self.follow.filter_changed.connect(self._filter_run_log)
 
         self.initials.editingFinished.connect(self._initials_changed)
         self.run_panel.at_window.editingFinished.connect(lambda: self._at_window())
@@ -925,6 +956,9 @@ class MainWindow(QMainWindow):
             pane.state.set_busy(busy or not self.worker.boxes)
         self.action_console.setEnabled(not busy and not have_console and not locked)
         self.queue_panel.set_busy(busy or locked)
+        self.plan_panel.set_busy(busy or locked or self._plan_job is not None,
+                                 running=isinstance(self._job, SeriesJob)
+                                 and not self.worker.stopping)
 
         text: list[str] = []
         if blocking:
@@ -1599,6 +1633,148 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(self.queue.summary)
         self._refresh_actions()
 
+    # -- a series plan (lab record, task 166) --------------------------------
+
+    def open_plan(self, path: str = "") -> planning.Checked | None:
+        """Open a series plan and show its check; the file dialog where no path is given.
+        Answers the check, or None for a plan that did not load."""
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Open a series plan", self._directory(),
+                "Series plans (*.toml);;All files (*)")
+            if not path:
+                return None
+        self.queue_dock.setVisible(True)
+        self.queue_tabs.setCurrentWidget(self.plan_panel)
+        checked = self._check_plan(path)
+        if checked is None:
+            return None
+        description = checked.plan.description
+        purpose = self.run_panel.purpose.text().strip()
+        if description and (not purpose or purpose == self._prefilled):
+            # A1: the plan's description is the purpose until the person types over it.
+            self.run_panel.purpose.setText(description)
+            self._prefilled = description
+        self.run_panel.say(f"opened the plan {os.path.basename(path)}: "
+                           f"{len(checked.points)} points, {checked.files} files; "
+                           + self.plan_panel.custody.text())
+        self._refresh_actions()
+        return checked
+
+    def _check_plan(self, path: str) -> planning.Checked | None:
+        """The plan at `path` checked as the `series` tool checks it and drawn, or None
+        with the reason drawn instead."""
+        try:
+            text, path = series_module.text_of(path)
+            planned = series_module.loads(text)
+            template_path = planning.locate(planned.template,
+                                            library_dirs(self._plan_library()))
+            template = templates.load_template(template_path)
+            limits = self._sitting_limits()
+            checked = planning.check(
+                planned, template, template_path=template_path, path=path, limits=limits,
+                real=not self.fake, pusher_period_us=self.instrument.pusher_period_us)
+        except (series_module.PlanError, templates.TemplateError, OSError,
+                ValueError) as exc:
+            self.plan_panel.show_problem(f"The plan did not load: {exc}")
+            self.run_panel.say(f"the plan {os.path.basename(path)} did not load: {exc}",
+                               warn=True)
+            return None
+        found = AuditLog.beside(self._directory()).check_for(checked.sha256)
+        self.plan_panel.show_plan(checked, planning.custody(found))
+        return checked
+
+    def _plan_library(self) -> str:
+        """Where a plan's template is looked for: the daemon's library, which is the one
+        an agent's check used, else this window's, else the instrument's."""
+        hello = getattr(self.worker, "hello", None)
+        return (str(getattr(hello, "library", "") or "") or self.settings.library_dir
+                or clockwork.instrument_dir("golden") or "")
+
+    def _sitting_limits(self) -> Limits | None:
+        """The limits the owner's sitting carries, which a plan is shown against: a
+        daemon's, loaded from the paths its `hello` reports (E6), or an in-process
+        owner's own. `ValueError` with the sentence for limits that do not load."""
+        owner = getattr(self.worker, "owner", None)
+        hello = getattr(self.worker, "hello", None)
+        if hello is None:
+            return getattr(owner, "limits", None)
+        _, limits = instrument_and_limits(
+            fake=bool(getattr(hello, "fake", False)),
+            limits_path=str(getattr(hello, "limits", "") or ""),
+            project_limits_path=str(getattr(hello, "project_limits", "") or ""))
+        return limits
+
+    def start_plan(self) -> SeriesJob | None:
+        """Submit the open plan as the daemon's series job, `source="window"`.
+
+        The plan is read again first: a file changed since it was opened is shown again
+        with its new check and custody, and Start pressed again runs that. Its seed is
+        drawn here where it gives none, as the tool draws one, and the daemon begins the
+        record with the plan's text, hash and matched check (`keeper.begin`)."""
+        shown = self.plan_panel.checked
+        if (shown is None or self._job is not None or self.queue.running
+                or self._plan_job is not None):
+            return None
+        person = self._at_window()
+        if not person:
+            self.run_panel.say("type your initials in \"At the window\" first: every run "
+                               "you start records who started it", warn=True)
+            self.run_panel.at_window.setFocus()
+            return None
+        if not clean_initials(self.initials.text()):
+            self.run_panel.say("set the file initials first: they name the series' files",
+                               warn=True)
+            return None
+        checked = self._check_plan(shown.path) if shown.path else shown
+        if checked is None:
+            return None
+        if checked.sha256 != shown.sha256:
+            self.run_panel.say("the plan changed on disk since it was opened; its check is "
+                               "shown again, and Start runs it as it is now", warn=True)
+            return None
+        if checked.blocked():
+            return None
+        if not self.worker.console_alive:
+            self.run_panel.say("starting the acquisition console first")
+            self.start_console()
+        planned = checked.plan
+        seed = ((planned.seed if planned.seed is not None else series_module.draw_seed())
+                if planned.shuffle else None)
+        name = os.path.basename(checked.path) or "a plan"
+        job = checked.job(
+            seed=seed, label=f"acquiring the series plan {name}",
+            conditions=self.conditions.toPlainText(), directory=self._directory(),
+            initials=clean_initials(self.initials.text()),
+            request=self.run_panel.purpose.text().strip(), instrument=self.instrument,
+            instrument_path=self.instrument_path, cold_start="caution", source="window",
+            at_window=person, with_plan=True)
+        outside = checked.outside() or []
+        self.run_panel.say(
+            f"starting {name}: {len(checked.points)} points, {checked.files} files, about "
+            f"{checked.minutes if checked.minutes is not None else '?'} minutes, "
+            + (f"seed {seed}" if seed is not None else "in planned order")
+            + (f"; {len(outside)} point(s) outside the agent's limits" if outside else ""))
+        self._plan_job = job
+        self.worker.submit(job)
+        # Grey until the job's start re-reads the buttons: a second press in between would
+        # be a second series.
+        self.plan_panel.set_busy(True)
+        return job
+
+    def _filter_run_log(self, only: bool) -> None:
+        series = self.followed
+        self.run_panel.filter_to(series.tag if only and series is not None else None)
+
+    def _follow_series(self, job: SeriesJob) -> None:
+        """A series has started, whoever started it: the followed table is its (R5)."""
+        self.followed = FollowedSeries.of(job, self.worker.origin(job),
+                                          tag=self.run_panel.job_tag)
+        self.follow.follow(self.followed)
+        if self.follow.only.isChecked():
+            self._filter_run_log(True)
+        self.queue_dock.setVisible(True)
+
     # -- opening what a run left ---------------------------------------------
 
     def _live_run_path(self) -> str:
@@ -1747,6 +1923,16 @@ class MainWindow(QMainWindow):
                 self._logged = (event.directory, event.stem)
             if isinstance(event, RunBegun):
                 self._run_begun(event)
+            followed = self.followed
+            if followed is not None and not followed.ended and isinstance(
+                    event, (PointStarted, Warned, RecordBegun)):
+                if isinstance(event, PointStarted):
+                    followed.point_started(event.number)
+                elif isinstance(event, Warned):
+                    followed.warned()
+                elif not followed.request_id:
+                    followed.request_id = event.request_id
+                self.follow.refresh()
             if isinstance(event, StateRead):
                 # The panels are fed from the send's own readings rather than by
                 # queuing a second `read_state` after every send. The reading
@@ -1768,6 +1954,8 @@ class MainWindow(QMainWindow):
         if origin:
             self.run_panel.say(f"{origin} started a job in clockwork serve: {job.label}")
         self.run_panel.begin(label)
+        if isinstance(job, SeriesJob):
+            self._follow_series(job)
         self.statusBar().showMessage(label)
         self._refresh_actions()
 
@@ -1781,6 +1969,11 @@ class MainWindow(QMainWindow):
             # A series sends each point itself, so the boxes hold its last send and not
             # whatever this window last sent (lab record, task 91).
             self._armed = result.armed
+            if self.followed is not None and isinstance(job, SeriesJob):
+                self.followed.finished(result.points_done, result.stopped)
+                self.follow.refresh()
+        if job is self._plan_job:
+            self._plan_job = None
         elif isinstance(result, SendResult):
             self._armed = result.armed
             self.run_panel.say(
@@ -1816,6 +2009,11 @@ class MainWindow(QMainWindow):
             # Part way through, it may have sent any of its points: what the boxes hold
             # is no longer known here.
             self._armed = ()
+            if self.followed is not None:
+                self.followed.failed()
+                self.follow.refresh()
+        if job is self._plan_job:
+            self._plan_job = None
         if job is self._queue_job:
             self._row_finished(FAILED, message)
         self._scan_if_put_off()
@@ -1956,6 +2154,10 @@ class MainWindow(QMainWindow):
         return Enable(box=box, channel=channel.upper()) if box and channel else None
 
     def _run_done(self, run: object) -> None:
+        followed = self.followed
+        if followed is not None and not followed.ended:
+            followed.run_done()
+            self.follow.refresh()
         raw = getattr(run, "raw_path", "")
         summed = getattr(run, "summed_path", "")
         stem = os.path.splitext(os.path.basename(raw))[0]

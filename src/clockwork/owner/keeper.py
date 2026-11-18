@@ -30,6 +30,11 @@ the file initials, and who was at the window; its acquisition entry adds the met
 hash, and for a rendered method the rendered method's hash and every knob outside the
 limits the sitting carries (R10). An `mcp` or `cli` record is begun as before, by its
 client, and is byte for byte what it was.
+
+**A series plan started at the window** (lab record, task 166) carries the plan's text,
+and its record's `plans` and `acquisitions` entries are the `series` tool's for the same
+plan and seed (`clockwork.planning`), checked again here under the sitting's limits, with
+the plan's hash and the check the audit log holds of it.
 """
 
 from __future__ import annotations
@@ -96,14 +101,16 @@ def begin(job: Acquire | SeriesJob, job_id: int, *,
     directory = job.directory or os.getcwd()
     identity = mint_id(job.request)
     if isinstance(job, SeriesJob):
-        # The plan runner's entry, with the plan and its hash, is task 166's to write.
         record = RunRecord.open(directory, next_stem(directory, job.initials),
                                 request_id=identity, text=job.request, source=job.source,
                                 initials=job.initials, at_window=job.at_window)
-        record.append("acquisitions", {
-            "job": job_id, "series": True, "first_place": max(1, job.first_position),
-            "points": len(job.points),
-            "replicates": sum(point.replicates for point in job.points)})
+        if job.plan:
+            _plan_entries(record, job, job_id, directory, limits)
+        else:
+            record.append("acquisitions", {
+                "job": job_id, "series": True, "first_place": max(1, job.first_position),
+                "points": len(job.points),
+                "replicates": sum(point.replicates for point in job.points)})
         return replace(job, series=identity), record.path
     stem = job.stem or next_stem(directory, job.initials)
     record = RunRecord.open(directory, stem, request_id=identity, text=job.request,
@@ -111,6 +118,49 @@ def begin(job: Acquire | SeriesJob, job_id: int, *,
                             at_window=job.at_window)
     record.append("acquisitions", _acquisition_entry(job, job_id, limits))
     return replace(job, series=identity, series_index=1, stem=stem), record.path
+
+
+def _plan_entries(record: RunRecord, job: SeriesJob, job_id: int, directory: str,
+                  limits: Limits | None) -> None:
+    """A window series' `plans` and `acquisitions` entries, as the `series` tool writes
+    them for the same plan and seed: the plan checked again from its text and the
+    template's (`clockwork.planning.check`), under the sitting's limits and the job's
+    pusher period, with the hash and the audit log's matching `check` (the window
+    revision's A5). A plan that does not check again leaves a note saying why, and the
+    run goes on: the job is the client's, already judged."""
+    from .. import planning
+    from ..mcp.audit import AuditLog  # the MCP tools import the owner
+    from ..series import loads
+
+    first = max(1, job.first_position)
+    try:
+        judged = planning.check(
+            loads(job.plan), loads_template(job.template), template_path=job.method_path,
+            path=job.plan_path, limits=limits,
+            pusher_period_us=job.instrument.pusher_period_us)
+        planned = sorted(point.index - (first - 1) for point in job.points)
+        if planned != [checked.point.index for checked in judged.points]:
+            raise ValueError(f"its {len(judged.points)} points are not the job's "
+                             f"{len(job.points)}")
+        found = AuditLog.beside(directory).check_for(judged.sha256)
+    except Exception as exc:  # noqa: BLE001 -- the record says why, never raises
+        from .local import sentence
+        record.append("notes", {"text": f"the series' plan did not check again, so the "
+                                        f"record holds its text alone: {sentence(exc)}",
+                                "by": "server"})
+        record.append("plans", {"text": "", "job": job_id, "plan": job.plan,
+                                "path": job.plan_path, "sha256": planning.sha256(job.plan)})
+        record.append("acquisitions", {
+            "job": job_id, "series": True, "first_place": first,
+            "points": len(job.points),
+            "replicates": sum(point.replicates for point in job.points)})
+        return
+    entry = judged.plans_entry(job=job_id, seed=job.seed, first_place=first, checked=found)
+    # The order the job carries, which is the one acquired, over the one the seed draws
+    # here: the two agree for every job `Checked.job` built.
+    entry["order"] = [point.index for point in job.points]
+    record.append("plans", entry)
+    record.append("acquisitions", judged.acquisitions_entry(job=job_id, first_place=first))
 
 
 def _acquisition_entry(job: Acquire, job_id: int, limits: Limits | None) -> dict[str, Any]:

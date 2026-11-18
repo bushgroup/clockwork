@@ -8,9 +8,10 @@ a series is acquired in shuffled order, so that drift in the source or the instr
 across the knob values rather than confounded with them, and a shuffled series can only be read
 back if every file says where it sat in the plan and what shuffled it. Clockwork stores a plan as a
 small [TOML](https://toml.io) document, reads it with `clockwork.series`, and acquires it with the
-`series` tool of the [MCP server](mcp-server.md) or `clockwork series PLAN` at the
-[command line](command-line.md). The window's run queue is a separate thing and does not read
-plans.
+`series` tool of the [MCP server](mcp-server.md), `clockwork series PLAN` at the
+[command line](command-line.md), or Start in the window's queue dock, where a person opens the
+plan, reads its check and starts it ([at the window](#at-the-window)). All three routes check the
+plan with one function and submit the same job.
 
 ## A grid
 
@@ -152,6 +153,41 @@ writes no record, and answers each point's knob values, repetitions, files and m
 planned order, or the refusal the series would meet. A plan's cost can therefore be seen, and
 the plan cut, before anyone is asked to run it.
 
+## At the window
+
+To run a plan an agent wrote, or one written by hand, a person opens it in the window's queue dock
+with Open plan… and starts it there. The window checks the plan as the `series` tool does with
+`check` true and shows the answer as a table: each point in planned order with its knob values,
+repetitions, files and minutes, and the totals beneath. It then reads the output directory's
+[audit log](mcp-server.md#the-audit-log) for a `series` call made with `check` true whose plan has
+the SHA-256 of the plan opened, and says under the table what it found: "checked through mcp at
+14:02, unchanged since", or "no check of this text on record". A plan edited by one character
+after an agent checked it therefore shows as unchecked, and it still runs.
+
+A person at the window is held to the template's ranges and the acquisition loop's refusals, as
+every route is, but not to the agent's limits. A point outside the limits the daemon's sitting
+carries is marked in the table with the sentence an agent's refusal would have used, the plan can
+still be started, and the run record lists every such point under `outside_limits`; where the
+daemon carries no limits, nothing is marked and the record holds null. What the boxes read back
+after each point's send is compared with what the point declares, and a difference is said in
+the run log but never refuses the point.
+
+Start needs the person's initials in "At the window", and the purpose line beside it is filled
+from the plan's `description` until the person types over it. The window draws the seed where
+the plan gives none, as the tool does, and submits the series as one job of the daemon with
+`source` `window`. The daemon mints the request id and begins the run record, whose `plans` entry
+holds what the `series` tool writes for the same plan, together with the plan's hash and the
+check it matched ([run record](run-record.md#the-sections)). The files, their stamps and the order
+acquired are those the tool leaves for the same plan and seed.
+
+The window follows every series the daemon runs, whichever client started it, in a table beneath
+the plan: each point's state, the point in flight with its knob values and which of its files is
+being acquired, the minutes left as the sum of the remaining points' planned minutes, and who
+started it, i.e., the client and, for a series started at the window, the person. Only a point
+that failed, was stopped or was skipped is coloured. Each point counts the warnings the run log
+gave while it ran, and the run log can be narrowed to the series' own lines. Stop ends a series
+whichever client started it.
+
 ## What each file records
 
 Every file of a series stamps the series parameters that the
@@ -171,6 +207,12 @@ that continues an earlier request by its id takes its numbers after the request'
 a request's indices and positions never repeat.
 
 A series stopped part way leaves the files it finished, each stamped as above, and the run record
-says after which point it stopped and why. The record's `plans` section holds the plan's text, the
-seed, the order drawn, and each point's knob values, repetitions and minutes, so the plan can be
-set beside the files it produced.
+says after which point it stopped and why. The record's `plans` section holds the plan's text and
+its SHA-256, the seed, the order drawn, and each point's knob values, repetitions and minutes, so
+the plan can be set beside the files it produced and beside the audit log's line for each call
+that was given it.
+
+The hash is taken of the plan's text as clockwork reads it, with Windows line endings made
+Unix ones, whichever way the plan arrived. A plan passed inline and the same plan saved by a
+Windows editor and passed as a path therefore hash alike, whereas any other difference, a
+trailing space included, changes the hash.

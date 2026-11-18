@@ -195,6 +195,10 @@ class PlannedPoint:
     replicates: int = 1
     reference: str = ""
     """`start` or `end` for a reference at the template's defaults, else empty."""
+    minutes: float | None = None
+    """About how long its files take, as the plan's check reckoned it; None where that
+    was not known, or for a job built before points carried it. A follower's minutes
+    left are the sum over the points not yet done (lab record, task 166)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,7 +218,8 @@ class SeriesJob(Job):
 
     `cold_start` is the standing limits' rule for the series' template, which judges
     what each send read back against what its point declares, as `acquire` judges what
-    an `arm` read back; empty judges nothing, which is every job the window submits.
+    an `arm` read back; empty judges nothing. A plan the window starts carries `caution`:
+    what the boxes hold is said, and never refuses a person (R10, lab record, task 166).
     """
 
     label: str = "acquiring a series"
@@ -240,6 +245,13 @@ class SeriesJob(Job):
     source: str = ""
     """As `Acquire.source`: `window` has the owner begin the series' record."""
     at_window: str = ""
+    plan: str = ""
+    """The series plan's text, for a job whose record the owner begins: it checks the
+    plan again (`clockwork.planning`) and writes the record's `plans` entry, hash and all,
+    as the `series` tool writes it (lab record, task 166). Empty for a job whose client
+    wrote its own."""
+    plan_path: str = ""
+    """The file the plan was opened from, or empty."""
 
 
 @dataclass(frozen=True, slots=True)

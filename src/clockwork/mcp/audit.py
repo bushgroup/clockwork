@@ -23,6 +23,12 @@ kilobytes, and what an auditor needs is whether two calls were given the same on
 line carries its SHA-256 and length instead. A result is summarised to its top-level
 scalars and the lengths of its lists, for the same reason: the result itself went to
 the caller, and the files hold what matters.
+
+**Every `series` line carries `plan_sha256`**, a check's and a refusal's too: the hash of
+the plan's text as it is read, LF line endings, however the plan was passed
+(`clockwork.planning.plan_sha256`). The hashed argument alone would not tie a run to its
+check, since a plan passed as a path is logged as the path. `check_for` finds the check of
+a hash, for the window and for a series' run record (lab record, task 166).
 """
 
 from __future__ import annotations
@@ -132,7 +138,10 @@ class AuditLog:
 
     def write(self, *, tool: str, arguments: Mapping[str, object], seconds: float,
               result: object = None, error: str | None = None,
-              request: Mapping[str, str] | None = None) -> None:
+              request: Mapping[str, str] | None = None,
+              extra: Mapping[str, object] | None = None) -> None:
+        """One line. `extra` adds keys of one tool's own after the common ones: a
+        `series` line's `plan_sha256` (lab record, task 166)."""
         if not self.path:
             return
         line = {
@@ -145,6 +154,7 @@ class AuditLog:
             "seconds": round(seconds, 3),
             "session": self.session or None,
             "via": self.via or None,
+            **(extra or {}),
         }
         text = json.dumps(line, ensure_ascii=False, separators=(",", ":"))
         with self._guard:
@@ -190,6 +200,26 @@ class AuditLog:
             if (isinstance(request, dict) and request.get("id")
                     and request.get("text") == words and line.get("session") == session):
                 found = str(request["id"])
+        return found
+
+    def check_for(self, sha256: str) -> dict[str, object] | None:
+        """The latest `series` call made with `check` true, answered without error, on a
+        plan whose text hashes to `sha256`: `{time, via, session}`, or None.
+
+        What ties a run to the check that came before it (the window revision's A5):
+        the window says "checked through mcp at 14:02, unchanged since" off it, and a
+        series' run record keeps it. Every segment is read, so a check made before a
+        `seal_calls` is still found."""
+        if not sha256:
+            return None
+        found = None
+        for line in self.lines():
+            arguments = line.get("arguments")
+            if (line.get("tool") == "series" and line.get("error") is None
+                    and line.get("plan_sha256") == sha256
+                    and isinstance(arguments, Mapping) and arguments.get("check") is True):
+                found = {"time": line.get("time"), "via": line.get("via"),
+                         "session": line.get("session")}
         return found
 
     def requests(self) -> dict[str, str]:

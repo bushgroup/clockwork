@@ -31,7 +31,7 @@ from .method.template import Template, format_number
 
 __all__ = ["PLAN_SCHEMA", "REARM_GAP_S", "REFERENCES", "SEED_LIMIT", "Plan", "PlanError",
            "Point", "acquisitions", "describe", "draw_seed", "expand", "files", "from_dict",
-           "load", "loads", "looks_inline", "order", "resolve", "seconds"]
+           "load", "loads", "looks_inline", "order", "resolve", "seconds", "text_of"]
 
 PLAN_SCHEMA = 1
 
@@ -290,16 +290,25 @@ def describe(point: Point) -> str:
     return f"point {point.index} ({values or 'the defaults'})"
 
 
-def resolve(plan: str) -> tuple[Plan, str]:
-    """The plan `plan` gives, as its text or as a path, and the path ('' for text).
+def text_of(plan: str) -> tuple[str, str]:
+    """The text a plan argument gives, line endings normalized to LF as `loads` reads it,
+    and the file's path ('' for text passed inline). `PlanError` for a path that cannot
+    be read.
 
     A path is taken as given when absolute and against the working directory
     otherwise, as a command line's file argument is."""
     if looks_inline(plan):
-        return loads(plan), ""
+        return plan.replace("\r\n", "\n"), ""
     path = os.path.abspath(plan)
     try:
-        return load(path), path
+        with open(path, encoding="utf-8") as handle:
+            return handle.read().replace("\r\n", "\n"), path
     except OSError as exc:
         raise PlanError([f"the plan {plan!r} is neither a plan's text nor a file that can "
                          f"be read: {exc.strerror or exc}"]) from exc
+
+
+def resolve(plan: str) -> tuple[Plan, str]:
+    """The plan `plan` gives, as its text or as a path, and the path ('' for text)."""
+    text, path = text_of(plan)
+    return loads(text), path

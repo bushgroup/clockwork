@@ -68,6 +68,7 @@ from .. import (
     envelope,
     library_dirs,
     library_setting,
+    planning,
     summary,
 )
 from .. import manifest as manifest_module
@@ -94,7 +95,6 @@ from ..owner import (
     JobFailed,
     JobFinished,
     JobStarted,
-    PlannedPoint,
     PointStarted,
     Progress,
     ReadState,
@@ -298,6 +298,11 @@ class Toolbox:
         started = time.monotonic()
         result: dict | None = None
         error: str | None = None
+        # Every `series` line, a check's and a refusal's too, carries the hash of the
+        # plan's text however it was passed: the argument alone is the text hashed as
+        # given, or a path whose file can change (the window revision's A5).
+        extra = ({"plan_sha256": planning.plan_sha256(arguments.get("plan"))}
+                 if name == "series" else None)
         try:
             self.log.session = self._session_of()[0]
         except DaemonError:
@@ -320,7 +325,7 @@ class Toolbox:
         finally:
             self.log.write(tool=name, arguments=arguments, result=result, error=error,
                            seconds=time.monotonic() - started,
-                           request=self._request_for_log(arguments, result))
+                           request=self._request_for_log(arguments, result), extra=extra)
         if name in SEALS:
             # After the line: the segment ends with the call that ended it.
             try:
@@ -781,37 +786,24 @@ class Toolbox:
             raise ToolFailure(f"the plan's template {planned.template} does not open: "
                               f"{exc.strerror or exc}") from exc
         self._refuse_unless_allowed(None, None, request)
-        renders: list[Rendered] = []
-        refused: list[str] = []
-        real = not self.owner.status().fake  # type: ignore[attr-defined]
-        for point in points:
-            name = series_module.describe(point)
-            try:
-                rendered = template_module.render(template, dict(point.knobs),
-                                                  dict(planned.labels))
-            except TemplateError as exc:
-                refused.append(f"{name}: {exc}")
-                continue
-            found = refusals(rendered.method) + envelope.check(
-                rendered.method, rendered, self.limits, real=real)
-            if found:
-                refused.append(f"{name}: " + "; ".join(found))
-            renders.append(rendered)
+        # The plan's path to its job is `clockwork.planning`'s, which the window takes
+        # too; the limits' verdict comes back as data, and here it refuses.
+        judged = planning.check(
+            planned, template, template_path=template_path, path=plan_path,
+            limits=self.limits, real=not self.owner.status().fake,  # type: ignore[attr-defined]
+            pusher_period_us=self.instrument.pusher_period_us)
+        refused = judged.agent_refusals()
         if refused:
             raise ToolFailure("the series was refused whole and nothing was sent: "
                               + "; ".join(refused))
-        spent = series_module.acquisitions(points)
-        costs = [self._point_entry(point, rendered)
-                 for point, rendered in zip(points, renders, strict=True)]
-        seconds = [self._point_seconds(point, rendered)
-                   for point, rendered in zip(points, renders, strict=True)]
-        minutes = (None if None in seconds
-                   else round(sum(s for s in seconds if s is not None) / 60, 1))
+        spent = judged.acquisitions
+        minutes = judged.minutes
         if check:
             return {"sent": False, "template": template_path,
-                    "template_hash": template.hash[:HASH_DIGITS], "points": costs,
-                    "acquisitions": spent, "files": series_module.files(points),
-                    "minutes": minutes}
+                    "template_hash": template.hash[:HASH_DIGITS],
+                    "points": judged.entries(), "acquisitions": spent,
+                    "files": judged.files, "minutes": minutes}
+        renders = [point.rendered for point in judged.points if point.rendered is not None]
         found = self._read_boxes(renders[0].method)
         mode = self._cold_start_mode(renders[0])
         cautioned: list[str] = []
@@ -828,50 +820,31 @@ class Toolbox:
                                   + _cold_start_refusal(stopped))
             cautioned += [line for line in noted if line not in cautioned]
         identity, words = self._request(request, request_id)
-        count = series_module.files(points)
+        count = judged.files
         with self._guard:
             place = self._places.get(identity) or self._next_place_on_disk(identity)
             self._places[identity] = place + count
         seed = (planned.seed if planned.seed is not None else series_module.draw_seed()
                 ) if planned.shuffle else None
-        executed = series_module.order(points, seed)
-        by_index = {point.index: rendered for point, rendered in zip(points, renders,
-                                                                     strict=True)}
-        offset = place - 1
-        job = SeriesJob(
-            label=f"acquiring series {identity}",
-            points=tuple(PlannedPoint(index=offset + point.index,
-                                      method=by_index[point.index].method,
-                                      knobs=dict(by_index[point.index].knobs),
-                                      replicates=point.replicates,
-                                      reference=point.reference) for point in executed),
-            series=identity, seed=seed, first_position=place, setup=setup,
-            conditions=conditions, directory=self.output, initials=who, request=words,
-            instrument=self.instrument, instrument_path=self.instrument_path,
-            method_path=template_path, template=template.text,
-            labels=dict(planned.labels),
-            cold_start=mode)
+        job = judged.job(
+            seed=seed, first_position=place, label=f"acquiring series {identity}",
+            series=identity, setup=setup, conditions=conditions, directory=self.output,
+            initials=who, request=words, instrument=self.instrument,
+            instrument_path=self.instrument_path, cold_start=mode)
         record = RunRecord.open(self.output, next_stem(self.output, who),
                                 request_id=identity, text=words, initials=who,
                                 source=self.route)
         handle = self._submit_recorded(job, record)
         with self._guard:
             self._planned[handle.id] = count
-        order = [offset + point.index for point in executed]
-        record.append("plans", {
-            "text": planned.description, "job": handle.id, "plan": planned.text,
-            "path": plan_path, "template": template_path, "template_hash": template.hash,
-            "labels": dict(planned.labels), "seed": seed, "shuffled": seed is not None,
-            "first_place": place, "acquisitions": spent, "files": count,
-            "minutes": minutes,
-            "points": [{**cost, "index": offset + cost["index"]} for cost in costs],
-            "order": order})
+        entry = judged.plans_entry(job=handle.id, seed=seed, first_place=place,
+                                   checked=self.log.check_for(judged.sha256))
+        record.append("plans", entry)
         record.append("acquisitions", {
-            "job": handle.id, "series": True, "replicates": planned.replicates,
-            "first_place": place, "points": len(points), "method": template.name,
+            **judged.acquisitions_entry(job=handle.id, first_place=place),
             "cold_start": cautioned})
         return {"job": handle.id, "request_id": identity, "label": handle.label,
-                "seed": seed, "order": order, "first_place": place,
+                "seed": seed, "order": entry["order"], "first_place": place,
                 "acquisitions": spent, "files": count, "points": len(points),
                 "minutes": minutes, "cold_start": cautioned, "record": record.path,
                 "follow": f"call progress with job={handle.id}"}
@@ -1650,26 +1623,6 @@ class Toolbox:
         rendered = template_module.render(template_module.load_template(path),
                                           dict(knobs or {}), dict(labels or {}))
         return rendered.method, rendered, path
-
-    def _point_seconds(self, point: series_module.Point, rendered: Rendered) -> float | None:
-        """About how long a series point's files take to acquire.
-
-        At the instrument document's pusher period, which is what the digitizer is
-        checked against, or else at the period the template assumed; with neither, None
-        rather than a guess."""
-        period = self.instrument.pusher_period_us or rendered.tick_us
-        if period is None:
-            return None
-        return series_module.seconds(rendered.method, point.replicates, period)
-
-    def _point_entry(self, point: series_module.Point, rendered: Rendered) -> dict:
-        """One series point as the record and a `check` give it: its knobs, the
-        repetitions each file acquires, and its minutes."""
-        seconds = self._point_seconds(point, rendered)
-        return {"index": point.index, "knobs": dict(point.knobs),
-                "repetitions": rendered.method.acquisition.accumulations,
-                "replicates": point.replicates, "reference": point.reference,
-                "minutes": None if seconds is None else round(seconds / 60, 1)}
 
     def _refuse_unless_allowed(self, loaded: Method, rendered: Rendered | None,
                                request: str) -> None:

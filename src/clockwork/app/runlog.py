@@ -230,6 +230,12 @@ class RunPanel(QWidget):
         self._groups: dict[str, QTreeWidgetItem] = {}
         self._started = time.monotonic()
         self._reading_back: QTreeWidgetItem | None = None
+        self.job_tag = 0
+        """The run log's number for the job in flight, from 1, or 0 between jobs: every
+        line is tagged with it, so the log can be narrowed to one job's lines (the window
+        revision's D5; lab record, task 166)."""
+        self._jobs = 0
+        self._only: int | None = None
 
         self.bar = QProgressBar()
         self.bar.setRange(0, 1)
@@ -314,11 +320,29 @@ class RunPanel(QWidget):
         self.progress = Progress()
         self.caption.setText(what)
         self.bar.setRange(0, 0)  # indeterminate until a run says how many frames
+        self._jobs += 1
+        self.job_tag = self._jobs
 
     def idle(self, what: str = "") -> None:
         self.bar.setRange(0, 1)
         self.bar.setValue(1 if self.progress.of else 0)
         self.caption.setText(what)
+        self.job_tag = 0
+
+    def filter_to(self, tag: int | None) -> None:
+        """Show only the lines of job `tag` (`job_tag` while it ran), or every line for
+        None. Lines added later are shown or hidden by the same rule."""
+        self._only = tag
+        for index in range(self.log.topLevelItemCount()):
+            item = self.log.topLevelItem(index)
+            item.setHidden(tag is not None and item.data(0, _JOB) != tag)
+
+    def _add(self, item: QTreeWidgetItem) -> None:
+        """A top-level line, tagged with the job in flight and hidden if filtered out."""
+        item.setData(0, _JOB, self.job_tag)
+        self.log.addTopLevelItem(item)
+        if self._only is not None and self.job_tag != self._only:
+            item.setHidden(True)
 
     def as_text(self) -> str:
         """Every line of the log, in order, as `time<TAB>text`.
@@ -362,7 +386,7 @@ class RunPanel(QWidget):
         item = QTreeWidgetItem([self._stamp(), text])
         if warn:
             _colour(item, self._warn_colour())
-        self.log.addTopLevelItem(item)
+        self._add(item)
         self._scroll(item)
         return item
 
@@ -478,7 +502,7 @@ class RunPanel(QWidget):
         if parent is None:
             parent = QTreeWidgetItem([self._stamp(), ""])
             _colour(parent, self._warn_colour())
-            self.log.addTopLevelItem(parent)
+            self._add(parent)
             self._groups[key] = parent
             # Open from the first line rather than on click. A group that hides a
             # setting the method has an opinion about elsewhere is the log doing the
@@ -504,6 +528,9 @@ class RunPanel(QWidget):
     def _scroll(self, item: QTreeWidgetItem) -> None:
         self.log.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtBottom)
 
+
+_JOB = int(Qt.ItemDataRole.UserRole) + 2
+"""Where a top-level line records the run log's number for the job it was said under."""
 
 _IS_WARNING = int(Qt.ItemDataRole.UserRole) + 1
 """Where a line records that it is a warning, for the clipboard to read back.

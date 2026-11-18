@@ -20,7 +20,7 @@ A run record is begun on the route the request came by, and that route is its `s
 |---|---|---|
 | `mcp` | a session's tool call through `clockwork-mcp` | the MCP server, as it arms or submits the job |
 | `cli` | a verb of `clockwork-cli`, typed by a person or run from an agent's shell | the command line, as it arms or submits the job |
-| `window` | a person pressing Acquire at the window | the daemon, when it starts the job |
+| `window` | a person pressing Acquire, or starting a series plan, at the window | the daemon, when it starts the job |
 
 Records written before clockwork 1.2.0 say `agent` for both `mcp` and `cli`, without saying which;
 the audit log's `via` tells them apart. A request continued under its identifier from another
@@ -31,7 +31,8 @@ its files began a record for it with `window` as the source. That still happens 
 acquired before 1.2.0. From 1.2.0 every run started at the window has a record of its own from the
 moment its job starts, written by the daemon that acquires it, so a window run's record is whole
 however the window ends. One press of Acquire is one request and one record, whatever its replicate
-count; a press of Replicate is another.
+count; a press of Replicate is another, and so is each Start of a series plan, however many points
+it has.
 
 The daemon enters each file in its request's record as the file is written, on every route, before
 it reports the job's end. A client that waits for a job to end and then reads the record therefore
@@ -80,8 +81,18 @@ the code of the ion under study, whereas `at_window` names a person.
 `plans` holds what a request set out to do. For `arm`, it is the agent's stated plan, `{text}`.
 For a series, it is the whole plan: `text` (the plan's description), `job`, `plan` (the plan's
 TOML text), `path`, `template` and `template_hash`, `labels`, `seed` and `shuffled`, `first_place`,
-`acquisitions`, `files` and `minutes`, `points` (each point's index, knobs, replicates and
-minutes), and `order`, the planned indices in the order acquired.
+`acquisitions`, `files` and `minutes`, `points` (each point's index, knobs, repetitions,
+replicates, reference and minutes), and `order`, the planned indices in the order acquired. Then:
+
+| Key | What it holds |
+|---|---|
+| `sha256` | The SHA-256 of `plan`, the text with Windows line endings made Unix ones, as every `series` line of the audit log carries it |
+| `checked` | The latest `series` call made with `check` true on a plan of this hash, read from the audit log in the request's directory when the series started: `{time, via, session}`, the line's time, its route (`mcp` or `cli`) and its daemon session. Null where there is none, which for a series started at the window means nobody checked this text through an agent |
+| `outside_limits` | Each point outside the limits the daemon's sitting carries, `{index, problems}`, in the words an agent's refusal would use. Empty when none is, and null where there are no limits. A series an agent started has none outside, since its tool refuses such a plan, whereas a series a person starts at the window runs such points and lists them here |
+
+A series started at the window has the same `plans` entry, written by the daemon when the job
+starts, with `path` the file the person opened, and the same `acquisitions` entry less
+`cold_start`, which the window's series says in the run log as each point is sent.
 
 `arms` holds each send an agent's `arm` made: `stem`, `method` (its name), `hash` (the method's
 SHA-256, cut to its first characters), `template` (as below, or null for a hand-written method),

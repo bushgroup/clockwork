@@ -250,6 +250,9 @@ A template whose repetition count is a knob lets the plan set the count point by
 ([series plan](series-file-format.md#repetitions-per-point)). With `check` true, `series` stops
 before the read-back and sends nothing: it answers each point's knob values, repetitions, files
 and minutes, so that a session can show the person what a plan costs before asking to run it.
+A plan checked here can also be started by a person at the window, which reads this server's
+audit log for the check and says whether the plan has changed since
+([series plan](series-file-format.md#at-the-window)).
 
 ### Warm-up and stand-down
 
@@ -390,6 +393,16 @@ of its lists. The files and their logs hold everything else, so a person who was
 what an agent did, and why, from the audit log and the files alone. Only this server and the
 command line write the log: a run started at the window leaves no line in it, and is recorded by
 its files, their logs and the run record the daemon begins for it.
+
+Every `series` line, one made with `check` true and one refused alike, also carries
+`plan_sha256`, the SHA-256 of the plan's text however it was passed. The argument alone would not
+do: a plan passed as text is hashed as it was given, Windows line endings and all, and a plan
+passed as a path is recorded as the path, whose file can change afterwards. The hash is of the
+text as the plan is read, with Windows line endings made Unix ones, so a plan passed inline and
+the same plan in a file hash alike ([series plan](series-file-format.md#what-each-file-records)).
+It is null only where the plan names a file that cannot be read. This is what ties a run to the
+check that preceded it: the window looks for a `check` line of the hash of the plan a person
+opens, and the run record of a series keeps the hash and the check it matched.
 
 The log is kept in segments, so that a folder can be listed and archived while the day goes on.
 `mcp-calls.log` is the live segment, the only one written to. `seal_calls` ends it: its own line

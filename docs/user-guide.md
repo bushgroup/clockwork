@@ -301,6 +301,11 @@ updated. The window is not affected, because the limits apply only to what Claud
 
 ## The run queue
 
+**Run > Run queue** opens a dock with two tabs: **Rows**, a list of saved methods run one after
+another, and **Series plan**, a [series plan](series-file-format.md) over a template's knobs, such
+as one an agent wrote and checked. Under both, the dock follows whatever series the instrument is
+running, whichever client started it.
+
 To run a series of samples or conditions unattended, open **Run > Run queue** and add a row
 for each method document. A row names a saved method, a conditions note and a replicate count,
 and the document is read when the row starts, not when it was added, so a typo fixed in the
@@ -366,6 +371,39 @@ The defaults come from the 336 runs of one queued sweep, on which the beam was l
 with each run, so a row with fewer repetitions than the count cannot trip it, and a row whose
 repetitions gather ions far longer than the gate run's, such as a 40 s hold, can read above the
 floor with no beam at all. In both cases the next ordinary row stops the series.
+
+## Running a series plan
+
+To run a plan, open the **Series plan** tab and press **Open plan…**. The table lists every
+point in planned order with its knob values, its repetitions, its files and about how many
+minutes it takes, with the totals beneath, and is the answer the agent's `series` tool gives to
+`check` for the same plan. The line under the totals says whether an agent checked this same
+text: "checked through mcp at 14:02, unchanged since" means a check of a plan with exactly this
+text is in the output folder's audit log, whereas "no check of this text on record" means there
+is none, either because nobody checked it or because the file has been edited since. Either way
+the plan can be run.
+
+You are not held to the limits an agent is held to. A point outside them is marked in the
+**limits** column with the sentence an agent would have been refused with, the line beneath says
+how many there are, and Start runs them; the run record lists each one. A point the template's
+own ranges or the acquisition loop refuse, such as a hold longer than the template allows, is
+marked **refused** and keeps **Start the plan** grey until the plan is changed.
+
+**Start the plan** needs your initials in **At the window**, and fills **Purpose** with the
+plan's description unless you have typed a purpose of your own. The plan is read again from its
+file at Start, and a file changed since it was opened is shown again rather than run, so that
+what runs is what the table showed. The series then runs as one job: each point is sent and
+acquired in the order its seed draws, and every file records its planned index, its position
+and the seed, as for a series an agent starts. **Stop** ends it after the current repetition and
+its fold.
+
+The table beneath the tabs follows any series, started here or by an agent: each point's state,
+in the order acquired, with the point in flight in bold, how many of its files are done, its
+minutes and how many warnings the run log gave while it ran. The line above it says who started
+the series, the point in flight with its knob values and which of its files is being acquired,
+and about how many minutes are left, counted from the remaining points' planned minutes. Only a
+point that **failed**, was **stopped** or was **skipped** is coloured. Tick **Show only this
+series in the run log** to hide every other job's lines, and untick it to see them again.
 
 ## The state panel
 
