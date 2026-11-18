@@ -625,15 +625,26 @@ Re-trigger behavior:
 ### Multi-box coherence
 
 Nothing in the protocol synchronizes boxes to each other except what
-you wire: distribute a **common external clock** (Q inputs, `STBLCLK,
-EXT`) and a **common trigger** (R inputs) and boxes stay phase-locked
-indefinitely. Tick n means the same instant on every box, and drift is
-eliminated by construction. If instead each box free-runs its internal
-clock from its own 84 MHz crystal, alignment is only as good as the
-crystals' relative accuracy (order 10⁻⁵), i.e. tens of µs drift per
-second of table time. That is unacceptable for long experiments.
-**Clockwork should assume common-clock + common-trigger wiring**
-(consistent with the TOF-pusher-derived trigger design, lab record).
+you wire, and two arrangements keep them together. Distributing a
+**common external clock** (Q inputs, `STBLCLK,EXT`) and a **common
+trigger** (R inputs) keeps boxes phase-locked indefinitely: tick n
+means the same instant on every box. Alternatively, **one box takes
+the external clock** and its table raises an edge on the other boxes'
+R inputs at the start of every repetition; each of those runs on its
+own clock from that edge, so its error against the clocked box is the
+clocks' relative accuracy (order 10⁻⁵) accrued over one repetition,
+about 1 µs over 100 ms, rather than over the whole run. A box that
+free-runs its own 84 MHz crystal with nothing to release it again
+drifts by tens of µs per second of table time, which is unacceptable
+for long experiments.
+
+**SLIMPHONY is wired the second way, and it is the only arrangement
+clockwork has run.** The pusher trigger drives Q on the sequencer box
+alone, whose `STBLCLK,EXT` table counts pushes; that table's DIOB edge
+goes to the R inputs of the two ARB boxes, whose compression tables
+halt on it (`H`, §6.6) and time their steps in whole milliseconds from
+it. Nothing is connected to Q on the ARB boxes, so their tables count
+no pushes.
 
 ### DIO outputs are shared state between tables and the host
 

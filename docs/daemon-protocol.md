@@ -97,7 +97,7 @@ One command per call of the owner protocol, and `hello`.
 | `cmd` | `args` | `result` |
 |---|---|---|
 | `hello` | none | An object naming the daemon: `program`, `version` (clockwork's), `protocol` (1), `session`, `pid`, `started`, `fake`, `events` (the event socket's address), `output`, `library`, and `holder`, the lock holder's own description or null under `--fake` |
-| `submit` | `job`, `origin` (optional) | A `Handle`. The job is queued and runs after every job before it, one at a time. `origin` is a few words naming the client, such as `the clockwork window (pid 5120)` or `Claude, through the MCP server`, and is carried unexamined in the handle's own `origin` so that every other client can say whose job it is |
+| `submit` | `job`, `origin` (optional) | A `Handle`. The job is queued and runs after every job before it, one at a time. `origin` is a few words naming the client, such as `the clockwork window (pid 5120)` or `Claude, through clockwork mcp`, and is carried unexamined in the handle's own `origin` so that every other client can say whose job it is |
 | `events` | `handle`, `after` (default 0) | That job's progress numbered after `after`, oldest first, as a list of `Progress` |
 | `stop` | `reason` (optional) | null. The run in flight ends after its current repetition and its fold |
 | `snapshot` | none | The `Snapshot` the next run will be stamped with, or null before any send |

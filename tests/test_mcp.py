@@ -193,6 +193,9 @@ def test_every_tool_is_registered_with_its_arguments_and_description(fake_owner,
     assert set(listed["acquire"].input_schema["required"]) == {"request", "initials"}
     assert listed["progress"].annotations.read_only_hint is True
     assert listed["acquire"].annotations.read_only_hint is False
+    assert {name for name, entry in listed.items()
+            if entry.annotations.destructive_hint} == {"stop", "stand_down"}
+    assert not any(entry.read_only and entry.destructive for entry in TOOLS)
 
 
 # --- a whole request ----------------------------------------------------------------

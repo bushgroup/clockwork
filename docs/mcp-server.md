@@ -162,6 +162,7 @@ relative to the output directory, unless it is absolute.
 | | `arm` | `request`, `initials`, a method or template, `setup`, `conditions`, `request_id`, `plan` | The request id, the stem the first file takes, what the boxes read back, the cold-start cautions, and the run record's path |
 | | `warm_up` | none | The instrument file's standing method's `setup` phase sent, its DC bias, RF drive and ARB range ramped; whether every declared setting reads back as declared (`ok`, `differences`), the read-back, and the send log |
 | | `stand_down` | `stop`, `reason` | Every box local, its DC bias, RF drive and ARB range ramped to zero and its outputs lowered; what is not at zero, the outputs lowered, the read-back, whether the daemon, the lock and the console are gone once it has been shut down, and the [audit log](#the-audit-log) segment it sealed |
+| | `snapshot_boxes` | `note`, `directory` | Every box read back with getters only, its settings and its controller's health (uptime, the cause of the last reset, the failed bus transfers, its threads, its DC power, its last error), written to a send log, a transcript and a JSON file under one stem ([command line](command-line.md#a-snapshot-of-the-boxes)) |
 | Acquisition | `acquire` | as `arm` without `setup` and `conditions`, plus `replicates` | A job number, at once; the run proceeds on the owner |
 | | `series` | `request`, `initials`, `plan`, `conditions`, `setup`, `request_id`, `check` | A job number, at once, with the seed, the order drawn, the counts and the minutes; the daemon arms and acquires every point of the [series plan](series-file-format.md). With `check`, each point's repetitions and minutes and nothing sent |
 | | `progress` | `job`, `after`, `wait_s` | The job's events since number `after`, how many files are done of how many were asked for, and whether it is done |
@@ -178,6 +179,18 @@ relative to the output directory, unless it is absolute.
 | | `manifest` | `paths` (optional), `out` | One row per run under the paths, or the output directory: its file, stem, day, sample, knobs and marks, series place, outcome, pusher period against the declared one, verdict and note count. Written as CSV to `out`, or answered as `columns` and `rows` |
 | Routine | `list_routines` | none | Every routine: what it asks, whether it may run unattended, what it acquires or reads, its criteria in words, and whether the standing limits allow its template |
 | | `run_routine` | `name`, `initials`, `conditions` | The routine run through `arm` and `acquire` and judged: `pass`, `fail` or `could not judge` with the reason, each criterion's numbers, the report as text, and the run record it was added to |
+
+The table lists all 28 tools. Each tells the client whether it is read-only, i.e., whether it
+changes nothing: it starts no job on the daemon, writes no file and stops nothing. Thirteen are
+read-only: `list_templates`, `list_methods`, `load_method`, `diff_methods`, `validate_method`,
+`progress`, `status`, `list_files`, `summarize_file`, `windowed_intensities`,
+`arrival_time_distribution`, `ion_events` and `list_routines`. The definition is stricter than
+reading. `discover_boxes` and `read_box_state` only read the boxes, but each does it as a job on
+the daemon, and `snapshot_boxes` writes files, so none of the three is declared read-only, and
+nor are `render_template` and `manifest`, which write a file when given `to` or `out`. Two tools
+tell the client they are destructive, i.e., that they end something already under way: `stop`
+ends the run in flight, and `stand_down` zeroes the boxes and shuts the daemon down. No tool
+reaches anything beyond the instrument and the computer the server runs on.
 
 A method is named in one of two ways wherever a tool sends or checks one: `method`, a document, or
 `template` with `knobs` and `labels`, a template rendered at those values
@@ -369,7 +382,9 @@ session it was made in, and `via`, which is `mcp` for this server's calls and `c
 command line's. A long text argument, such as a method's text, is recorded as its
 SHA-256 and length rather than quoted, and a result is summarised to its numbers and the lengths
 of its lists. The files and their logs hold everything else, so a person who was away can read
-what an agent did, and why, from the audit log and the files alone.
+what an agent did, and why, from the audit log and the files alone. Only this server and the
+command line write the log: a run started at the window leaves no line in it, and is recorded by
+its files and their logs alone.
 
 The log is kept in segments, so that a folder can be listed and archived while the day goes on.
 `mcp-calls.log` is the live segment, the only one written to. `seal_calls` ends it: its own line
@@ -393,7 +408,10 @@ a request's words, the later one wins, as it would within one file.
 ## What the server does not do
 
 The server draws nothing; mainspring remains the only viewer, and a file being acquired can be
-followed live in mainspring as it can from the window. The server does not start or stop the
-daemon, change the acquisition console's settings, or send a string that is not part of a method.
+followed live in mainspring as it can from the window. The server does not start the daemon
+or change the acquisition console's settings. Every string it sends that sets anything on a box
+comes from a method, with one exception: `stand_down` ramps the boxes to zero and lowers their
+outputs, and is also the one way the server stops the daemon. The strings `read_box_state` and
+`snapshot_boxes` send are getters and set nothing.
 It serves one client over standard input and output; an HTTP transport, for a session on another
 machine, is a later addition.

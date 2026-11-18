@@ -9,7 +9,8 @@ document is what a client has to know, derived from the console's source at its 
 (`aqmd3_console.cpp`, `server.cpp`, `message.proto`, `config.txt`, `libaqmd3/`, `UIMFWriter/`).
 It is not a specification the console's authors wrote; where it says "hardcoded", the value is in
 the console's source and changes only by rebuilding it. Six of those values are read from a file
-by the fork this project runs, and are listed under Configuration.
+by the fork this project runs, and are listed under Configuration; what else the fork changes is
+listed under [What the fork changes](#what-the-fork-changes).
 
 ## Sockets
 
@@ -314,11 +315,12 @@ column defined as m/z.
 
 The console writes **one scan row per trigger that stored anything**, and never more than one. A
 frame acquired with `frame_length` = 5000 and `nbr_accumulations` = 100 yields up to 5000 rows,
-each one pusher pulse, and stores 100 as a number.
-Files written today by FALKOR through the older U1084A hold, per scan, the sum over 100 pushes.
+each one pusher pulse, and stores 100 as a number. Files written through the older U1084A by
+FALKOR, the software this instrument ran before clockwork, hold per scan the sum over 100 pushes.
 Summing passes per scan is therefore the client's or a modified console's job; the console has
 commented-out code that once cloned a frame per accumulation, so the authors met the same
-question.
+question. Clockwork sums in the client, and the fork leaves the console's behaviour here as it
+is ([glossary](glossary.md), *Accumulation*).
 
 ## Configuration (`config.txt` beside the executable)
 
@@ -558,6 +560,58 @@ nothing is acquiring. A second `init` does not rebuild that session; only a new 
 process does. The `enable io port` the client sent before the refused `acquire` is still in
 force, and a client that disabled the input for the period measurement (the bootstrap in "The
 order commands have to come in") puts it back exactly as after a measurement that worked.
+
+## What the fork changes
+
+The fork, [bushgroup/AqMD3-Acquisition-Console](https://github.com/bushgroup/AqMD3-Acquisition-Console)
+on its `clockwork` branch, began as the configuration change above and now also carries
+diagnostics and fixes for faults met on this instrument. None of them changes what a client
+depends on: every command, every successful reply and both `finished` strings are what the stock
+console sends, and the fork does not sum accumulations. A client written for either build works
+against the other, short of the reports the fork adds.
+
+The fork numbers its builds from 1.2.0, and builds before that carry upstream's 1.1.0.
+Clockwork's releases have carried versions 1.2.0 to 1.5.1, and a file records the one that wrote
+it, since its `console_version` stamp ([method file](method-file-format.md)) is the `info` reply
+quoted whole.
+The installer carries version 1.5.1, built from the fork's commit `2e07f01`, which
+`tools/stage_console.py` pins and `tools/check_public.py` checks against the staged build.
+
+Beyond configuration, the fork changes the console in eight ways.
+
+- **Reporting a failure.** An acquisition that fails publishes `error <what>` on `status`, a
+  command that fails answers `error <what>` on the command socket instead of ending the process,
+  and from 1.5.1 a driver error names the driver call that returned it (sections above).
+- **Diagnostics.** `MarkerDiagnostics` (1.3.0) and the two fault reports written whatever it says
+  (above). Every log line is flushed as it is written, so a killed console leaves its log behind.
+- **Damaged data.** From 1.3.0 a batch the data subscriber cannot sum publishes `error data:`;
+  from 1.4.0 a frame whose markers repeat the previous frame's is ended before any sample is
+  fetched against them, and a batch whose samples lag its markers is reported; from 1.5.0 a gate
+  before an acquisition's first trigger is passed over once (above).
+- **The pusher-period measurement**, which `tof width` makes and `acquire` makes first. It finds
+  the trigger records among whatever the stream still holds rather than assuming where they lie,
+  and reads both timestamp words unsigned. The period is the median of the timestamp
+  differences rather than their mean, and a period outside 1 µs to 100 ms, one too short to leave
+  a record, or fewer than two timestamps are refused. The measurement stops the digitizer however
+  it ends and tries once more after a timeout. Upstream, the leftovers of a stream that had
+  overflowed gave a period near 10¹⁸ samples, and the record size computed from it ended the
+  process on the driver's refusal.
+- **Fetching.** A markers fetch asks for a whole number of 16-element hunks, every fetch request
+  is checked for that alignment before it reaches the driver, and the samples loop keeps a running
+  total of what it has read. A markers fetch asks for the whole backlog, up to sixteen times the
+  base request, rather than one request at a time. Upstream, a misaligned request ended a frame at
+  whatever scan it had reached.
+- **Timeouts.** The fetch loops honour the timeout their caller passes, `AcquisitionTimeoutMs` for
+  an acquisition, which upstream ignores. A stock console whose card receives no triggers waits
+  for markers forever and answers nothing again; the fork's times out.
+- **The stored data.** `BPI_MZ` holds an m/z (1.2.0, above). From 1.4.1 a gate's leading gap of
+  exactly 32 768 samples is stored as the two run lengths `-32767, -1` rather than as `-32768`.
+  PNNL's UIMF-Library decoder takes a stored zero after `-32768` for an older encoder's leftover
+  and skips it without advancing a bin, which moves every later point of that scan by one bin in
+  its reading and in no other reader's. The two forms are the same gap to every other reader.
+- **Small repairs.** `info` no longer pads the model to 256 bytes with NULs or truncates the serial
+  number to the model's length, and the build links a ZeroMQ library without its AF_UNIX
+  signaler, without which the console does not stay up on this instrument's PC.
 
 ## Building it
 

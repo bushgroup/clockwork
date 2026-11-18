@@ -33,7 +33,7 @@ on_tick = 10
 off_tick = "on_tick + round(pulse_ms * 1000 / tick_us)"
 
 [marks]
-off = { ms = "off_tick * tick_us / 1000", description = "line A falls; a table event at tick n is taken to fall in record n" }
+off = { ms = "off_tick * tick_us / 1000", description = "line A falls; a table event at tick n is taken to fall in scan n" }
 
 [metadata]
 name = "two-box-example"
@@ -114,9 +114,20 @@ declares marks must declare `tick_us`.
 ## Marks
 
 A mark is a derived moment that a rendered run records, in milliseconds and as an expected
-scan, i.e., `round(ms * 1000 / tick_us)` counted from tick 0 of one ion mobility experiment.
-The expected scan takes a sequencer event at tick *n* to fall in record *n*. Whether the event
-governs record *n* or record *n* + 1 has not been measured on this instrument, so a mark's
+scan, i.e., `round(ms * 1000 / tick_us)` counted from tick 0 of one ion mobility experiment. A
+scan here is the file's `ScanNum`, which counts from 0, and the expected scan takes a sequencer
+event at tick *n* to fall in scan *n*.
+
+How a sequencer tick maps onto `ScanNum` rests on one measurement and one reading of the MIPS
+firmware source. Measured on this instrument: a frame of `scans` triggers holds `ScanNum` 0 to
+`scans` − 1. Read from the firmware (`Table.cpp`, `PerformSoftwareStart()`) and not measured: the
+sequencer's tick-0 event is latched by the software start itself, before any pusher pulse, and
+tick *n* falls on the *n*th pulse after it ([wire format](mips-wire-format.md), section 3). The
+tick-0 event raises the digitizer's gate, so the first push the digitizer records is the push of
+tick 1, and `ScanNum` *n* is the push of tick *n* + 1. Scan 0 is therefore the first push after the
+start. What has not been measured is whether a level the table changes at tick *n* is already in
+force when the digitizer samples that same push, which places the event in scan *n* − 1, or only
+from the next push, scan *n*, as the expected scan assumes. The two differ by one scan, so a mark's
 description states which convention it assumed, as the example above does.
 
 ## Holes

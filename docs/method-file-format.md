@@ -304,6 +304,12 @@ output, `A` through `P`. A method that names a digital input, `Q` through `X`, i
 anything reaches a box: the firmware acknowledges `SDIO,Q,0` and drives output `I` with it, so
 nothing downstream would catch the mistake.
 
+The gate fails open. The digitizer reads its control input as a level at every trigger, taking
+the record when it is high, and the input is high-impedance with a 10 kΩ pull-up, so an input
+with nothing connected reads high. A gate cable that has come off therefore does not stop an
+acquisition: the digitizer records every pusher pulse from the moment the console starts the
+frame, whatever the start sequence does, and the file holds pushes that no table released.
+
 Declaring it is what makes `single_frame` with more than one frame acquirable. That mode's table
 loops on the box and raises the gate at its first tick, and nothing in it lowers the gate again, so
 the second method frame would be released against a gate that is already high and would begin

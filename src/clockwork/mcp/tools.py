@@ -184,6 +184,8 @@ class Tool:
     function: Callable[..., dict]
     read_only: bool
     """True for a tool that changes nothing: no job, no file, no stop."""
+    destructive: bool = False
+    """True for a tool that ends something already under way: a run, or the daemon."""
 
     @property
     def description(self) -> str:
@@ -199,11 +201,12 @@ class Tool:
 TOOLS: list[Tool] = []
 
 
-def tool(group: str, *, read_only: bool = True) -> Callable[[Callable], Callable]:
+def tool(group: str, *, read_only: bool = True,
+         destructive: bool = False) -> Callable[[Callable], Callable]:
     """Register a `Toolbox` method as a tool, in the order the methods are written."""
     def register(function: Callable) -> Callable:
         TOOLS.append(Tool(name=function.__name__, group=group, function=function,
-                          read_only=read_only))
+                          read_only=read_only, destructive=destructive))
         return function
     return register
 
@@ -931,7 +934,7 @@ class Toolbox:
             answer["runs"] = answer["result"].pop("runs")
         return answer
 
-    @tool("acquisition", read_only=False)
+    @tool("acquisition", read_only=False, destructive=True)
     def stop(self, reason: str = "stopped at the request of the person it was for") -> dict:
         """Stop the acquisition in flight after its current repetition and its fold.
 
@@ -1362,7 +1365,7 @@ class Toolbox:
                      "declared setting(s) do not read back as declared"),
         }
 
-    @tool("hardware", read_only=False)
+    @tool("hardware", read_only=False, destructive=True)
     def stand_down(self, stop: bool = False,
                    reason: str = "stopped for the instrument's stand-down") -> dict:
         """Put the instrument to rest for the night, and stop the daemon.

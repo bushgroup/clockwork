@@ -28,10 +28,10 @@ Three terms carry more than one sense and are given both in one entry: *table*, 
   period sets the length of that record.
 - **Technical replicate.** The same method acquired again into a new file. In clockwork it is one
   button.
-- **FALKOR.** The acquisition and control software the lab runs today, which clockwork replaces
-  for the experiments this lab runs. Its files reach the digitizer through an older U1084A card and
-  hold, per scan, the sum over many pushes, which is what makes the file shape a compatibility
-  question rather than a free choice.
+- **FALKOR.** The acquisition and control software SLIMPHONY ran until clockwork replaced it in
+  September 2026. It acquired through an older U1084A card and wrote files holding, per scan, the
+  sum over many pushes, which is what makes the file shape a compatibility question rather than a
+  free choice: clockwork's summed file keeps that shape.
 - **mainspring.** The lab's UIMF reader and viewer,
   [bushgroup/mainspring](https://github.com/bushgroup/mainspring). It reads what clockwork writes.
 - **CRIMP.** Compression ratio ion mobility programming (Garimella et al., *Anal. Chem.* 2016,
@@ -160,8 +160,9 @@ Three terms carry more than one sense and are given both in one entry: *table*, 
   appends scans to a UIMF file and publishes a live summary of each batch. Clockwork is one of its
   clients, and [console-protocol.md](console-protocol.md) is what such a client has to know.
 - **Zero suppress, ZS1.** On-card data reduction in which only samples past a threshold are
-  streamed, described by a separate marker stream. The console runs it with a hardcoded threshold
-  and hysteresis and no pre- or post-gate samples.
+  streamed, described by a separate marker stream. The console runs it with no pre- or post-gate
+  samples, and with a threshold and hysteresis that the stock console hardcodes and the fork reads
+  from `config.txt` ([console-protocol.md](console-protocol.md#configuration-configtxt-beside-the-executable)).
 - **Gate.** One run of retained samples in a zero-suppressed scan. The zeros between gates are
   stored as negative run-length entries rather than as samples.
 - **Record.** One trigger's worth of samples, sized as the measured pusher period less the
@@ -174,12 +175,16 @@ Three terms carry more than one sense and are given both in one entry: *table*, 
   NonZeroCount of that trigger, and its timestamp in samples of the digitizer clock.
 - **Frame.** A numbered group of scans. `acquire frame` acquires `frame_length` scans into a named
   file, and every row it writes carries that frame number.
-- **Accumulation.** Two senses, and the difference matters. Files written today by FALKOR hold, per
-  scan, the sum over many pushes. Through the console `nbr_accumulations` is stored on the frame
-  parameters and never applied, one row per trigger that stored anything, so summing belongs to
-  the client. What a
-  method's `accumulations` count means on the wire is a question for the lab record on accumulation
-  semantics rather than for these documents.
+- **Accumulation.** Two senses, and the difference matters. In a method, `accumulations` is how
+  many ion mobility experiments are summed into one frame of the finished file. The console is
+  never asked to sum: it stores `nbr_accumulations` on the frame parameters and never applies it,
+  writing one row per trigger that stored anything, and clockwork sends 1 in every `acquire frame`
+  request. Under `per_repetition` a method frame of A accumulations is A console frames of `scans`
+  triggers each, every one released by its own start edge; under `single_frame` it is one console
+  frame of `scans` × A triggers. Either way the raw file holds single pushes with `Accumulations`
+  = 1 on every frame, and the fold writes the summed file beside it, one frame per method frame
+  with `Accumulations` = A ([method file](method-file-format.md#two-repetition-modes)). Files
+  FALKOR wrote held the sum itself, per scan, over many pushes.
 - **Batch.** The `NotifyOnScansCount` scans, 500 by default, that the console publishes and writes
   in one transaction.
 - **TIC, BPI, NonZeroCount.** Per scan, the total ion current, the base peak intensity, and the

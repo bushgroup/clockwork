@@ -18,8 +18,10 @@ Clockwork does not abstract over instruments. It assumes:
 
 - **MIPS controller boxes on USB serial**, one COM port per box, each addressed by name. The
   number of boxes is whatever the method declares.
-- **A free-running pusher trigger** clocking both the digitizer and every box's pulse-sequence
-  table. Clockwork does not generate it and does not divide it.
+- **A free-running pusher trigger** clocking the digitizer and the pulse-sequence table of the
+  box that raises the start edge, which counts pushes. The other boxes count none: they are
+  released by that edge and keep their own time from it. Clockwork does not generate the trigger
+  and does not divide it.
 - **One box's table raising the start edge**, into the digitizer's Control I/O and into the other
   boxes' R inputs. That edge is what begins an ion mobility experiment, and no other source is
   supported.

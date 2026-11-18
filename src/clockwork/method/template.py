@@ -137,9 +137,11 @@ class Mark:
     """A derived moment a rendered run records, in milliseconds and as an expected scan.
 
     `scan` is `round(ms * 1000 / tick_us)`: scans counted from tick 0 of one ion mobility
-    experiment, on the convention that a sequencer event at tick *n* falls in record
-    *n*. Whether the event governs record *n* or *n*+1 is not settled on this
-    instrument, so a mark's description should say which it assumed.
+    experiment, as a 0-based `ScanNum`, on the convention that a sequencer event at
+    tick *n* falls in scan *n*. `ScanNum` *n* is the push of tick *n*+1 on a reading
+    of the firmware; whether an event at tick *n* is in force at that tick's own push
+    (scan *n*-1) or from the next (scan *n*) is not measured on this instrument, so a
+    mark's description should say which it assumed (docs/template-file-format.md).
     """
 
     name: str

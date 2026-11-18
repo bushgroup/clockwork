@@ -82,7 +82,8 @@ def server_for(toolbox: Toolbox) -> object:
         server.add_tool(
             _adapter(toolbox, entry), name=entry.name, description=entry.description,
             annotations=ToolAnnotations(readOnlyHint=entry.read_only,
-                                        destructiveHint=False, openWorldHint=False))
+                                        destructiveHint=entry.destructive,
+                                        openWorldHint=False))
     return server
 
 

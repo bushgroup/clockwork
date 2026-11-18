@@ -392,11 +392,15 @@ A box nothing has been read off yet says so plainly instead of showing empty row
 Every acquisition writes two UIMF files beside each other:
 
 ```
-260910_BK_001.uimf          one frame per repetition
+260910_BK_001.uimf          one frame per repetition, Accumulations = 1
 260910_BK_001.summed.uimf   the method frame's repetitions folded into one, Accumulations = N
 ```
 
-alongside two more files a run always writes when the output directory is set:
+The first file holds single pushes: each of its scans is one pusher pulse, and a push that
+crossed the zero-suppress threshold nowhere stores no scan at all. The summed file holds, per
+scan, the sum over the method's N accumulations, which is the shape of a file FALKOR wrote. A
+single-frame method's raw file holds one frame per method frame instead, its repetitions one after
+another in the frame's scans. These are written alongside two more files a run always writes when the output directory is set:
 
 - **`<stem>.sent.txt`**, the send log: every string this run sent, in order, with what each box
   said back, the boxes' state readback, and the conditions note, filtered down to what a trainee
