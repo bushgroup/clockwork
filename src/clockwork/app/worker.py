@@ -72,9 +72,17 @@ from ..owner import (
     matches_wire,
     wire_fingerprint,
 )
+from ..owner.hold import Hold, HoldRefused
 from ..owner.interface import OwnerStatus, StaleHandle
 from ..owner.local import sentence
-from ..owner.remote import DEFAULT_COMMAND, DaemonError, DaemonUnavailable, Hello, RemoteOwner
+from ..owner.remote import (
+    DEFAULT_COMMAND,
+    DaemonError,
+    DaemonRefused,
+    DaemonUnavailable,
+    Hello,
+    RemoteOwner,
+)
 from .serving import why_serve_stopped, window_origin
 
 __all__ = [
@@ -268,9 +276,34 @@ class Worker(_Signals):
         """Queue a job. Never blocks; the window's own thread calls this."""
         return self.owner.submit(job)
 
-    def request_stop(self, reason: str = "stopped by the operator") -> None:
-        """Ask the run in flight to end after the current repetition and its fold."""
-        self.owner.stop(reason)
+    def request_stop(self, reason: str = "stopped by the operator", by: str = "") -> None:
+        """Ask the run in flight to end after the current repetition and its fold; `by`
+        is the person at the window, for its run record."""
+        self.owner.stop(reason, by=by, client=PROGRAM)
+
+    def pause(self, grain: str, by: str) -> None:
+        """Ask the series running to rest after its point or its repetition in flight.
+        The owner's refusal, if it has one, comes back as a `warned` line."""
+        self._person(lambda: self.owner.pause(grain, by=by, client=PROGRAM))
+
+    def resume(self, by: str) -> None:
+        self._person(lambda: self.owner.resume(by=by, client=PROGRAM))
+
+    def note(self, text: str, by: str) -> None:
+        """Keep a person's note; where it went comes back as a `said` line."""
+        self._person(lambda: self.said.emit(
+            f"note kept in {self.owner.note(text, by=by, client=PROGRAM)}"))
+
+    def _person(self, act: Callable[[], object]) -> None:
+        try:
+            act()
+        except HoldRefused as exc:
+            self.warned.emit(str(exc))
+
+    @property
+    def hold(self) -> Hold | None:
+        """A person's pause on the series running, asked for or in force."""
+        return self.owner.status().hold
 
     @property
     def stopping(self) -> bool:
@@ -418,11 +451,25 @@ class RemoteWorker(_Signals):
         """Queue a job with the daemon. Never blocks; the answer comes as signals."""
         self._inbox.put(("submit", job))
 
-    def request_stop(self, reason: str = "stopped by the operator") -> None:
+    def request_stop(self, reason: str = "stopped by the operator", by: str = "") -> None:
         """Ask the run in flight to end after the current repetition and its fold,
-        whichever client started it."""
+        whichever client started it; `by` is the person at the window, for its record."""
         self._stop_asked = True
-        self._inbox.put(("stop", reason))
+        self._inbox.put(("stop", (reason, by)))
+
+    def pause(self, grain: str, by: str) -> None:
+        """Ask the daemon to rest the series running, whichever client started it, after
+        its point or its repetition in flight. Never blocks; a refusal comes back as a
+        `warned` line, and the pause itself as the job's own events and the status."""
+        self._inbox.put(("pause", (grain, by)))
+
+    def resume(self, by: str) -> None:
+        self._inbox.put(("resume", by))
+
+    def note(self, text: str, by: str) -> None:
+        """Ask the daemon to keep a person's note; where it went comes back as a `said`
+        line."""
+        self._inbox.put(("note", (text, by)))
 
     def shutdown_daemon(self, reason: str = "the window that started it is closing") -> None:
         """Ask the daemon to shut down: the run in flight ends after its repetition and
@@ -465,6 +512,13 @@ class RemoteWorker(_Signals):
         return self._stop_asked or bool(status is not None and status.stopping)
 
     @property
+    def hold(self) -> Hold | None:
+        """A person's pause on the series running in the daemon, asked for or in force:
+        this window's or another's, since the pause is the daemon's."""
+        status = self.status
+        return status.hold if status is not None else None
+
+    @property
     def console_alive(self) -> bool:
         status = self.status
         return status is not None and status.console.state == "ready"
@@ -505,9 +559,9 @@ class RemoteWorker(_Signals):
         found += [("queued", handle) for handle in status.queued]
         return [(state, handle) for state, handle in found if not self.mine(handle)]
 
-    def busy_mine(self, kinds: tuple[str, ...] = ("Send", "Acquire")) -> bool:
-        """Whether a send or an acquisition this window submitted is running or waiting
-        in the daemon. A scan or a reading of its own left queued behind another
+    def busy_mine(self, kinds: tuple[str, ...] = ("Send", "Acquire", "SeriesJob")) -> bool:
+        """Whether a send, an acquisition or a series this window submitted is running or
+        waiting in the daemon. A scan or a reading of its own left queued behind another
         client's run is not what closing the window has to ask about."""
         status = self.status
         if status is None:
@@ -567,9 +621,22 @@ class RemoteWorker(_Signals):
                 continue
             try:
                 if what == "stop":
-                    self.owner.stop(str(value))
+                    reason, by = value  # type: ignore[misc]
+                    self.owner.stop(str(reason), by=str(by))
                 elif what == "shutdown":
                     self.owner.shutdown(str(value))
+                elif what == "pause":
+                    grain, by = value  # type: ignore[misc]
+                    self.owner.pause(str(grain), by=str(by))
+                elif what == "resume":
+                    self.owner.resume(by=str(value))
+                elif what == "note":
+                    text, by = value  # type: ignore[misc]
+                    self.said.emit(f"note kept in {self.owner.note(str(text), by=str(by))}")
+            except DaemonRefused as exc:
+                # The daemon's own sentence: why nothing here can be paused, that nothing
+                # is paused, or that it is too old to know the command.
+                self.warned.emit(str(exc))
             except DaemonError as exc:
                 self.warned.emit(f"clockwork serve could not be asked to {what}: {exc}")
 

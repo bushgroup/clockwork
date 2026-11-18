@@ -11,6 +11,8 @@ it never imports Qt (enforced by `tests/test_architecture.py` and
     local.py      `LocalOwner`: the queue, the thread, every wire call, in this process
     keeper.py     `RecordKeeper`: each file a request's job writes, entered in its run
                   record by the owner that wrote it
+    hold.py       a person's pause on a running series: the `Hold`, when one may be
+                  asked for, and the sentence an agent's tools refuse with meanwhile
     lock.py       the instrument lock: one owner per user, refused before any port
     wire.py       every job, event and result to and from JSON-ready data
     remote.py     `DaemonServer`, an owner behind two loopback ZeroMQ sockets, and
@@ -26,23 +28,29 @@ record, task 68).
 
 from __future__ import annotations
 
+from .hold import GRAINS, POINT, REPETITION, Hold, HoldRefused
 from .interface import (
     BoxStateRead,
     ConsoleChanged,
     Discovered,
     Handle,
+    Held,
     JobFailed,
     JobFinished,
     JobStarted,
     LogsOpened,
+    Noted,
     Owner,
     OwnerStatus,
+    PauseAsked,
     PointStarted,
     Progress,
     RecordBegun,
+    Resumed,
     RunDone,
     Said,
     StaleHandle,
+    StopAsked,
 )
 from .jobs import (
     Acquire,
@@ -79,6 +87,9 @@ from .remote import (
 
 __all__ = [
     "FAKE_FRAME_HOLD_S",
+    "GRAINS",
+    "POINT",
+    "REPETITION",
     "Acquire",
     "Armed",
     "BoxStateRead",
@@ -91,7 +102,10 @@ __all__ = [
     "Discover",
     "Discovered",
     "Handle",
+    "Held",
     "Hello",
+    "Hold",
+    "HoldRefused",
     "Holder",
     "InstrumentLock",
     "Job",
@@ -102,8 +116,10 @@ __all__ = [
     "LockError",
     "LockHeld",
     "LogsOpened",
+    "Noted",
     "Owner",
     "OwnerStatus",
+    "PauseAsked",
     "PlannedPoint",
     "PointStarted",
     "Progress",
@@ -111,6 +127,7 @@ __all__ = [
     "RecordBegun",
     "RemoteOwner",
     "RestartConsole",
+    "Resumed",
     "RunDone",
     "Said",
     "Send",
@@ -123,6 +140,7 @@ __all__ = [
     "StandDown",
     "StandingResult",
     "StartConsole",
+    "StopAsked",
     "WarmUp",
     "fake_rack",
     "matches_wire",

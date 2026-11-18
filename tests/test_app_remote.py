@@ -495,3 +495,90 @@ def _alive(pid: int) -> bool:
         return kernel32.WaitForSingleObject(handle, 0) == 0x102  # WAIT_TIMEOUT
     finally:
         kernel32.CloseHandle(handle)
+
+
+# -- closing over a paused series (lab record, task 167) --------------------------------------
+
+
+def paused_series(qtbot, made, tmp_path):
+    """This window's own four-point series through the daemon, paused after its first
+    point by MB at the window; the job as submitted."""
+    from test_plan_runner import PLAN, window_check, window_job
+    from test_series import TWO_KNOBS
+
+    library = tmp_path / "library"
+    library.mkdir()
+    (library / "two-knob.toml").write_text(TWO_KNOBS, encoding="utf-8")
+    plan = tmp_path / "plan.toml"
+    plan.write_text(PLAN, encoding="utf-8")
+    job = window_job(window_check(str(plan), str(library)), tmp_path)
+    made.worker.submit(Discover(method=job.points[0].method))
+    made.worker.submit(job)
+    made.run_panel.at_window.setText("MB")
+    qtbot.waitUntil(lambda: made._job is job and made.followed is not None
+                    and made.followed.current == 0, timeout=60_000)
+    qtbot.waitUntil(lambda: made.run_panel.pause_point.isEnabled(), timeout=20_000)
+    made.run_panel.pause_point.click()
+    qtbot.waitUntil(lambda: made.worker.hold is not None and made.worker.hold.reached,
+                    timeout=120_000)
+    return job
+
+
+def test_closing_over_a_paused_series_leaves_it_paused_in_the_daemon(
+        qtbot, scratch_settings, daemon, claude, tmp_path):
+    """B5: the close question's third case. The pause is the daemon's, so it outlives the
+    window that asked for it, even one that started the daemon; a window opened later
+    finds the series paused, says by whom, and resumes it."""
+    made = remote_window(qtbot, daemon.endpoint)
+    paused_series(qtbot, made, tmp_path)
+    hold = made.worker.hold
+    assert hold.by == "MB" and hold.client.startswith("the clockwork window")
+    made.worker.spawned = Started()
+    stopped: list[str] = []
+    made.worker.shutdown_daemon = lambda reason="": stopped.append(reason)
+    asked: list[str] = []
+    made._ask_close = lambda: asked.append("running") or "cancel"
+    made._ask_close_paused = lambda: asked.append("paused") or "cancel"
+    made.close()
+    assert made.isVisible() and asked == ["paused"]
+    made._ask_close_paused = lambda: "leave"
+    made.close()
+    assert not made.isVisible() and stopped == [], "the daemon is left with its series"
+    assert claude.status().hold == hold and not claude.status().stopping
+
+    later = remote_window(qtbot, daemon.endpoint)
+    told: list[str] = []
+    later._tell = lambda title, detail: told.append(f"{title}: {detail}")
+    later._ask_close = lambda: "cancel"
+    later.worker.shutdown_daemon = lambda reason="": stopped.append(reason)
+    try:
+        # The pause is read off the status, and off the job's own events replayed.
+        qtbot.waitUntil(lambda: later.followed is not None and later.worker.hold == hold
+                        and later.followed.hold == hold
+                        and not later.run_panel.held.isHidden(), timeout=30_000)
+        assert not later.run_panel.resume_button.isHidden()
+        assert later.run_panel.pause_point.isHidden()
+        # Another window's series, paused: closing says it stays paused, and leaves it.
+        later.close()
+        assert told and told[0].startswith("A paused series stays paused: ")
+        assert "paused by MB at the window since" in told[0] and stopped == []
+        assert claude.status().hold == hold
+    finally:
+        claude.resume(by="KT")
+    qtbot.waitUntil(lambda: claude.status().running is None, timeout=240_000)
+    data = [name for name in os.listdir(tmp_path) if name.endswith(".request.json")]
+    assert len(data) == 1
+
+
+def test_stop_then_close_ends_a_paused_series_where_it_rests(
+        qtbot, scratch_settings, daemon, claude, tmp_path):
+    made = remote_window(qtbot, daemon.endpoint)
+    paused_series(qtbot, made, tmp_path)
+    made.worker.spawned = Started()
+    stopped: list[str] = []
+    made.worker.shutdown_daemon = lambda reason="": stopped.append(reason)
+    made.run_panel.at_window.setText("")  # the close question's stop is not held up
+    made._ask_close_paused = lambda: "stop"
+    made.close()
+    qtbot.waitUntil(lambda: not made.isVisible(), timeout=120_000)
+    assert len(stopped) == 1 and claude.status().hold is None

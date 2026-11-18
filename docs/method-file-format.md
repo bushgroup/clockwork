@@ -357,7 +357,8 @@ acquisition ran through, and `ClockworkPusherPeriodUs`, the pusher period the in
 expected to run at, to compare with the `AverageTOFLength` it was measured at; and two more from the run itself, `ClockworkBoxState` and
 `ClockworkConditions`, which record what the boxes were holding and what the operator said about
 the rest of the instrument. A method rendered from a template adds the template, its knobs,
-labels and marks, and a run acquired in a series adds its place in the series; both sets are in
+labels and marks, a run acquired in a series adds its place in the series, and a run that a
+person paused between two of its repetitions adds the pause; all three sets are in
 [`template-file-format.md`](template-file-format.md#what-a-rendered-run-records). A method's hash changes if and only if some field in the document other than
 `file_stem` changes, which makes it a stable key for grouping acquisitions by the method that
 produced them. `file_stem` names the file, and the window sets it to the next free name for every

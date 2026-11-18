@@ -168,9 +168,9 @@ relative to the output directory, unless it is absolute.
 | | `snapshot_boxes` | `note`, `directory` | Every box read back with getters only, its settings and its controller's health (uptime, the cause of the last reset, the failed bus transfers, its threads, its DC power, its last error), written to a send log, a transcript and a JSON file under one stem ([command line](command-line.md#a-snapshot-of-the-boxes)) |
 | Acquisition | `acquire` | as `arm` without `setup` and `conditions`, plus `replicates` | A job number, at once; the run proceeds on the owner |
 | | `series` | `request`, `initials`, `plan`, `conditions`, `setup`, `request_id`, `check` | A job number, at once, with the seed, the order drawn, the counts and the minutes; the daemon arms and acquires every point of the [series plan](series-file-format.md). With `check`, each point's repetitions and minutes and nothing sent |
-| | `progress` | `job`, `after`, `wait_s` | The job's events since number `after`, how many files are done of how many were asked for, and whether it is done |
-| | `stop` | `reason` | Whether a run was in flight; it ends after its current repetition and fold |
-| | `status` | none | Simulated or real, the console, the boxes, the running and queued jobs, the method the boxes were last armed with, why sends are refused if they are, the limits in force and the acquisitions the daemon session has made |
+| | `progress` | `job`, `after`, `wait_s` | The job's events since number `after`, how many files are done of how many were asked for, whether it is done, and `paused` while a person has paused it |
+| | `stop` | `reason` | Whether a run was in flight; it ends after its current repetition and fold. Refused while a person has paused the run |
+| | `status` | none | Simulated or real, the console, the boxes, the running and queued jobs, a person's pause on the running series if there is one, the method the boxes were last armed with, why sends are refused if they are, the limits in force and the acquisitions the daemon session has made |
 | | `note` | `request_id`, `text` | Adds one note to the request's run record |
 | | `verdict` | `path`, `verdict`, `initials`, `words` | Records a person's verdict on one run (`worked`, `no_signal`, `saturated`, `wrong_sample` or `other`) in its run record, beginning a record for a run that has none |
 | Data | `list_files` | `directory` (optional) | Each run's files with sizes and times, its logs, the request it served, and whether its summed file was written |
@@ -253,6 +253,37 @@ and minutes, so that a session can show the person what a plan costs before aski
 A plan checked here can also be started by a person at the window, which reads this server's
 audit log for the check and says whether the plan has changed since
 ([series plan](series-file-format.md#at-the-window)).
+
+### While a person has paused the run
+
+A person at the window can pause any series after its point or its repetition in flight, a series
+a session started included, and only a person at the window can resume or stop it
+([daemon protocol](daemon-protocol.md#a-persons-pause)). From the moment the pause is asked for
+until it is lifted, `status` carries `paused`: the `job`, the `grain` (`point` or `repetition`),
+`by` and `client`, when it was `asked`, and `since` and `where` once the series has come to rest.
+`progress` on that job carries the same `paused` and answers at once whatever `wait_s` is, so a
+session that is following a run learns of the pause in its next answer.
+
+Every tool that would submit a job is then refused, as are `stop` and `stand_down`, each at once
+and each with one sentence that names the job, the person and the time. The tools refused are
+`discover_boxes`, `read_box_state`, `arm`, `acquire`, `series` unless `check` is true,
+`run_routine`, `warm_up`, `stand_down`, `snapshot_boxes` and `stop`. The tools that read still
+answer, `note` and `verdict` still write, and `series` with `check` true still checks a plan. No
+tool pauses a run, resumes one or stops a paused one, and the server has 28 tools as before. A
+session's part in a pause is therefore to report it, with who paused the run and since when, and
+to wait to be told. A `progress` call repeated during a pause returns the same answer each time,
+immediately.
+
+Only a series can be paused. A request acquired with `acquire` is one job of one or a few files,
+for which Stop is the person's only intervention, whereas a request acquired with `series` can be
+held at any point. A session that expects a person to intervene therefore runs the request as a
+series.
+
+A person can also type a note at the window while a session's run is in flight. The daemon keeps
+the note in the run's record under the person's initials and adds a `Noted` event to the job, so
+`progress` hands it to the session among the run's other events. A note is a record and not a
+command. A session reads it and tells the person what it says, and takes no action on its account;
+the buttons at the window are how a person commands a run.
 
 ### Warm-up and stand-down
 
@@ -370,6 +401,7 @@ come first, in this order:
 | `template_hash`, `method_hash`, `method` | The template a run was rendered from and the method acquired, as SHA-256, and the method's name |
 | `sample`, `conditions` | A rendered run's `sample` label, and the operator's conditions note with its lines joined by `; ` |
 | `outcome`, `reason`, `repetitions_planned`, `repetitions_acquired` | How the run ended, as mainspring records it; `unknown` for a file written before that record existed |
+| `held_s` | The seconds the run spent paused between its repetitions, empty for a run that was never paused |
 | `series_id`, `series_index`, `series_position`, `series_seed` | The run's place in its series or request |
 | `declared_us`, `declared_by`, `measured_us`, `ratio` | The pusher period the method assumed (`template`, the template's tick, or `instrument`, the instrument document's), the one the digitizer measured, and measured over declared |
 | `verdict`, `notes`, `record` | The newest verdict on the run, the number of notes in its request's record, and that record's file name |

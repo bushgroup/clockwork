@@ -228,10 +228,27 @@ shuffled order can only be read back if each file says so:
 | `ClockworkSeriesPosition` | Int32 | The run's place in the order acquired, counted from 1 |
 | `ClockworkSeriesSeed` | Int32 | The seed the plan was shuffled under, from 0 to 2147483647 |
 
+A run that a person paused between two of its repetitions records the pause, rendered or not,
+since the frames either side of a pause are further apart in time than their neighbours:
+
+| Parameter | Type | Content |
+|---|---|---|
+| `ClockworkHolds` | Int32 | How many times the run was held between two of its repetitions |
+| `ClockworkHeldSeconds` | Double | The seconds the run spent held, over all its holds |
+| `ClockworkHoldText` | String | One line per hold: the repetition it followed, when it began, how long it lasted, whether it was resumed or ended by a stop, and the reason given |
+
+The three are written when a hold ends, in the raw file at once and in the summed companion when
+it closes. In the raw file the first frame after a hold also carries the frame parameter
+`ClockworkHeldBeforeSeconds`, a Double holding the length of the hold. That frame is the
+repetition clockwork re-armed after the pause, and it is the one to compare with its neighbours.
+A pause between two files of a series leaves no parameter in either file, since no file was open;
+the [run record](run-record.md#the-sections) holds it.
+
 A parameter with nothing to record is left out rather than written as zero. A hand-written
 method stamps none of the template parameters, a run outside any series stamps none of the
-series parameters, a series acquired in planned order stamps no seed, and a label left empty is
-not stamped. Absence therefore means a method written by hand or a run acquired ad hoc.
+series parameters, a series acquired in planned order stamps no seed, a label left empty is
+not stamped, and a run that was never held stamps none of the hold parameters. Absence therefore
+means a method written by hand, a run acquired ad hoc, or a run acquired without a pause.
 
 A render is stamped only onto the method it rendered: the same strings on every box, the same
 declared analog state, start and reset sequences and acquisition settings. The name, the file

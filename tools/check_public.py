@@ -878,6 +878,185 @@ arm = ["SMOD,TBL"]
             owner.join(30)
 
 
+def check_hold() -> None:
+    """A person's pause on a running series (lab record, task 167).
+
+    Over a `--fake` owner: a two-point series is paused after its first repetition by a
+    rule that fires on the owner's own thread, so "asked while repetition 1 was in
+    flight" is a fact and not a race. It rests inside the file; while it rests the status
+    says so, a job submitted behind it waits, and an agent's tools read and refuse; a
+    resume re-arms and marks the first repetition after it, and both files say they were
+    held. The pinned mainspring's writer is checked for the two private names the file's
+    account of a hold is written through.
+    """
+    import datetime as dt
+    import tempfile
+    import time
+
+    from mainspring.uimf import UimfWriter
+
+    from clockwork import instrument as instrument_module
+    from clockwork import method as method_module
+    from clockwork.acq import FrameBegun, PhaseSent
+    from clockwork.acq.uimf import HOLD_KEYS
+    from clockwork.mcp import TOOLS, Toolbox, ToolFailure
+    from clockwork.owner import (
+        POINT,
+        REPETITION,
+        Discover,
+        HoldRefused,
+        JobFinished,
+        LocalOwner,
+        PlannedPoint,
+        ReadState,
+        RunDone,
+        SeriesJob,
+        StartConsole,
+    )
+    from clockwork.owner import hold as hold_module
+    from clockwork.record import RunRecord, load
+    from clockwork.summary import summarize
+
+    check_true(
+        "the pinned mainspring's writer can still be given a global parameter after a "
+        "file is created (`_upsert_globals`, `_transaction`, `global_keys`)",
+        all(hasattr(UimfWriter, name) for name in ("_upsert_globals", "_transaction")))
+
+    scans = 32
+    table = (f"STBLDAT;0:[A:1,0:A:1:B:1,500:B:0,{method_module.enable_fall_tick(scans)}:"
+             f"A:0,{method_module.table_period(scans)}:];")
+    method = method_module.from_dict({
+        "schema_version": 2,
+        "metadata": {"name": "hold", "created": dt.date(2026, 11, 18)},
+        "acquisition": {"frames": 1, "scans": scans, "accumulations": 2,
+                        "file_stem": "261118_SC_001", "repetition_mode": "per_repetition",
+                        "keep_raw": True, "enable": {"box": "box1", "channel": "A"}},
+        "boxes": [{"name": "box1", "port": "COM3", "setup": ["STBLCLK,EXT"],
+                   "load": [table], "arm": ["SMOD,TBL"]}],
+        "start": [["box1", "TBLSTRT"]],
+        "reset": [["box1", "SMOD,LOC"], ["box1", "SMOD,TBL"]],
+    })
+    instrument = instrument_module.from_dict({
+        "schema_version": 1, "instrument": {"name": "hold"},
+        "vertical": {"full_scale_v": 0.5, "offset_v": 0.251, "inverted": False}})
+    refusal = hold_module.refusal
+    check_true(
+        "a pause is a series' own: nothing running, a single job, a series' last point and "
+        "a single_frame point's inner grain are each refused in a sentence",
+        "nothing is running" in refusal(None, POINT)
+        and "only a series" in refusal(Discover(), POINT)
+        and "last point" in refusal(SeriesJob(points=(PlannedPoint(index=1),)), POINT,
+                                    number=1)
+        and "single_frame" in refusal(
+            SeriesJob(points=(PlannedPoint(index=1), PlannedPoint(index=2))), REPETITION,
+            number=1, method=method_module.from_dict({
+                **method_module.to_dict(method),
+                "acquisition": {**method_module.to_dict(method)["acquisition"],
+                                "repetition_mode": "single_frame"}})))
+
+    rules: list[tuple] = []
+
+    def seen(_handle: object, event: object) -> None:
+        for rule in list(rules):
+            if rule[0](event):
+                rules.remove(rule)
+                rule[1]()
+
+    with tempfile.TemporaryDirectory() as scratch:
+        owner = LocalOwner(fake=True, program="check_public hold", on_event=seen).start()
+        try:
+            owner.submit(StartConsole())
+            _ended(owner, owner.submit(Discover(method=method)), 60)
+            try:
+                owner.pause(POINT, by="SC")
+                refused = ""
+            except HoldRefused as exc:
+                refused = str(exc)
+            check_true("with nothing running the owner refuses a pause",
+                       "nothing is running" in refused)
+            record = RunRecord.open(scratch, "261118_SC_001", request_id="check-hold",
+                                    text="a held series", source="mcp", initials="SC")
+            rules.append((lambda event: isinstance(event, FrameBegun)
+                          and event.repetition == 1,
+                          lambda: owner.pause(REPETITION, by="SC", client="check_public")))
+            job = SeriesJob(
+                points=(PlannedPoint(index=1, method=method),
+                        PlannedPoint(index=2, method=method)),
+                series="check-hold", directory=scratch, initials="SC", instrument=instrument)
+            handle = owner.submit(job)
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                hold = owner.status().hold
+                if hold is not None and hold.reached:
+                    break
+                time.sleep(0.01)
+            hold = owner.status().hold
+            check_true("the series comes to rest inside its first file, after repetition 1",
+                       hold is not None and hold.reached and hold.by == "SC"
+                       and hold.where.startswith("after method frame 1 repetition 1 of "))
+            behind = owner.submit(ReadState())
+            toolbox = Toolbox(owner, output=scratch)
+            status = toolbox.call("status", {})
+            try:
+                toolbox.call("stop", {})
+                sentence = ""
+            except ToolFailure as exc:
+                sentence = str(exc)
+            began = time.monotonic()
+            answer = toolbox.call("progress", {"job": handle.id, "after": 10**9,
+                                               "wait_s": 30})
+            check_true(
+                "while it rests the instrument is held, and an agent's tools read and "
+                "refuse: `status` and `progress` say the pause at once, `stop` is refused "
+                "with its sentence",
+                hold is not None and owner.status().running == handle
+                and behind in owner.status().queued
+                and status["paused"]["by"] == "SC" and answer["paused"] == status["paused"]
+                and time.monotonic() - began < 5 and not answer["done"]
+                and sentence == hold_module.held(hold) and not owner.status().stopping)
+            check_true("no tool pauses or resumes, and the count has not moved: 28 tools, "
+                       "13 read-only",
+                       len(TOOLS) == 28 and sum(tool.read_only for tool in TOOLS) == 13
+                       and not {"pause", "resume"} & {tool.name for tool in TOOLS})
+            time.sleep(0.3)
+            owner.resume(by="SC", client="check_public")
+            end = _ended(owner, handle, 120)
+            runs = end.result.runs if isinstance(end, JobFinished) else ()
+            events = [entry.event for entry in owner.events(handle)]
+            done = next((n for n, event in enumerate(events) if isinstance(event, RunDone)),
+                        len(events))
+            resets = sum(isinstance(event, PhaseSent) and event.phase == "reset"
+                         for event in events[:done])
+            check_true(
+                "a resume goes on to the end, the first repetition after the hold re-armed "
+                "as a run's first is and marked with the hold's length",
+                len(runs) == 2 and all(run.complete for run in runs)
+                and len(runs[0].holds) == 1 and runs[0].holds[0].seconds >= 0.3
+                and runs[0].frames[1].held_before_s == runs[0].holds[0].seconds
+                and runs[0].frames[0].held_before_s is None and not runs[1].holds
+                and resets == 4)
+            if len(runs) == 2:
+                stamps = [summarize(path)["clockwork"]
+                          for path in (runs[0].raw_path, runs[0].summed_path)]
+                check_true(
+                    "both files of the held run say so in clockwork's own parameters, and "
+                    "the run nothing held carries none of them",
+                    all(found.get("ClockworkHolds") == 1
+                        and found.get("ClockworkHeldSeconds", 0) >= 0.3 for found in stamps)
+                    and not any(key.name in summarize(runs[1].summed_path)["clockwork"]
+                                for key in HOLD_KEYS))
+            kept = load(record.path).get("interventions", [])
+            check_true(
+                "the pause and the resume are in the run record of the job acted on, each "
+                "with who made it",
+                [(entry["kind"], entry["by"], entry["client"]) for entry in kept]
+                == [("pause", "SC", "check_public"), ("resume", "SC", "check_public")]
+                and kept[1]["held_s"] >= 0.3)
+        finally:
+            owner.shutdown()
+            owner.join(30)
+
+
 def check_early_stops() -> None:
     """A run that stops before its first frame, and the Report made after it (lab record,
     task 104).
@@ -3585,6 +3764,9 @@ def main() -> int:
 
     section("early stops and Report")
     check_early_stops()
+
+    section("a person's pause")
+    check_hold()
 
     section("the window")
     # Task 50. Nothing here opens a window: what a clone can establish without a

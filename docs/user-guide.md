@@ -150,7 +150,8 @@ strings it did not send. Editing a setup line after a Load and arm therefore lea
 available. Send setup again if the box needs that line.
 
 **Stop** ends a run after its current repetition and fold rather than mid-flight, so what a stopped
-run leaves on disk is a short experiment and not a broken one.
+run leaves on disk is a short experiment and not a broken one. Every Stop button needs your
+initials in **At the window**, since the run record says who stopped a run.
 
 **A run whose pusher is not running at the method's period is refused before its first frame.**
 Before each run's first frame the run log gives the pusher period the digitizer measured beside the
@@ -402,8 +403,42 @@ in the order acquired, with the point in flight in bold, how many of its files a
 minutes and how many warnings the run log gave while it ran. The line above it says who started
 the series, the point in flight with its knob values and which of its files is being acquired,
 and about how many minutes are left, counted from the remaining points' planned minutes. Only a
-point that **failed**, was **stopped** or was **skipped** is coloured. Tick **Show only this
-series in the run log** to hide every other job's lines, and untick it to see them again.
+point that **failed**, was **stopped**, was **skipped** or is **held** is coloured. Tick **Show
+only this series in the run log** to hide every other job's lines, and untick it to see them again.
+
+## Pausing, resuming and annotating a run
+
+To hold a series without ending it, press **Pause after this point** or **Pause after this
+repetition** above the run log. Both buttons appear only while a series is running, whether you
+or an agent started it, and both need your initials in **At the window**. **Pause after this
+point** lets the point in flight finish its last file and then rests the series before the next
+point, with no file open. **Pause after this repetition** rests it as soon as the repetition in
+flight has ended, inside the file, which stays open. A button that cannot be used is grey, and
+its tooltip says why: the last point of a series has no point after it, and a `single_frame`
+method has no boundary between its repetitions, so its points offer only the pause after the
+point. A single acquisition cannot be paused, and **Stop** is the only way to end it early.
+
+A paused series holds the instrument. The line above the run log says who paused it, since when
+and where it rests, the table that follows the series shows the point it rests at as **held**,
+and every sending and acquiring button stays grey, for you and for an agent, until a person
+presses **Resume** or **Stop**. Nothing ends a pause on its own, however long it lasts.
+**Resume** continues the series under the initials then in **At the window**, which need not be
+those of the person who paused it. After a pause inside a file, clockwork sends the method's
+reset sequence and checks the gate again before the next repetition, as it does before the first
+repetition of any run, and marks that repetition in the file with the length of the pause.
+**Stop** ends a paused series where it rests, and the run record says that it was stopped while
+paused.
+
+To add a remark to the record, type it in **Note** and press **Keep note**. The note is kept
+under your initials in the run record of the job that is running, whichever client started it,
+or in the day record when nothing is running. A note is kept with the data and may be published
+with it. A note commands nothing. An agent whose run is in flight is shown the note and reports
+it without acting on it, so use the buttons to pause or stop a run.
+
+Every pause, resume and stop is written into the run record with the initials and the time
+([run record](run-record.md#the-sections)). Closing the window while your series is paused asks
+whether to leave it paused or to stop it. A series left paused stays paused in clockwork's
+background service until you open clockwork again and press **Resume** or **Stop**.
 
 ## The state panel
 

@@ -223,6 +223,10 @@ Three terms carry more than one sense and are given both in one entry: *table*, 
   and an MCP server can drive one instrument without any of them opening a port. Its client,
   `RemoteOwner`, speaks the same owner protocol as the in-process owner. The protocol is
   [daemon-protocol.md](daemon-protocol.md).
+- **Pause, hold.** A person's rest of a running series, asked for at the window after the point
+  or the repetition in flight and lifted only by a person at the window. It is the daemon's
+  state, so it outlives the window that asked for it, and an agent's tools read and note only
+  while it stands ([daemon protocol](daemon-protocol.md#a-persons-pause)).
 - **Method.** The saved experiment a trainee loads: the strings each box needs in three phases, the
   acquisition settings, the order the boxes are started in, and the map from box name to serial
   port, as one flat TOML document. Its shape is

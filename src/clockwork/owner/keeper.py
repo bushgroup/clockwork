@@ -81,10 +81,18 @@ def file_entry(run: Run) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 -- the record says why, never raises
         from .local import sentence
         numbers = {"problem": sentence(exc)}
-    return {"stem": stem_of(run), "raw": run.raw_path, "summed": run.summed_path,
-            "complete": run.complete, "stopped_early": run.stopped_early,
-            "replicate": run.replicate, "seconds": round(run.seconds, 2),
-            "summary": numbers}
+    entry: dict[str, Any] = {
+        "stem": stem_of(run), "raw": run.raw_path, "summed": run.summed_path,
+        "complete": run.complete, "stopped_early": run.stopped_early,
+        "replicate": run.replicate, "seconds": round(run.seconds, 2),
+        "summary": numbers}
+    if run.holds:
+        # Only for a file that was held, so every other file's entry is what it was.
+        entry["holds"] = [
+            {"after": {"method_frame": hold.method_frame, "repetition": hold.repetition},
+             "began": hold.began, "seconds": round(hold.seconds, 1),
+             "ended_by": hold.ended_by} for hold in run.holds]
+    return entry
 
 
 def begin(job: Acquire | SeriesJob, job_id: int, *,
@@ -220,6 +228,25 @@ class RecordKeeper:
             self._put(lambda: self._with(
                 directory, request_id,
                 lambda record: record.append("notes", {"text": text, "by": "server"})))
+
+    def intervention(self, directory: str, request_id: str,
+                     entry: dict[str, Any]) -> None:
+        """Add a person's act on a running job, or any client's stop of one, to the
+        `interventions` of the record of `request_id`, if there is one (the window
+        revision's A3 and A4; lab record, task 167)."""
+        if request_id:
+            self._put(lambda: self._with(
+                directory, request_id,
+                lambda record: record.append("interventions", entry)))
+
+    def person_note(self, directory: str, request_id: str, text: str, by: str,
+                    client: str) -> None:
+        """Add a note a person typed at the window, under their initials."""
+        if request_id and text:
+            self._put(lambda: self._with(
+                directory, request_id,
+                lambda record: record.append(
+                    "notes", {"text": text, "by": by, "client": client})))
 
     def drain(self, timeout: float | None = None) -> bool:
         """Wait until everything asked so far is written. True if it was, within

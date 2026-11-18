@@ -40,6 +40,7 @@ import zmq
 
 from .. import __version__
 from ..acq import BatchSeen, Snapshot
+from .hold import POINT, Hold, HoldRefused
 from .interface import Handle, JobFinished, OwnerStatus, Progress, Said, StaleHandle
 from .jobs import Acquire, Job, Send, SeriesJob, StandDown, WarmUp
 from .local import sentence
@@ -343,9 +344,38 @@ class DaemonServer:
             raise _Refusal("refused", str(exc)) from exc
         return [_carried(entry) for entry in entries]
 
-    def _stop(self, reason: object = "stopped by a client") -> None:
-        self._said(f"stop asked for: {reason}")
-        self.owner.stop(str(reason))  # type: ignore[attr-defined]
+    def _stop(self, reason: object = "stopped by a client", by: object = "",
+              client: object = "") -> None:
+        who = " by ".join(part for part in (str(client or ""), str(by or "")) if part)
+        self._said(f"stop asked for{' from ' + who if who else ''}: {reason}")
+        self.owner.stop(str(reason), by=str(by or ""), client=str(client or ""))  # type: ignore[attr-defined]
+
+    def _pause(self, grain: object = POINT, by: object = "", client: object = "") -> object:
+        """Sent by the window alone (`docs/daemon-protocol.md`, "A person's pause")."""
+        try:
+            hold = self.owner.pause(str(grain), by=str(by or ""),  # type: ignore[attr-defined]
+                                    client=str(client or ""))
+        except HoldRefused as exc:
+            raise _Refusal("refused", str(exc)) from exc
+        self._said(f"pause asked for from {client or 'a client'} by {by}: job {hold.job}, "
+                   f"after this {hold.grain}")
+        return to_wire(hold)
+
+    def _resume(self, by: object = "", client: object = "") -> None:
+        try:
+            self.owner.resume(by=str(by or ""), client=str(client or ""))  # type: ignore[attr-defined]
+        except HoldRefused as exc:
+            raise _Refusal("refused", str(exc)) from exc
+        self._said(f"resume asked for from {client or 'a client'} by {by}")
+
+    def _note(self, text: object = "", by: object = "", client: object = "") -> object:
+        try:
+            where = self.owner.note(str(text or ""), by=str(by or ""),  # type: ignore[attr-defined]
+                                    client=str(client or ""))
+        except HoldRefused as exc:
+            raise _Refusal("refused", str(exc)) from exc
+        self._said(f"note from {client or 'a client'} by {by}, kept in {where}")
+        return where
 
     def _snapshot(self) -> object:
         return to_wire(self.owner.snapshot())  # type: ignore[attr-defined]
@@ -363,6 +393,9 @@ _COMMANDS: dict[str, Callable[..., object]] = {
     "submit": DaemonServer._submit,
     "events": DaemonServer._events,
     "stop": DaemonServer._stop,
+    "pause": DaemonServer._pause,
+    "resume": DaemonServer._resume,
+    "note": DaemonServer._note,
     "snapshot": DaemonServer._snapshot,
     "status": DaemonServer._status,
     "shutdown": DaemonServer._shutdown,
@@ -523,8 +556,42 @@ class RemoteOwner:
                             and self._owns(handle))
             return [entry for entry in copy.entries if entry.seq > after]
 
-    def stop(self, reason: str = "stopped by the operator") -> None:
-        self._request("stop", reason=reason)
+    def stop(self, reason: str = "stopped by the operator", *, by: str = "",
+             client: str = "") -> None:
+        """Stop the run in flight, saying who asks: this client's `origin` unless
+        `client` names another. A daemon from before a stop named its client refuses the
+        arguments, and is then asked with the reason alone."""
+        try:
+            self._request("stop", reason=reason, by=by, client=client or self.origin)
+        except DaemonRefused as exc:
+            if exc.kind != "bad-request":
+                raise
+            self._request("stop", reason=reason)
+
+    def pause(self, grain: str = POINT, *, by: str, client: str = "") -> Hold:
+        return self._person("pause", grain=grain, by=by,  # type: ignore[return-value]
+                            client=client or self.origin)
+
+    def resume(self, *, by: str, client: str = "") -> None:
+        self._person("resume", by=by, client=client or self.origin)
+
+    def note(self, text: str, *, by: str, client: str = "") -> str:
+        return str(self._person("note", text=text, by=by, client=client or self.origin))
+
+    def _person(self, cmd: str, **args: object) -> object:
+        """One of the three commands a person's controls send. A daemon from before
+        them answers `unknown-command` with its list of commands; that becomes one
+        sentence a window can show."""
+        try:
+            return self._request(cmd, **args)
+        except DaemonRefused as exc:
+            if exc.kind != "unknown-command":
+                raise
+            raise DaemonRefused(
+                "the clockwork serve that is running is older than this window and "
+                f"cannot {cmd if cmd != 'note' else 'keep a note'}; shut it down and "
+                "start it again from this version to pause, resume or keep a note",
+                exc.kind) from None
 
     def snapshot(self) -> Snapshot | None:
         return self._request("snapshot")  # type: ignore[return-value]

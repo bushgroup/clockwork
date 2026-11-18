@@ -41,10 +41,11 @@ from PySide6.QtWidgets import (
 )
 
 from ..method.template import format_number
+from ..owner.hold import Hold
 from ..planning import Checked
 
-__all__ = ["DONE", "FAILED", "RUNNING", "SKIPPED", "STOPPED", "WAITING", "FollowedPoint",
-           "FollowedSeries", "PlanPanel", "SeriesFollow"]
+__all__ = ["DONE", "FAILED", "HELD", "RUNNING", "SKIPPED", "STOPPED", "WAITING",
+           "FollowedPoint", "FollowedSeries", "PlanPanel", "SeriesFollow"]
 
 WAITING = "waiting"
 RUNNING = "running"
@@ -52,6 +53,10 @@ DONE = "done"
 FAILED = "failed"
 STOPPED = "stopped"
 SKIPPED = "skipped"
+HELD = "held"
+"""A point a person's pause rests the series at: the one in flight for a pause inside it,
+the next one for a pause between two points. Shown, never kept: it is the point's own
+state again the moment the pause is lifted (`FollowedSeries.shown`)."""
 
 CHECK_HEADINGS = ("#", "point", "reps", "files", "minutes", "limits")
 FOLLOW_HEADINGS = ("#", "planned", "state", "point", "files", "minutes", "warnings")
@@ -70,13 +75,13 @@ def _minutes(value: float | None) -> str:
 
 
 def _colour(widget: QWidget, state: str) -> QColor | None:
-    """Only failed, stopped and skipped are coloured (D5), as in the run queue."""
-    if state not in (FAILED, STOPPED, SKIPPED):
+    """Only failed, stopped, skipped and held are coloured (D5), as in the run queue."""
+    if state not in (FAILED, STOPPED, SKIPPED, HELD):
         return None
     light = widget.palette().window().color().lightness() > 128
     if state == FAILED:
         return QColor("#9b2c2c") if light else QColor("#fc8181")
-    if state == STOPPED:
+    if state in (STOPPED, HELD):
         return QColor("#9c4221") if light else QColor("#f6ad55")
     muted = QColor(widget.palette().windowText().color())
     muted.setAlpha(140)
@@ -266,6 +271,35 @@ class FollowedSeries:
     """Empty while the job runs; else `done`, `stopped` or `failed`."""
     tag: int = 0
     """The run log's job number for the series' own lines (`RunPanel.filter_to`)."""
+    hold: Hold | None = None
+    """A person's pause on the series, asked for or in force, off its `PauseAsked` and
+    `Held`; None once it is resumed, stopped or over (lab record, task 167)."""
+
+    @property
+    def held_at(self) -> int | None:
+        """The place in `points` of the point a pause in force rests the series at, or
+        None: the point in flight while it has files to come, else the one after it."""
+        hold = self.hold
+        if hold is None or not hold.reached or self.ended or self.current is None:
+            return None
+        point = self.points[self.current]
+        if point.files < point.replicates:
+            return self.current
+        return min(self.current + 1, len(self.points) - 1)
+
+    def shown(self, number: int) -> str:
+        """Point `number`'s state as the table shows it: `held` over its own while a
+        pause rests the series there."""
+        held = self.held_at
+        if number == held:
+            return HELD
+        point = self.points[number]
+        if (held is not None and number == self.current and point.state == RUNNING
+                and point.files >= point.replicates):
+            # Every file of it is written and the series rests after it: it is done,
+            # though the next point's start, which is what says so, has not come.
+            return DONE
+        return point.state
 
     @classmethod
     def of(cls, job: object, origin: str = "", tag: int = 0) -> FollowedSeries:
@@ -322,6 +356,7 @@ class FollowedSeries:
                 point.state = SKIPPED
         self.ended = STOPPED if stopped else DONE
         self.current = None
+        self.hold = None
 
     def failed(self) -> None:
         for number, point in enumerate(self.points):
@@ -331,6 +366,7 @@ class FollowedSeries:
                 point.state = SKIPPED
         self.ended = FAILED
         self.current = None
+        self.hold = None
 
     @property
     def minutes_left(self) -> float | None:
@@ -364,7 +400,9 @@ class FollowedSeries:
             where = (f"point {self.current + 1} of {len(self.points)} (planned "
                      f"{point.index}), {knob_text(point.knobs, point.reference)}, file "
                      f"{min(point.files + 1, point.replicates)} of {point.replicates}")
-        return (f"{head}: {where}; about {_minutes(self.minutes_left)} minutes left")
+        paused = f"; {self.hold.text}" if self.hold is not None else ""
+        return (f"{head}: {where}; about {_minutes(self.minutes_left)} minutes left"
+                f"{paused}")
 
 
 class SeriesFollow(QWidget):
@@ -413,15 +451,16 @@ class SeriesFollow(QWidget):
         bold = QFont(self.tree.font())
         bold.setBold(True)
         for number, point in enumerate(series.points, start=1):
+            state = series.shown(number - 1)
             item = QTreeWidgetItem([
-                str(number), str(point.index), point.state,
+                str(number), str(point.index), state,
                 knob_text(point.knobs, point.reference),
                 f"{point.files} of {point.replicates}", _minutes(point.minutes),
                 str(point.warnings) if point.warnings else ""])
             if point.state == RUNNING:
                 for column in range(len(FOLLOW_HEADINGS)):
                     item.setFont(column, bold)
-            colour = _colour(self, point.state)
+            colour = _colour(self, state)
             if colour is not None:
                 item.setForeground(2, QBrush(colour))
             self.tree.addTopLevelItem(item)

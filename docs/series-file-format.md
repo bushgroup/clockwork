@@ -184,9 +184,11 @@ The window follows every series the daemon runs, whichever client started it, in
 the plan: each point's state, the point in flight with its knob values and which of its files is
 being acquired, the minutes left as the sum of the remaining points' planned minutes, and who
 started it, i.e., the client and, for a series started at the window, the person. Only a point
-that failed, was stopped or was skipped is coloured. Each point counts the warnings the run log
-gave while it ran, and the run log can be narrowed to the series' own lines. Stop ends a series
-whichever client started it.
+that failed, was stopped, was skipped or is held is coloured. Each point counts the warnings the
+run log gave while it ran, and the run log can be narrowed to the series' own lines. Stop ends a
+series whichever client started it. A person can also pause any series after its point or its
+repetition in flight, and only a person at the window resumes it
+([daemon protocol](daemon-protocol.md#a-persons-pause)).
 
 ## What each file records
 

@@ -111,6 +111,13 @@ not: it writes one compact JSON line per event as the events arrive and a last l
 answer, which lists the files the run wrote under `runs`. `progress --job N` without `--follow`
 answers once, after waiting up to `--wait-s` seconds for news, exactly as the tool does.
 
+A person at the window can pause a series that a verb started, and only a person at the window
+resumes or stops it. `acquire`, `series` and `progress --follow` keep following through a pause:
+they say once on standard error who paused the job and since when, and then ask again every 30
+seconds until the job is resumed or stopped. While the pause stands, every verb that would submit
+a job is refused, as are `stop` and `stand-down`, each with the sentence the MCP tools give, and
+no verb pauses or resumes ([MCP server](mcp-server.md#while-a-person-has-paused-the-run)).
+
 ## A request from a shell
 
 ```

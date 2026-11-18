@@ -50,6 +50,7 @@ import inspect
 import json
 import os
 import sys
+import time
 import types
 import typing
 from collections.abc import Mapping
@@ -612,6 +613,7 @@ def _follow(toolbox: Toolbox, arguments: Mapping[str, object], out: TextIO, err:
         for event in answer["events"]:
             _print(out, event)
         asked["after"] = answer["last"]
+        _wait_out_a_pause(answer, err, program)
         if answer["done"]:
             _print(out, {key: value for key, value in answer.items() if key != "events"})
             if answer.get("failed"):
@@ -633,12 +635,27 @@ def _wait(toolbox: Toolbox, job: int, err: TextIO, program: str) -> int:
         for event in answer["events"]:
             _say(err, event["text"])
         asked["after"] = answer["last"]
+        _wait_out_a_pause(answer, err, program)
         if answer["done"]:
             break
     if answer.get("failed"):
         _say(err, f"{program}: job {job} failed: {answer['failed']}")
         return 1
     return 0
+
+
+def _wait_out_a_pause(answer: Mapping[str, object], err: TextIO, program: str) -> None:
+    """A follower's pace while a person has paused the job. `progress` then answers at
+    once, so a loop of it would ask many times a second for as long as the pause lasts,
+    each a line in the audit log; this waits as long as an idle `progress` would have."""
+    paused = answer.get("paused")
+    if not isinstance(paused, Mapping) or answer.get("done"):
+        return
+    if not answer.get("events"):
+        time.sleep(PROGRESS_WAIT_MAX_S)
+        return
+    _say(err, f"{program}: job {answer.get('job')} is {paused.get('text')}; still "
+              "following, and only a person at the window resumes or stops it")
 
 
 def _print(stream: TextIO, value: object, indent: int | None = None) -> None:

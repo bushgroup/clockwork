@@ -88,6 +88,8 @@ from ..method.template import Rendered, camel_case
 from .wire import ConsoleInfo, FrameRequest, TofWidth
 
 __all__ = [
+    "HELD_BEFORE_KEY",
+    "HOLD_KEYS",
     "KNOB_PREFIX",
     "LABEL_PREFIX",
     "MARK_PREFIX",
@@ -243,6 +245,37 @@ A randomised queue is only readable afterwards if each file says where it sat. T
 whatever the writer of the series calls it, and nothing here assumes the window's queue
 is the only writer: a request served by an agent is a series in the same four keys (lab
 record, task 66). An ad hoc run writes none, and absence means unplanned, never zero.
+"""
+
+HOLD_KEYS: tuple[ParamDef, ...] = (
+    ParamDef(CLIENT_PARAM_ID_BASE + 18, "ClockworkHolds", "System.Int32",
+             "How many times this run was held between two of its repetitions, at a "
+             "person's pause; absent for a run nothing held"),
+    ParamDef(CLIENT_PARAM_ID_BASE + 19, "ClockworkHeldSeconds", "System.Double",
+             "Seconds this run spent held between repetitions, over all its holds"),
+    ParamDef(CLIENT_PARAM_ID_BASE + 20, "ClockworkHoldText", "System.String",
+             "Each hold of this run, one line apiece: the repetition it followed, when "
+             "it began, how long it lasted, how it ended and the reason given"),
+)
+"""A run held between two of its repetitions: how often, for how long, and each hold in
+a line (the window revision's B4; lab record, task 167).
+
+Written when a hold ends and never at creation, so a file nothing held carries none of
+the three and absence means an unbroken run. In both files: the raw one as each hold
+ends, the companion as it closes. They are a file's own account of its time axis: the
+frames either side of a hold are further apart than their neighbours by its length,
+which `StartTime` shows and these explain.
+"""
+
+HELD_BEFORE_KEY = ParamDef(
+    CLIENT_PARAM_ID_BASE + 21, "ClockworkHeldBeforeSeconds", "System.Double",
+    "Seconds the run was held before this frame: written on the first frame after a "
+    "hold and on no other. Such a frame was re-armed as a run's first frame is")
+"""The frame parameter that marks the first repetition after a hold, in the raw file.
+
+The repetition the bench compares with its neighbours (the window revision's B3). The
+summed companion's frames are method frames and carry none; its `ClockworkHoldText`
+names the repetition each hold followed.
 """
 
 TEMPLATE_PARAM_ID_BASE = CLIENT_PARAM_ID_BASE + 100
@@ -556,6 +589,10 @@ class Recording:
         self._outcome: tuple[str, str] | None = None
         self._companion_finished = False
         """Set once the companion has its outcome, or has closed without one."""
+        self._holds: list[tuple[str, float]] = []
+        """Each hold's line and its seconds, in order (`note_hold`)."""
+        self._companion_holds = 0
+        """How many of `_holds` the companion has been told of."""
         self._elapsed: dict[int, float] = {}
         self._began: dict[int, float] = {}
         self._closed = False
@@ -1088,6 +1125,40 @@ class Recording:
         self._raw.set_outcome(outcome, reason=reason,
                               repetitions_acquired=self.repetitions_acquired)
 
+    # --- a hold ---------------------------------------------------------------------------
+
+    def note_hold(self, line: str, seconds: float) -> None:
+        """Say that the run was held between two repetitions: `line` is the hold in one
+        line, `seconds` how long it lasted.
+
+        Into the raw file now, as `HOLD_KEYS` (the count, the seconds over every hold,
+        and each hold's line), and into the companion at its close, with its outcome and
+        for the same reason: its writer may belong to the folding thread. Called on the
+        thread that made this recording, between frames.
+        """
+        self._require_open()
+        self._holds.append((" ".join(str(line).split()), float(seconds)))
+        _set_globals(self._raw, self._hold_globals())
+
+    def mark_after_hold(self, frame: int, seconds: float) -> None:
+        """Mark raw frame `frame` as the first after a hold of `seconds`
+        (`HELD_BEFORE_KEY`). Its completion marker is left as it is."""
+        self._require_open()
+        self._raw.finalise_frame(int(frame), complete=False,
+                                 extra={HELD_BEFORE_KEY: float(seconds)})
+
+    def _hold_globals(self) -> dict[ParamDef, object]:
+        count_key, seconds_key, text_key = HOLD_KEYS
+        return {count_key: len(self._holds),
+                seconds_key: round(sum(seconds for _, seconds in self._holds), 3),
+                text_key: "\n".join(line for line, _ in self._holds)}
+
+    def _tell_companion_of_holds(self) -> None:
+        if self._summed is None or self._companion_holds == len(self._holds):
+            return
+        _set_globals(self._summed, self._hold_globals())
+        self._companion_holds = len(self._holds)
+
     # --- closing -------------------------------------------------------------------------
 
     def close_companion(self) -> None:
@@ -1109,7 +1180,13 @@ class Recording:
             self._companion_finished = True
 
     def _finish_companion(self) -> None:
-        if self._outcome is None or self._summed is None or self._companion_finished:
+        if self._summed is None or self._companion_finished:
+            return
+        # A hold not told is a hold the companion never says; one that cannot be told
+        # must not cost the companion its outcome.
+        with contextlib.suppress(Exception):
+            self._tell_companion_of_holds()
+        if self._outcome is None:
             return
         outcome, reason = self._outcome
         self._summed.set_outcome(outcome, reason=reason,
@@ -1303,6 +1380,35 @@ def stamp_globals(
     if provenance is not None:
         values.update(provenance_globals(provenance))
     return values
+
+
+def _set_globals(writer: UimfWriter, values: dict[ParamDef, object]) -> None:
+    """Write `Global_Params` rows of clockwork's own into a file already created,
+    replacing any already there.
+
+    `UimfWriter` takes a client's global parameters at creation (`GlobalSpec.extra`) and
+    has no public call for one learned afterwards; what it does have is the upsert its
+    own `set_outcome` is built on, in a transaction of its own, and that is what this
+    uses, on the writer's connection and thread. **Two private names of a pinned
+    dependency**, reached for rather than retyped as SQL so that the table stays the
+    writer's; `tools/check_public.py` fails if the pinned mainspring lacks either, so a
+    moved pin says so there and not at the first held file (lab record, task 167).
+    """
+    upsert = getattr(writer, "_upsert_globals", None)
+    transaction = getattr(writer, "_transaction", None)
+    if upsert is None or transaction is None:
+        raise RuntimeError("this mainspring's UimfWriter cannot add a global parameter "
+                           "to a file already created")
+    for definition in values:
+        existing = writer.global_keys.get(definition.name)
+        if existing is not None and existing != definition:
+            raise ValueError(f"{definition.name!r} is already a global parameter, ID "
+                             f"{existing.param_id}")
+        writer.global_keys[definition.name] = definition
+    if not writer.modern:
+        return  # the legacy table has no column to hold it
+    with transaction():
+        upsert({definition.name: value for definition, value in values.items()})
 
 
 def provenance_globals(provenance: Provenance) -> dict[ParamDef, object]:

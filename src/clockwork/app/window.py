@@ -89,7 +89,20 @@ from ..method import (
 from ..method import template as templates
 from ..method.template import Rendered
 from ..method.text import PaneResult, render_pane, split_trainee_file, start_order
-from ..owner import LogsOpened, PointStarted, RecordBegun, SeriesJob, SeriesResult
+from ..owner import (
+    POINT,
+    REPETITION,
+    Held,
+    LogsOpened,
+    PauseAsked,
+    PointStarted,
+    RecordBegun,
+    Resumed,
+    SeriesJob,
+    SeriesResult,
+    StopAsked,
+)
+from ..owner.hold import refusal as pause_refusal
 from ..sitting import instrument_and_limits
 from . import errors, runqueue
 from .boxstate import Reading
@@ -271,6 +284,8 @@ class MainWindow(QMainWindow):
         """The purpose line a plan's `description` filled in, so a second plan replaces
         it and a purpose the person typed is left alone (A1)."""
         self.followed: FollowedSeries | None = None
+        self._held_said = ""
+        """The pause the status bar last said, so that it is said once."""
         """The series the followed table shows: the last any client started (R5)."""
 
         self._last_run_paths: tuple[str, str, str] = ("", "", "")
@@ -788,6 +803,10 @@ class MainWindow(QMainWindow):
         self.plan_panel.start_requested.connect(lambda: self.start_plan())
         self.plan_panel.stop_requested.connect(lambda: self.stop())
         self.follow.filter_changed.connect(self._filter_run_log)
+        self.run_panel.pause_requested.connect(self.pause)
+        self.run_panel.resume_requested.connect(lambda: self.resume())
+        self.run_panel.stop_requested.connect(lambda: self.stop())
+        self.run_panel.note_requested.connect(self.keep_note)
 
         self.initials.editingFinished.connect(self._initials_changed)
         self.run_panel.at_window.editingFinished.connect(lambda: self._at_window())
@@ -959,6 +978,7 @@ class MainWindow(QMainWindow):
         self.plan_panel.set_busy(busy or locked or self._plan_job is not None,
                                  running=isinstance(self._job, SeriesJob)
                                  and not self.worker.stopping)
+        self._refresh_hold()
 
         text: list[str] = []
         if blocking:
@@ -968,6 +988,31 @@ class MainWindow(QMainWindow):
             text.append("Worth knowing:")
             text += [f"  • {line}" for line in notes]
         self.problems.setText("\n".join(text))
+
+    def _refresh_hold(self) -> None:
+        """The person's controls over the job in flight: the two pauses while a series
+        runs, each greyed with the owner's own sentence where it cannot be asked, Resume
+        while a pause stands, and the pause itself said wherever a run is said."""
+        job = self._job
+        series = isinstance(job, SeriesJob)
+        hold = self.worker.hold
+        if hold is not None and job is None:
+            hold = None  # the job's end has been seen here; the status is a poll behind
+        why = {POINT: "", REPETITION: ""}
+        if series:
+            followed = self.followed
+            number = (followed.current + 1 if followed is not None
+                      and followed.current is not None else 0)
+            method = job.points[number - 1].method if 0 < number <= len(job.points) else None
+            for grain in why:
+                why[grain] = pause_refusal(job, grain, number=number, method=method,
+                                           stopping=self.worker.stopping, hold=hold)
+        self.run_panel.show_hold(hold, series=series, running=job is not None,
+                                 stopping=self.worker.stopping, point=why[POINT],
+                                 repetition=why[REPETITION])
+        if hold is not None and hold.reached and hold.text != self._held_said:
+            self.statusBar().showMessage(f"{job.label}: {hold.text}")
+        self._held_said = hold.text if hold is not None and hold.reached else ""
 
     # -- methods on disk -----------------------------------------------------
 
@@ -1329,9 +1374,54 @@ class MainWindow(QMainWindow):
         self._refresh_stem()
         self.acquire(replicate_only=True)
 
-    def stop(self) -> None:
-        self.worker.request_stop()
-        self.run_panel.say("stopping after this repetition and its fold", warn=True)
+    def _signed(self, what: str) -> str:
+        """The person at the window, for an act on a running job, or empty with the
+        reason said: every pause, resume, stop and note is written under initials (the
+        window revision's A2)."""
+        person = self._at_window()
+        if not person:
+            self.run_panel.say(f"type your initials in \"At the window\" first: {what} "
+                               "is recorded with who made it", warn=True)
+            self.run_panel.at_window.setFocus()
+        return person
+
+    def pause(self, grain: str) -> None:
+        """Hold the series running, this window's or another client's, after its point
+        or its repetition in flight (R6). The owner decides whether it can be held and
+        says why not; what comes back is the job's own `PauseAsked` and `Held`."""
+        person = self._signed("a pause")
+        if person:
+            self.worker.pause(grain, person)
+
+    def resume(self) -> None:
+        """Lift the pause on the series running (R7: only a person at a window does)."""
+        person = self._signed("a resume")
+        if person:
+            self.worker.resume(person)
+
+    def keep_note(self, text: str) -> None:
+        """Keep a note in the running job's record, or the day record with nothing
+        running (C1, C2). The field is emptied once the note has been sent to be kept."""
+        text = text.strip()
+        if not text:
+            return
+        person = self._signed("a note")
+        if person:
+            self.worker.note(text, person)
+            self.run_panel.note.clear()
+
+    def stop(self, *, signed: bool = True) -> None:
+        """End the run in flight, under the initials at the window. `signed` false is
+        the close question's stop, which the person has just confirmed and which is not
+        held up for want of initials; a Stop button's is."""
+        person = self._signed("a stop") if signed else self._at_window()
+        if signed and not person:
+            return
+        hold = self.worker.hold
+        self.worker.request_stop("stopped at the window", by=person)
+        self.run_panel.say("stopping the paused series where it rests"
+                           if hold is not None and hold.reached
+                           else "stopping after this repetition and its fold", warn=True)
         if self.queue.running:
             # The row in flight is not abandoned: `run_acquisition` ends after the
             # current repetition and its fold, and the row closes itself when its job
@@ -1933,6 +2023,16 @@ class MainWindow(QMainWindow):
                 elif not followed.request_id:
                     followed.request_id = event.request_id
                 self.follow.refresh()
+            if isinstance(event, (PauseAsked, Held, Resumed, StopAsked)):
+                # A person's pause, whoever's window asked for it: the followed table
+                # shows where the series rests, and the controls follow the owner.
+                if followed is not None and not followed.ended:
+                    followed.hold = (event.hold if isinstance(event, (PauseAsked, Held))
+                                     else None)
+                    self.follow.refresh()
+                if isinstance(event, Held):
+                    self.run_panel.caption.setText(event.hold.text)
+                self._refresh_actions()
             if isinstance(event, StateRead):
                 # The panels are fed from the send's own readings rather than by
                 # queuing a second `read_state` after every send. The reading
@@ -2453,13 +2553,15 @@ class MainWindow(QMainWindow):
             return True
         mine = worker.busy_mine() or self.queue.running
         others = worker.others()
+        hold = worker.hold
         if mine:
-            answer = self._ask_close()
+            answer = (self._ask_close_paused() if hold is not None and hold.reached
+                      else self._ask_close())
             if answer == "cancel":
                 return False
             if answer == "stop":
                 self._close_when_idle = True
-                self.stop()
+                self.stop(signed=False)
                 if self._job is None:
                     self._shutdown_if_mine()
                     return True
@@ -2472,6 +2574,15 @@ class MainWindow(QMainWindow):
             return True
         if others:
             state, handle = others[0]
+            if hold is not None and hold.reached and hold.job == handle.id:
+                # Another client's series, paused by a person: it stays paused (B5).
+                self._tell(
+                    "A paused series stays paused",
+                    f"{handle.label} ({handle.origin or 'clockwork serve'}) is "
+                    f"{hold.text}. It stays paused in clockwork serve after this window "
+                    "closes, holding the instrument, until a person opens clockwork "
+                    "again and presses Resume or Stop.")
+                return True
             self._tell(
                 "An acquisition is still running",
                 f"{handle.label} ({handle.origin or 'clockwork serve'}) is {state} in "
@@ -2511,6 +2622,28 @@ class MainWindow(QMainWindow):
         leave = box.addButton("Leave it running", QMessageBox.ButtonRole.DestructiveRole)
         box.addButton(QMessageBox.StandardButton.Cancel)
         box.setDefaultButton(stop)
+        box.exec()
+        clicked = box.clickedButton()
+        return "stop" if clicked is stop else "leave" if clicked is leave else "cancel"
+
+    def _ask_close_paused(self) -> str:
+        """The close question's third case, this window's series at rest at a person's
+        pause: `"leave"`, `"stop"` or `"cancel"`. Leaving it leaves it paused in the
+        daemon, holding the instrument until a person at a window resumes or stops it
+        (the window revision's B5), and is the default: a pause is asked for in order to
+        come back to it."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("A series is paused")
+        box.setText("This window's series is paused in clockwork serve.")
+        box.setInformativeText(
+            "Leave it paused and close now: it stays paused in clockwork serve, holding "
+            "the instrument, until a person opens clockwork again and presses Resume or "
+            "Stop. Or stop it where it rests, close its files, then close.")
+        leave = box.addButton("Leave it paused", QMessageBox.ButtonRole.AcceptRole)
+        stop = box.addButton("Stop, then close", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(leave)
         box.exec()
         clicked = box.clickedButton()
         return "stop" if clicked is stop else "leave" if clicked is leave else "cancel"

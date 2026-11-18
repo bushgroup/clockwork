@@ -183,6 +183,11 @@ __all__ = [
     "FrameEnded",
     "FrameRecord",
     "GateChecked",
+    "HOLD_RESUMED",
+    "HOLD_STOPPED",
+    "HoldBegun",
+    "HoldEnded",
+    "HoldRecord",
     "PhaseSent",
     "PusherPeriodChecked",
     "PusherPeriodRefused",
@@ -1038,7 +1043,74 @@ class Folded(Event):
         return self.record.text
 
 
+@dataclass(frozen=True, slots=True)
+class HoldBegun(Event):
+    """The run has come to rest between two repetitions, at its caller's `hold`.
+
+    After the repetition named, with every frame so far ended and its files open: the
+    boxes' ports and the console's stream are still read while it rests, and nothing is
+    asked of either until the hold is lifted or the run is stopped (lab record, task
+    167)."""
+
+    method_frame: int
+    repetition: int
+    reason: str
+
+    @property
+    def text(self) -> str:
+        return (f"held after frame {self.method_frame}.{self.repetition}: {self.reason}")
+
+
+@dataclass(frozen=True, slots=True)
+class HoldEnded(Event):
+    """A hold inside a file is over: lifted, or ended by a stop."""
+
+    record: HoldRecord
+
+    @property
+    def text(self) -> str:
+        return self.record.text
+
+
 # --- what the loop hands back ---------------------------------------------------------
+
+HOLD_RESUMED = "resumed"
+HOLD_STOPPED = "stopped"
+"""`HoldRecord.ended_by`: the hold was lifted and the run went on, or a stop ended the run
+while it rested."""
+
+
+@dataclass(frozen=True, slots=True)
+class HoldRecord:
+    """One hold inside a file: where the run rested, since when, for how long.
+
+    `method_frame` and `repetition` are the repetition it rested after; the first one
+    after the hold is the next, and its `FrameRecord.held_before_s` is `seconds`. `began`
+    is local time, ISO 8601 to the second, and `began_s` the same instant on the run's
+    clock, which is what places the hold among the frames' `started_s`."""
+
+    method_frame: int
+    repetition: int
+    began: str
+    began_s: float
+    seconds: float
+    reason: str = ""
+    ended_by: str = HOLD_RESUMED
+
+    @property
+    def text(self) -> str:
+        how = ("resumed" if self.ended_by == HOLD_RESUMED
+               else "ended by a stop")
+        return (f"hold after frame {self.method_frame}.{self.repetition} {how} after "
+                f"{self.seconds:.1f} s")
+
+    @property
+    def line(self) -> str:
+        """The hold as the file's `ClockworkHoldText` says it, one line."""
+        return (f"after method frame {self.method_frame} repetition {self.repetition}, "
+                f"from {self.began} for {self.seconds:.1f} s, {self.ended_by}"
+                + (f": {self.reason}" if self.reason else ""))
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -1168,6 +1240,12 @@ class FrameRecord:
     yet: nothing measured the console's writer in time before task 34.
     """
 
+    held_before_s: float | None = None
+    """How long the run was held before this repetition, in seconds, where it is the first
+    after a hold; None on every other. Such a repetition was re-armed as a run's first is
+    (`_Loop._ready_the_rack`), and is the one to compare with its neighbours (lab record,
+    task 167)."""
+
     @property
     def acquired(self) -> bool:
         return self.outcome == "acquired"
@@ -1236,6 +1314,8 @@ class FrameRecord:
                           "refused by the console")
         if self.retry:
             fell_back += ", its second attempt"
+        if self.held_before_s is not None:
+            fell_back += f", the first after a hold of {self.held_before_s:.1f} s"
         if not self.acquired:
             return (f"frame {self.method_frame}.{self.repetition}: {self.outcome}: "
                     f"{self.detail}")
@@ -1306,6 +1386,9 @@ class Run:
     reads this one as short; this field is what tells it from a run the operator
     stopped, which is the difference between a row that failed and one that was
     stopped (lab record, task 134)."""
+    holds: tuple[HoldRecord, ...] = ()
+    """Each hold this run rested through between two of its repetitions, in order; empty
+    for a run nothing held. The files say the same (`Recording.note_hold`)."""
 
     @property
     def failures(self) -> tuple[FrameRecord, ...]:
@@ -2349,6 +2432,7 @@ def run_acquisition(
     provenance: Provenance | None = None,
     overwrite: bool = False,
     stop: Callable[[], str | None] | None = None,
+    hold: Callable[[int, int], str | None] | None = None,
     recover: Callable[[], TofWidth] | None = None,
     beam_guard: BeamGuard | None = None,
     clock: Callable[[], float] = time.perf_counter,
@@ -2471,6 +2555,27 @@ def run_acquisition(
     (`Run.stopped_early` carries the reason). It is called on the acquisition thread,
     so it must not block.
 
+    `hold` is asked at the same place, after `stop`, with the method frame and repetition
+    just acquired, whenever another repetition is to follow in this file: a string says
+    rest here, and is the reason; `None` says go on. **A hold is between two repetitions
+    and never inside one**, for the reasons a stop is. While the run rests the loop asks
+    again every `frame_poll`, and between askings does what a frame's wait does: it
+    drains the boxes' ports, so a line a box raises is read when it arrives and a box
+    that has gone is noticed, reads the console's stream, where a batch is a digitizer
+    recording with nothing asked of it and is said, and collects folds; the fold of a
+    method frame the hold follows is started at once, there being no start list for it
+    to disturb. `stop` is still asked, and ends the run where it rests. Nothing bounds
+    the rest: the files stay open, the console keeps the chain, and the boxes stay armed
+    for as long as the caller says to. Like `stop`, it must not block.
+
+    **The first repetition after a hold is readied as a run's first is**
+    (`_ready_the_rack`): the method's `reset` list, the declared enable line low by
+    command, and the gate dwell again, since what an armed rack and an open chain do
+    over an hour is one more thing the dwell is the evidence about. Its record says how
+    long the run was held before it (`FrameRecord.held_before_s`), `Run.holds` lists the
+    holds, and the files carry both (`Recording.note_hold`): what the bench compares
+    with its neighbours (lab record, task 167).
+
     `beam_guard` ends the run the same way, between repetitions, when that many
     repetitions in a row counted fewer ions than its floor: the beam lost at the source,
     which fails nothing else the loop watches (`clockwork.acq.guard`, lab record, task
@@ -2565,7 +2670,7 @@ def run_acquisition(
                         else _gate_dwell(recording.geometry)),
             witness_box=enable_witness(method) if guard_gate else None,
             rearm_with_reset=rearm_with_reset, abort_after=abort_after,
-            stop=stop, recover=recover, beam_guard=beam_guard, clock=clock,
+            stop=stop, hold=hold, recover=recover, beam_guard=beam_guard, clock=clock,
             started=started,
             frame_timeout=(frame_timeout if frame_timeout is not None
                            else _frame_timeout(method, recording.geometry)),
@@ -2824,6 +2929,8 @@ class _Loop:
     """Whose `TBLCMPLT` says a repetition was gated, or None (`enable_witness`)."""
 
     stop: Callable[[], str | None] | None = None
+    hold: Callable[[int, int], str | None] | None = None
+    """Asked between repetitions whether to rest there (`run_acquisition`'s `hold`)."""
     recover: Callable[[], TofWidth] | None = None
     """Restart the console and open its chain again, returning the new chain's width;
     None where nothing in reach can (`run_acquisition`'s `recover`)."""
@@ -2842,6 +2949,11 @@ class _Loop:
     beam_lost: str | None = None
     _under_floor: list[int] = field(default_factory=list)
     """The totals of the repetitions in a row under the beam guard's floor."""
+    holds: list[HoldRecord] = field(default_factory=list)
+    _resumed_at: tuple[int, int] | None = None
+    """The first repetition after a hold, readied as the run's first is, and for how
+    long the run was held before it: until its record is made."""
+    _held_before: float | None = None
     _consecutive_failures: int = 0
     _consecutive_unwitnessed: int = 0
     _witnessed_at: float | None = None
@@ -2872,9 +2984,18 @@ class _Loop:
         self._pending = []
         failure: BaseException | None = None
         try:
+            last = (0, 0)
             for method_frame in range(1, acquisition.frames + 1):
                 for repetition in range(1, acquisition.console_frames + 1):
+                    if last != (0, 0):
+                        # Before the next repetition rather than after the last one, so
+                        # that a rest after a method frame's last repetition comes once
+                        # that frame's fold is owed, and the fold runs through it.
+                        self._rest(*last)
+                        if self.stopped_early is not None:
+                            break
                     self._one_frame(method_frame, repetition)
+                    last = (method_frame, repetition)
                     self._watch_beam()
                     self._asked_to_stop()
                     if self.stopped_early is not None:
@@ -2935,6 +3056,7 @@ class _Loop:
             stopped_early=self.stopped_early,
             stop_asked=self._asked,
             beam_lost=self.beam_lost,
+            holds=tuple(self.holds),
         )
 
     def outcome(self, failure: BaseException | None) -> tuple[str, str]:
@@ -3026,6 +3148,72 @@ class _Loop:
             self._asked = True
             self.report(Warned(f"stopping after this repetition: {reason}"))
 
+    def _held(self, method_frame: int, repetition: int) -> str | None:
+        """Ask the caller's `hold` whether the run rests after this repetition. A `hold`
+        that raises is reported and read as "go on", as a `stop` that raises is."""
+        if self.hold is None:
+            return None
+        try:
+            return self.hold(method_frame, repetition) or None
+        except Exception as exc:  # noqa: BLE001 -- a caller's predicate, not ours
+            self.report(Warned(f"the hold check raised ({exc!r}); carrying on"))
+            return None
+
+    def _rest(self, method_frame: int, repetition: int) -> None:
+        """Rest after `method_frame`.`repetition` for as long as the caller's `hold`
+        says to, then mark the repetition that follows as the first after a hold.
+
+        Every frame so far has ended and nothing is asked of the console or the boxes
+        while the run rests; both are still read (`run_acquisition`'s `hold`). The hold
+        is written into the raw file as it ends and into the companion at its close.
+        """
+        reason = self._held(method_frame, repetition)
+        if reason is None:
+            return
+        began, began_wall = self.clock(), time.strftime("%Y-%m-%dT%H:%M:%S")
+        self.report(HoldBegun(method_frame, repetition, reason))
+        # The fold a method frame is owed waits for the next start list to be walked;
+        # there is none coming until the hold lifts.
+        self._submit_deferred_fold()
+        stray = 0
+        while True:
+            event = self.stream.poll(self.frame_poll)
+            while event is not None:
+                # A status message between frames belongs to no frame, and is in the
+                # transcript; a batch is the digitizer recording with nothing asked.
+                stray += isinstance(event, Batch)
+                event = self.stream.poll(0.0)
+            self._note_box_events()
+            self._pending = self._collect(self._pending, wait=False)
+            self._asked_to_stop()
+            if self.stopped_early is not None or self._held(method_frame, repetition) is None:
+                break
+        seconds = self.clock() - began
+        if stray:
+            self.report(Warned(
+                f"the console published {stray} batch(es) while the run was held after "
+                f"frame {method_frame}.{repetition}, with no frame asked for: the "
+                "digitizer was recording, so its enable was not low through the hold"))
+        record = HoldRecord(
+            method_frame=method_frame, repetition=repetition, began=began_wall,
+            began_s=began - self.started, seconds=seconds, reason=reason,
+            ended_by=HOLD_STOPPED if self.stopped_early is not None else HOLD_RESUMED)
+        self.holds.append(record)
+        try:
+            self.recording.note_hold(record.line, seconds)
+        except Exception as exc:  # noqa: BLE001 -- the run's own end comes first
+            self.report(Warned(f"the file could not be told of the hold: {exc}"))
+        self.report(HoldEnded(record))
+        if self.stopped_early is None:
+            acquisition = self.method.acquisition
+            self._resumed_at = ((method_frame, repetition + 1)
+                                if repetition < acquisition.console_frames
+                                else (method_frame + 1, 1))
+            self._held_before = seconds
+            # An hour of an armed rack and an open chain is a new enable-gate question,
+            # as a restarted console is (`_restart`): the next frame dwells again.
+            self._gate_checked = False
+
     def _submit_deferred_fold(self) -> None:
         """Start the fold a previous method frame is owed, now that nothing waits on it.
 
@@ -3115,6 +3303,15 @@ class _Loop:
                 return
             record = self._attempt(method_frame, repetition, retry=True)
         self.frames.append(record)
+        if record.held_before_s is not None:
+            # Marked in the file once the repetition's attempt is the one that counts,
+            # and the re-arm is spent: the repetition after this one is an ordinary one.
+            try:
+                self.recording.mark_after_hold(record.frame_number, record.held_before_s)
+            except Exception as exc:  # noqa: BLE001 -- the run's own end comes first
+                self.report(Warned(f"frame {method_frame}.{repetition} could not be "
+                                   f"marked as the first after a hold: {exc}"))
+            self._resumed_at = self._held_before = None
         if record.acquired:
             self._consecutive_failures = 0
             return
@@ -3313,6 +3510,8 @@ class _Loop:
             table_completed_s=(None if self._witnessed_at is None
                                else self._witnessed_at - began),
             retry=retry,
+            held_before_s=(self._held_before
+                           if (method_frame, repetition) == self._resumed_at else None),
         )
         # Not appended to `frames` here: `_one_frame` decides which attempt is the
         # repetition's, and the others go in `retried`. `frames` is one record per
@@ -3522,9 +3721,12 @@ class _Loop:
         cut.
         """
         acquisition = self.method.acquisition
-        if (method_frame, repetition) == (1, 1):
+        if (method_frame, repetition) in ((1, 1), self._resumed_at):
             # The run's own first frame, which is the only one the reset list belongs
             # to: what a previous run left behind is not this method's table's business.
+            # And the first frame after a hold, readied as a replicate's first is (Matt,
+            # 2026-11-18; lab record, task 167): the rack sat armed for as long as the
+            # hold lasted, and what it does over that time is not assumed.
             self._walk(self.method.reset, "reset")
         elif acquisition.repetition_mode != "single_frame":
             # Every later frame of a `per_repetition` method, whose table brings the

@@ -54,7 +54,7 @@ The top level is an object:
 | `record_schema` | `1`. Additions to the format keep the number; a change that a reader of the number would misread moves it |
 | `request` | The request block, below |
 | `plans`, `arms`, `acquisitions`, `files`, `notes`, `routines`, `verdicts` | One list per section, each entry stamped with its `time`, oldest first |
-| `interventions` | A person's acts on a running job; present only once there is an entry |
+| `interventions` | A person's pauses and resumes of a running job, and every stop of one; present only once there is an entry |
 
 Every `time` is local time, ISO 8601 to the second, as `2026-11-18T14:02:11`. A reader ignores a key
 it does not know: later releases add keys to the request block and to entries without moving
@@ -123,10 +123,15 @@ written), `complete`, `stopped_early`, `replicate` (whether the run was a replic
 before it), `seconds`, and `summary`, the file's frame count, provisional frames, scans per frame,
 accumulations, total counts, base peak, pusher period and its ratio to the declared one, and
 saturated fraction, or `{problem}` with the sentence that says why the file could not be read.
+A file that was paused between two of its repetitions also has `holds`, one entry per pause:
+`after` (the `method_frame` and `repetition` it followed), `began`, `seconds` and `ended_by`,
+which is `resumed` or `stopped`. A file that was never paused has no such key.
 
 `notes` holds free text: `{text, by}`. `by` is `session` for a note an agent added with the `note`
 tool, and `server` for one the daemon or a client wrote, such as the sentence that says a job
 failed, where in a series it failed and why, or that a series stopped after some of its points.
+A note a person typed at the window while the job ran has that person's initials as `by`, and
+also carries `client`, the window it was typed at.
 
 `routines` holds each routine's result: `routine` (its name), `hash`, `path`, `verdict`, `reason`,
 `criteria`, `values`, `files`, `job` and `text`, the report as the routine words it.
@@ -138,20 +143,24 @@ earlier, which is kept. A verdict is distinct from a run's outcome, which the fi
 says how the acquisition ended (`completed`, `stopped`, `failed` or `incomplete`).
 
 `interventions` holds a person's acts on a job already running, each in the record of the job
-acted on, whatever client started that job:
+acted on, whatever client started that job, and every stop of an acquisition, whichever client
+sent it. The daemon writes each entry as the act is made:
 
 | Key | What it holds |
 |---|---|
 | `kind` | What was done: `pause`, `resume`, `stop` or `guard` |
-| `grain` | For a pause, where the job holds: `point` (after the point in flight) or `repetition` (after the repetition in flight); empty otherwise |
+| `grain` | For a pause and for its resume, where the job rests: `point` (after the point in flight) or `repetition` (after the repetition in flight); empty otherwise |
 | `by` | The initials of the person who acted, or the client's name where no person did |
-| `client` | The client the act came through, as the daemon names it: `the clockwork window (pid 5120)`, or the route of an agent's `stop` |
+| `client` | The client the act came through, as the daemon names it: `the clockwork window (pid 5120)`, or `Claude, through clockwork mcp` for an agent's `stop` |
 | `job` | The daemon's job number |
-| `reason` | The words given with the act, or empty |
+| `reason` | The words given with a stop, or empty |
+| `held_since`, `held_s`, `where` | A resume only: when the series came to rest, how many seconds it rested, and where in words. For a pause withdrawn before the series reached it, `held_s` is 0 and the other two are empty |
+| `while_paused` | A stop only: `true` when it ended a paused series, and absent otherwise |
 
-The `interventions` section is part of the format from clockwork 1.2.0; the controls at the window
-that fill it arrive later in the same release, and a record with none of them has no
-`interventions` key.
+A `pause` entry records the moment the pause was asked for, and the `resume` or `stop` that
+follows it records how the pause ended. A pause that the series never reached, because the series
+ended first, leaves a note by `server` saying so. A record with no intervention has no
+`interventions` key, so a record of a run nobody paused or stopped is unchanged by this section.
 
 ## The day record
 
@@ -164,12 +173,12 @@ line has `time` and `kind`, and `by` where a person or a client caused it:
 | `sitting` | First in every segment of the day record | `version`, `session`, `pid`, `fake`, `output`, `library`, and `instrument`, `limits` and `project_limits`, each `{path, sha256}` of the document in force, or null for none |
 | `daemon` | The daemon started or stopped | `event` (`started` or `stopped`), `session`, `reason` |
 | `console` | The acquisition console started, restarted or stopped | `event` (`started`, `restarted`, `stopped` or `failed`), `job`, `by` (the client whose job it was, or the daemon itself), `detail` |
+| `note` | A person typed a note at the window with no job running, or while a job with no run record ran | `text`, `by` (the person's initials), `client` (the window), `job` (the job running, or null) |
 
 The SHA-256 of each document is what lets a reader confirm, months later, which limits a day's
 runs were checked against, since the files on disk may have changed since. A console restart
-between two runs, which belongs to neither, is recorded here. Later releases add `note` lines, for
-a note typed at the window with nothing running, and `guard` lines, for a change to the beam guard
-with nothing running.
+between two runs, which belongs to neither, is recorded here, and so is a note typed with nothing
+running. A later release adds `guard` lines, for a change to the beam guard with nothing running.
 
 The day record is kept in segments in the same way as the audit log, so that a folder once listed
 never changes. `day-record.jsonl` is the live segment, the only one written to. The two calls that

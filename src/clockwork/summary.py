@@ -67,6 +67,7 @@ from mainspring.uimf import (
 
 from .acq.loop import check_pusher_period
 from .acq.uimf import (
+    HOLD_KEYS,
     KNOB_PREFIX,
     LABEL_PREFIX,
     MARK_PREFIX,
@@ -396,7 +397,7 @@ def _scan_range(scans: object) -> tuple[int, int] | None:
 
 _FIXED_TYPES = ({definition.name: definition.data_type for definition, _ in PROVENANCE_KEYS}
                 | {definition.name: definition.data_type
-                   for definition in RENDER_KEYS + SERIES_KEYS})
+                   for definition in RENDER_KEYS + SERIES_KEYS + HOLD_KEYS})
 
 
 def _data_type(name: str) -> str:

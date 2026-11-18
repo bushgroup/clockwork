@@ -33,6 +33,18 @@ still comes up -- a window must be able to say why its buttons are grey -- but e
 it is given fails with the lock's own sentence until the holder is gone, and the next
 job after that takes the lock and runs. `fake=True` never takes it: a rehearsal opens no
 port and must be able to run beside a real session.
+
+**A person's pause is this owner's state, and it holds the queue** (`clockwork.owner.hold`;
+lab record, task 167). `pause` is accepted only while a series runs and names where it is
+to rest: after the point in flight, where the series waits between two points with no
+file open and the console's chain closed; or after the repetition in flight, where the
+loop itself waits inside the file (`run_acquisition`'s `hold`), or, that repetition being
+its file's last, where the series waits before its next file. Nothing bounds the wait:
+the job stays the one running, every job queued behind it waits, and `resume`, `stop` or
+`shutdown` is what ends it, the last two as a series stopped while paused. `pause`,
+`resume`, `note` and `stop` are called from another thread than the one that runs jobs
+and never block on it; each is written, with who made it, into the run record of the job
+it acted on, and a note typed with nothing running into the day record.
 """
 
 from __future__ import annotations
@@ -96,22 +108,31 @@ from ..mips import (
     read_state,
 )
 from ..naming import files_of, next_stem, parse_stem
+from ..record import find as find_record
+from .hold import POINT, REPETITION, Hold, HoldRefused
+from .hold import now as _now
+from .hold import refusal as pause_refusal
 from .interface import (
     BoxStateRead,
     ConsoleChanged,
     Discovered,
     Handle,
+    Held,
     JobFailed,
     JobFinished,
     JobStarted,
     LogsOpened,
+    Noted,
     OwnerStatus,
+    PauseAsked,
     PointStarted,
     Progress,
     RecordBegun,
+    Resumed,
     RunDone,
     Said,
     StaleHandle,
+    StopAsked,
 )
 from .jobs import (
     Acquire,
@@ -139,7 +160,12 @@ from .keeper import RecordKeeper, begin
 from .lock import Holder, InstrumentLock, LockError
 from .wire import to_wire
 
-__all__ = ["FAKE_FRAME_HOLD_S", "LocalOwner", "fake_rack", "sentence"]
+__all__ = ["FAKE_FRAME_HOLD_S", "HOLD_POLL_S", "LocalOwner", "fake_rack", "sentence"]
+
+HOLD_POLL_S = 0.2
+"""How often a series resting between two files looks at its boxes' ports and at whether
+it has been resumed or stopped. A resume or a stop wakes it at once; this is the cadence
+of the drain, and of noticing a box that was unplugged while the series rested."""
 
 FAKE_FRAME_HOLD_S = 0.25
 """How long `FakeConsole` waits inside `acquire frame` before publishing, under `--fake`.
@@ -314,6 +340,23 @@ class LocalOwner:
         self._point: PointStarted | None = None
         """The series point under way, for the note a failure leaves in its record."""
 
+        self._job: Job | None = None
+        """The job running, as it runs (a window run's with its request id), for the
+        record a stop, a pause or a note is written into. Under `_guard`."""
+        self._at: tuple[int, Method | None] = (0, None)
+        """The series point in flight: its place among the points as acquired, from 1,
+        and its method; `(0, None)` outside a series and before its first point, which
+        is when no pause is accepted. Under `_guard`, with the two below."""
+        self._hold: Hold | None = None
+        """A person's pause on the series under way (`OwnerStatus.hold`)."""
+        self._held_from = 0.0
+        """When the series came to rest, on `time.monotonic`."""
+        self._lifted = threading.Event()
+        """Set by `resume` and by `stop`, so a series resting between two files wakes
+        at once rather than on its next look."""
+        self._stem = ""
+        """The stem of the file in flight, for the words that say where a hold rests."""
+
         self._ids = itertools.count(1)
         self._issued = 0
         """The newest id issued (`OwnerStatus.issued`), under `_guard` with the id."""
@@ -369,16 +412,122 @@ class LocalOwner:
             return [entry for entry in self._history.get(handle.id, ())
                     if entry.seq > after]
 
-    def stop(self, reason: str = "stopped by the operator") -> None:
+    def stop(self, reason: str = "stopped by the operator", *, by: str = "",
+             client: str = "") -> None:
         """Ask the run in flight to end after the current repetition and its fold.
 
         Sets a flag the acquisition thread reads between repetitions; it does not
         interrupt anything. A repetition is about a second, so the button feels
         immediate and what it leaves on disk is a short experiment rather than a
         broken one.
+
+        **A paused series ends where it rests**, as stopped while paused, and the pause
+        goes with it (the window revision's B5). **Every stop of an acquisition is
+        written into its run record's `interventions`** with who asked, `by` a person's
+        initials and `client` the client it came through, so that a person's Stop at
+        the window and an agent's `stop` are told apart afterwards (A4).
         """
+        with self._guard:
+            hold, self._hold = self._hold, None
+            job, handle = self._job, self._running
+        paused = hold is not None and hold.reached
+        if paused:
+            reason = f"{reason} (while {hold.text})"  # type: ignore[union-attr]
         self._stop_reason = reason
         self._stop.set()
+        self._lifted.set()
+        if handle is None or not isinstance(job, (Acquire, SeriesJob)):
+            return
+        client = client or self.program
+        self._report(StopAsked(reason=reason, by=by, client=client, while_paused=paused),
+                     handle)
+        self._intervene(job, handle, kind="stop", by=by or client, client=client,
+                        reason=reason, **({"while_paused": True} if paused else {}))
+
+    def pause(self, grain: str = POINT, *, by: str, client: str = "") -> Hold:
+        """Hold the series under way after its point or its repetition in flight.
+
+        Answers at once with the `Hold` as asked for; the series goes on to the boundary
+        `grain` names and `Held` says when it rests there. A pause asked for while one
+        is still on its way replaces it, which is how the grain is changed. `HoldRefused`
+        with one sentence where nothing can be held (`clockwork.owner.hold.refusal`).
+        Never blocks; any thread may call it.
+        """
+        by = by.strip()
+        if not by:
+            raise HoldRefused("a pause is a person's: give the initials of who is at "
+                              "the window")
+        with self._guard:
+            job, handle = self._job, self._running
+            number, method = self._at
+            why = pause_refusal(job if handle is not None else None, grain, number=number,
+                                method=method, hold=self._hold,
+                                stopping=self._stop.is_set() or self._closing)
+            if why:
+                raise HoldRefused(why)
+            assert handle is not None
+            hold = self._hold = Hold(job=handle.id, grain=grain, by=by, client=client,
+                                     asked=_now())
+            self._lifted.clear()
+        self._report(PauseAsked(hold=hold), handle)
+        self._intervene(job, handle, kind="pause", grain=grain, by=by, client=client)
+        return hold
+
+    def resume(self, *, by: str, client: str = "") -> None:
+        """Lift the pause: a series at rest goes on, and one still on its way to a pause
+        is no longer to be paused. `HoldRefused` where there is no pause. The first
+        repetition after a hold inside a file is re-armed as a run's first is, and the
+        file and the record say how long the hold was (`run_acquisition`'s `hold`)."""
+        by = by.strip()
+        if not by:
+            raise HoldRefused("a resume is a person's: give the initials of who is at "
+                              "the window")
+        with self._guard:
+            hold, self._hold = self._hold, None
+            job, handle = self._job, self._running
+            seconds = (time.monotonic() - self._held_from
+                       if hold is not None and hold.reached else 0.0)
+        if hold is None:
+            raise HoldRefused("nothing is paused, so there is nothing to resume")
+        self._lifted.set()
+        if handle is None:
+            return
+        self._report(Resumed(hold=hold, by=by, client=client, seconds=seconds), handle)
+        self._intervene(job, handle, kind="resume", grain=hold.grain, by=by, client=client,
+                        held_since=hold.since, held_s=round(seconds, 1), where=hold.where)
+
+    def note(self, text: str, *, by: str, client: str = "") -> str:
+        """Keep a note a person typed at the window, and answer where it went.
+
+        Into the run record of the job running, under their initials, and to every
+        client following that job as a `Noted` event: a record, never a command (the
+        window revision's C1). With no job running, or one that has no run record, into
+        the day record (C2). `HoldRefused` for an empty note, no initials, or a note
+        with nowhere to go, which is an owner with no day record.
+        """
+        text, by = " ".join(text.split()), by.strip()
+        if not text:
+            raise HoldRefused("a note says something: type its text")
+        if not by:
+            raise HoldRefused("a note is a person's: give the initials of who is at the "
+                              "window")
+        with self._guard:
+            job, handle = self._job, self._running
+        if handle is not None and isinstance(job, (Acquire, SeriesJob)) and job.series:
+            directory = job.directory or os.getcwd()
+            if find_record(directory, job.series) is not None:
+                self._report(Noted(note=text, by=by, client=client), handle)
+                self._records.person_note(directory, job.series, text, by, client)
+                return f"the run record of job {handle.id}, request {job.series}"
+        if self.day is None:
+            raise HoldRefused("no job with a run record is running, and a note typed "
+                              "then goes to the day record, which this owner does not "
+                              "keep: the note was not kept")
+        self.day.write("note", text=text, by=by, client=client,
+                       job=handle.id if handle is not None else None)
+        if handle is not None:
+            self._report(Noted(note=text, by=by, client=client), handle)
+        return "the day record"
 
     def snapshot(self) -> Snapshot | None:
         return self._snapshot
@@ -387,6 +536,7 @@ class LocalOwner:
         with self._guard:
             queued = tuple(self._pending)
             issued = self._issued
+            hold = self._hold
         held = self._lock is not None and self._lock.held
         return OwnerStatus(
             program=self.program,
@@ -402,16 +552,18 @@ class LocalOwner:
             holder=self._lock.holder if held else self._refused_by,
             refused=self._refused,
             issued=issued,
+            hold=hold,
         )
 
     def shutdown(self, reason: str = "the owner is shutting down") -> None:
         """Stop the thread and let go of everything it owns. Idempotent.
 
         The run in flight ends after its current repetition and its fold, as a Stop
-        would end it; every job queued behind it fails without starting.
+        would end it, and a paused series as stopped while paused; every job queued
+        behind it fails without starting.
         """
         self._closing = True
-        self.stop(reason)
+        self.stop(reason, client=self.program)
         self._queue.put(None)
 
     # -- beside the protocol, for a caller in this process ---------------------
@@ -483,9 +635,12 @@ class LocalOwner:
                 submitted = job
                 self._report(JobStarted(handle=handle, job=submitted))
                 job = self._begin_record(handle, job)
+                with self._guard:
+                    self._job = job
                 try:
                     result = self._do(job)
                 except Exception as exc:  # noqa: BLE001 -- a message, not a traceback
+                    self._lapse(handle, job)
                     self._running = None
                     if isinstance(exc, BoxLost):
                         self._forget(exc.box)
@@ -495,6 +650,7 @@ class LocalOwner:
                     self._record_end(handle, job, failed=message)
                     self._report(JobFailed(handle=handle, job=submitted, message=message))
                 else:
+                    self._lapse(handle, job)
                     self._running = None
                     self._record_end(handle, job, result=result)
                     self._report(JobFinished(handle=handle, job=submitted, result=result))
@@ -517,6 +673,77 @@ class LocalOwner:
             return job
         self._report(RecordBegun(request_id=running.series, path=path))
         return running
+
+    # -- a person's pause --------------------------------------------------------
+
+    def _intervene(self, job: Job | None, handle: Handle, *, kind: str, by: str,
+                   client: str, grain: str = "", reason: str = "",
+                   **more: object) -> None:
+        """One entry in the `interventions` of the run record of the job acted on, where
+        it has one (`docs/run-record.md`)."""
+        if not isinstance(job, (Acquire, SeriesJob)) or not job.series:
+            return
+        self._records.intervention(job.directory or os.getcwd(), job.series, {
+            "kind": kind, "grain": grain, "by": by, "client": client, "job": handle.id,
+            "reason": reason, **more})
+
+    def _reach(self, where: str) -> Hold | None:
+        """The series has come to rest at the pause asked for: say since when and where,
+        once. The hold as it now stands, or None if it was lifted on the way."""
+        with self._guard:
+            hold = self._hold
+            if hold is None or hold.reached:
+                return hold
+            hold = self._hold = replace(hold, since=_now(), where=where)
+            self._held_from = time.monotonic()
+        self._report(Held(hold=hold))
+        return hold
+
+    def _hold_check(self, method_frame: int, repetition: int) -> str | None:
+        """What `run_acquisition` asks between repetitions, after `_stop_check`: rest
+        here for a pause at the inner grain, for as long as it stands. Must not block."""
+        hold = self._hold
+        if hold is None or hold.grain != REPETITION:
+            return None
+        if not hold.reached:
+            self._reach(f"after method frame {method_frame} repetition {repetition} "
+                        f"of {self._stem}")
+        return f"paused by {hold.by} at the window"
+
+    def _rest(self, where: str) -> None:
+        """Rest between two files for as long as a pause stands: no file is open and
+        nothing is asked of the console or the boxes. The boxes' ports are still read,
+        so that one unplugged while the series rested is let go of here and named by
+        the run that next needs it. A resume ends the rest, and so does a stop, which
+        the caller then finds set."""
+        if self._hold is None or self._stop.is_set():
+            return
+        self._reach(where)
+        while self._hold is not None and not self._stop.is_set():
+            self._lifted.wait(HOLD_POLL_S)
+            for name, box in list(self.boxes.items()):
+                try:
+                    box.drain(0.0)
+                except OSError:
+                    self._forget(name)
+                except Exception:  # noqa: BLE001 -- a line that does not parse is no fault
+                    pass
+
+    def _lapse(self, handle: Handle, job: Job) -> None:
+        """The job has ended: its series is no longer one to pause, and a pause it never
+        came to rest at is let go, and said."""
+        with self._guard:
+            hold, self._hold = self._hold, None
+            self._job = None
+            self._at = (0, None)
+        if hold is None:
+            return
+        line = (f"the pause {hold.by} asked for at {hold.asked}, after this {hold.grain}, "
+                "was never reached: the job ended first"
+                if not hold.reached else f"the job ended while {hold.text}")
+        self._say(line)
+        if isinstance(job, (Acquire, SeriesJob)):
+            self._records.note(job.directory or os.getcwd(), job.series, line)
 
     def day_line(self, kind: str, **fields: object) -> None:
         """A line in the day record, if this owner keeps one; any thread, never raises."""
@@ -1082,6 +1309,14 @@ class LocalOwner:
                     self._last_run = run
                     self._report(RunDone(run=run))
                     self._records.enter(directory, job.series, run)
+                    hold = self._hold
+                    if (hold is not None and hold.grain == REPETITION
+                            and index + 1 < max(1, job.replicates)
+                            and not run.stopped_early):
+                        # The repetition the pause was asked in was its file's last, so
+                        # the series rests here, before the next file.
+                        self._rest(f"after file {index + 1} of {job.replicates} ({stem}), "
+                                   "before the next file")
                     if run.stopped_early or self._stop.is_set():
                         if index + 1 < job.replicates:
                             self._say(
@@ -1111,6 +1346,10 @@ class LocalOwner:
         A stop, from any client, ends the series after the current repetition, or
         before the next point when it arrives between two. Everything a point raises
         ends the series too, with the files already written left as they are.
+
+        A person's pause rests it between two points, here, or inside a point's file
+        or between two of its files (`_hold_check`, `_acquire`); a stop while it rests
+        ends it as any stop does.
         """
         if not job.points:
             raise ValueError("a series has at least one point")
@@ -1129,6 +1368,8 @@ class LocalOwner:
             method = _needs_method(point.method)
             sends = sent is None or self._armed is None or not matches_wire(
                 self._armed.fingerprint, method)
+            with self._guard:
+                self._at = (number, method)
             self._point = PointStarted(
                 index=point.index, position=position, number=number,
                 points=len(job.points), knobs=dict(point.knobs),
@@ -1168,6 +1409,11 @@ class LocalOwner:
             if self._stop.is_set() or any(run.stopped_early for run in made):
                 stopped = self._stop_reason or "a run stopped early"
                 break
+            if number < len(job.points):
+                # A pause of either grain that has not yet come to rest rests here; a
+                # stop that ends the rest is found at the top of the loop.
+                self._rest(f"after point {number} of {len(job.points)} "
+                           f"(planned {point.index})")
         if stopped and done < len(job.points):
             self._say(f"series stopped after {done} of {len(job.points)} points "
                       f"({len(runs)} files): {stopped}")
@@ -1235,6 +1481,7 @@ class LocalOwner:
         # acquisition truncate the load-and-arm log it had just written (task 56).
         append = first_log is not None and first_log == (directory, stem)
         self._send_log = (directory, stem)
+        self._stem = stem
         if replicate and self._setup_log is not None:
             header += ("\nthis is a replicate: its method's setup, load and arm strings "
                        f"went in {transcript.send_log_name(self._setup_log[1])} and were "
@@ -1287,6 +1534,7 @@ class LocalOwner:
                     snapshot=self._snapshot,
                     provenance=provenance,
                     stop=self._stop_check,
+                    hold=self._hold_check,
                     recover=lambda: self._recover(console, stream, job),
                     beam_guard=job.beam_guard,
                 )

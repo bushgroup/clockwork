@@ -57,7 +57,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, replace
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -95,10 +95,16 @@ from ..acq import (
     StateRead,
     Warned,
 )
+from ..owner import POINT, REPETITION, Held, Hold, Noted, PauseAsked, Resumed, StopAsked
 from ..transcript import UNPROMPTED
 
-__all__ = ["LEFT_AS_FOUND", "NEVER_GROUPED", "RunPanel", "is_left_as_found",
+__all__ = ["LEFT_AS_FOUND", "NEVER_GROUPED", "NOTE_SAYS", "RunPanel", "is_left_as_found",
            "names_it_elsewhere"]
+
+NOTE_SAYS = ("A note is kept with the data and commands nothing; the buttons are the "
+             "commands.")
+"""Beside the note field, always (the window revision's C1): a note typed while an agent's
+run is in flight reaches the agent as something to read, and is not an instruction to it."""
 
 LEFT_AS_FOUND = " is left as found on module"
 """The phrase `clockwork.acq.loop.left_as_found` builds every one of its lines around.
@@ -222,7 +228,20 @@ class RunPanel(QWidget):
     `say(text)` is for the window's own lines, which are the ones that did not come off
     a wire. Nothing here blocks and nothing here touches the instrument: it is fed from
     the worker's mailbox, drained on the UI thread.
+
+    **The person's controls are here too** (lab record, task 167; the window revision's
+    R6, A2 and B2): the two pauses, Resume, Stop and the note, beside the "At the window"
+    initials every one of them is signed with. They act on whichever job is running,
+    this window's or another client's. This panel only asks: each button is a signal,
+    and the window decides, signs and sends.
     """
+
+    pause_requested = Signal(str)
+    """`point` or `repetition`: hold the series after its point or repetition in flight."""
+    resume_requested = Signal()
+    stop_requested = Signal()
+    note_requested = Signal(str)
+    """The note's text, as typed and not yet kept."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -287,6 +306,53 @@ class RunPanel(QWidget):
         fields.addWidget(QLabel("At the window"))
         fields.addWidget(self.at_window)
 
+        self.pause_point = QPushButton("Pause after this point")
+        self.pause_repetition = QPushButton("Pause after this repetition")
+        self.resume_button = QPushButton("Resume")
+        self.resume_button.setToolTip(
+            "Lift the pause, under your initials: the series goes on. After a pause "
+            "inside a file the first repetition is re-armed as a run's first is, and "
+            "the file and the run record say how long the pause was.")
+        self.stop_run = QPushButton("Stop")
+        self.stop_run.setToolTip(
+            "End the run in flight after its current repetition and its fold, whichever "
+            "client started it, under your initials. A paused series ends where it "
+            "rests, as stopped while paused.")
+        self.held = QLabel("")
+        self.held.setWordWrap(True)
+        self.held.setVisible(False)
+        self.pause_point.clicked.connect(lambda: self.pause_requested.emit(POINT))
+        self.pause_repetition.clicked.connect(
+            lambda: self.pause_requested.emit(REPETITION))
+        self.resume_button.clicked.connect(lambda: self.resume_requested.emit())
+        self.stop_run.clicked.connect(lambda: self.stop_requested.emit())
+        controls = QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.addWidget(self.pause_point)
+        controls.addWidget(self.pause_repetition)
+        controls.addWidget(self.resume_button)
+        controls.addWidget(self.stop_run)
+        controls.addStretch(1)
+
+        self.note = QLineEdit()
+        self.note.setPlaceholderText(
+            "a note for the record: kept with the data, and may be published")
+        self.note.setToolTip(
+            "Typed here and kept under your initials: in the run record of the job "
+            "running, whichever client started it, or with nothing running in the day "
+            "record. It is kept with the data and may be published with it. "
+            + NOTE_SAYS)
+        self.note_button = QPushButton("Keep note")
+        self.note_says = QLabel(NOTE_SAYS)
+        self.note.returnPressed.connect(self._ask_note)
+        self.note_button.clicked.connect(self._ask_note)
+        noting = QHBoxLayout()
+        noting.setContentsMargins(0, 0, 0, 0)
+        noting.addWidget(QLabel("Note"))
+        noting.addWidget(self.note, 1)
+        noting.addWidget(self.note_button)
+        self.show_hold(None)
+
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
         top.addWidget(self.caption, 1)
@@ -297,9 +363,61 @@ class RunPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
         layout.addLayout(fields)
+        layout.addLayout(controls)
+        layout.addWidget(self.held)
+        layout.addLayout(noting)
+        layout.addWidget(self.note_says)
         layout.addWidget(self.bar)
         layout.addLayout(top)
         layout.addWidget(self.log, 1)
+
+    # -- the person's controls -------------------------------------------------
+
+    def _ask_note(self) -> None:
+        text = self.note.text().strip()
+        if text:
+            self.note_requested.emit(text)
+
+    def show_hold(self, hold: Hold | None, *, series: bool = False, running: bool = False,
+                  stopping: bool = False, point: str = "", repetition: str = "") -> None:
+        """What the person may do to the job in flight, and whether it is paused.
+
+        `series` is whether a series is running, which is all a pause can be asked of;
+        `point` and `repetition` are why each pause cannot be asked now, in the owner's
+        own sentence, or empty where it can (`clockwork.owner.hold.refusal`). The two
+        pauses are present only while a series runs, and one that cannot be asked is
+        greyed with its sentence as its tooltip rather than hidden, so that a
+        `single_frame` point says why it has no inner pause."""
+        asked = hold is not None
+        resting = asked and hold.reached  # type: ignore[union-attr]
+        for button, why, tip in (
+                (self.pause_point, point,
+                 "Under your initials, hold the series once the point in flight has "
+                 "acquired its last file. Nothing is open while it rests, and it waits "
+                 "until a person at a window presses Resume or Stop."),
+                (self.pause_repetition, repetition,
+                 "Under your initials, hold the series once the repetition in flight "
+                 "has ended, inside its file. The file stays open while it rests; "
+                 "Resume re-arms the boxes and marks the first repetition after it.")):
+            button.setVisible(series and not resting)
+            button.setEnabled(series and not why and not stopping)
+            button.setToolTip(f"{why[:1].upper()}{why[1:]}." if why else tip)
+        self.resume_button.setVisible(asked)
+        self.resume_button.setText("Resume" if resting or not asked
+                                   else "Withdraw the pause")
+        self.stop_run.setEnabled(running and not stopping)
+        if not asked:
+            self.held.setVisible(False)
+            self.held.setText("")
+            return
+        text = hold.text  # type: ignore[union-attr]
+        self.held.setText(
+            f"{text[:1].upper()}{text[1:]}. "
+            + ("It holds the instrument until a person at a window resumes or stops it."
+               if resting else "It is still acquiring, up to there."))
+        colour = self._warn_colour().name()
+        self.held.setStyleSheet(f"color: {colour}; font-weight: bold;")
+        self.held.setVisible(True)
 
     # -- the window's own lines ----------------------------------------------
 
@@ -446,6 +564,11 @@ class RunPanel(QWidget):
             return
         if isinstance(event, Warned):
             self._warned(event.message)
+            return
+        if isinstance(event, (PauseAsked, Held, Resumed, StopAsked, Noted)):
+            # A person's act, or any client's stop: said in the warning colour, so that
+            # who paused, resumed, stopped or annotated a run stands out of its log.
+            self.say(event.text, warn=True)
             return
         if isinstance(event, PusherPeriodChecked):
             # Shown on every run, in the warning colour once it is past the caution: the

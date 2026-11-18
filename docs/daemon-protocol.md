@@ -104,22 +104,31 @@ that every handle it holds has gone with the old one. `error.kind` is one of fou
 
 ## Commands
 
-One command per call of the owner protocol, and `hello`.
+One command per call of the owner protocol, and `hello`. Three of them, `pause`, `resume` and
+`note`, are a person's at the window ([A person's pause](#a-persons-pause)).
 
 | `cmd` | `args` | `result` |
 |---|---|---|
 | `hello` | none | An object naming the daemon: `program`, `version` (clockwork's), `protocol` (1), `session`, `pid`, `started`, `fake`, `events` (the event socket's address), `output`, `library`, `holder`, the lock holder's own description or null under `--fake`, and the sitting, `instrument`, `limits` and `project_limits`, each an absolute path or empty for none |
 | `submit` | `job`, `origin` (optional) | A `Handle`. The job is queued and runs after every job before it, one at a time. `origin` is a few words naming the client, such as `the clockwork window (pid 5120)` or `Claude, through clockwork mcp`, and is carried unexamined in the handle's own `origin` so that every other client can say whose job it is |
 | `events` | `handle`, `after` (default 0) | That job's progress numbered after `after`, oldest first, as a list of `Progress` |
-| `stop` | `reason` (optional) | null. The run in flight ends after its current repetition and its fold |
+| `stop` | `reason`, `by`, `client` (all optional) | null. The run in flight ends after its current repetition and its fold, and a paused series ends where it rests. `by` is the initials of a person who asked and `client` a few words naming the client, as `origin` does; both are written into the run's record with the stop |
+| `pause` | `grain` (`point` or `repetition`, default `point`), `by`, `client` (optional) | A `Hold`, at once. The series running rests after its point or its repetition in flight |
+| `resume` | `by`, `client` (optional) | null. The pause is lifted and the series goes on |
+| `note` | `text`, `by`, `client` (optional) | A few words saying where the note was kept: the run record of the job running, or the day record |
 | `snapshot` | none | The `Snapshot` the next run will be stamped with, or null before any send |
-| `status` | none | An `OwnerStatus`: console, boxes, ports held, running and queued handles, stopping, the lock holder, the lock's refusal if there is one, `armed`, what the last send that finished left the boxes holding (the method's name, what went on the wire, and the stem the send named), or null before any send and while one is under way, and `issued`, the id of the newest handle this session has issued, 0 before the first |
+| `status` | none | An `OwnerStatus`: console, boxes, ports held, running and queued handles, stopping, the lock holder, the lock's refusal if there is one, `armed`, what the last send that finished left the boxes holding (the method's name, what went on the wire, and the stem the send named), or null before any send and while one is under way, `issued`, the id of the newest handle this session has issued, 0 before the first, and `hold`, a person's pause on the series running, or null |
 | `shutdown` | `reason` (optional) | null, sent before the shutdown begins (under Shutting down) |
 
 A client checks `protocol` in the `hello` reply and refuses to go on if it is not the version it
 was written for. This document describes protocol 1. `origin`, `issued` and the sitting's three
 paths were added to it without a new version: each has a default, an empty string or 0, that a
-client written before it never reads and a daemon written before it never sends.
+client written before it never reads and a daemon written before it never sends. `pause`,
+`resume`, `note`, the `by` and `client` of `stop`, and `hold` were added in the same way, with
+`hold` null by default. A daemon written before the three commands answers each with
+`unknown-command`, which the window shows as one sentence saying that the daemon is older than
+the window. A daemon written before `stop` took `by` and `client` refuses them as a
+`bad-request`, and the Python client then sends the reason alone.
 
 Handle ids are counted from 1 for each session with no gaps, which with `issued` lets a client
 follow every job whatever client submitted it: every id up to `issued` is a job, and `events`
@@ -171,6 +180,62 @@ Python client keeps a copy of each job's progress from the stream, fills it by o
 the first time a job is read or after any gap, and falls back to asking every time until its first
 heartbeat arrives.
 
+## A person's pause
+
+To hold a series without ending it, a person at the window sends `pause`. A pause is the daemon's
+state and not the window's, so it outlives the window that asked for it, and every client reads
+it in `status` as `hold`:
+
+| Key | What it holds |
+|---|---|
+| `job` | The id of the series job held |
+| `grain` | `point` or `repetition` |
+| `by`, `client` | The initials of the person who asked, and the client the pause came through |
+| `asked` | When it was asked for, local time |
+| `since`, `where` | When the series came to rest, and where in words, such as `after point 3 of 12 (planned 7)`; both are empty until it has |
+
+A pause is accepted only while a series job is running and has started its first point. `point`
+rests the series once the point in flight has acquired its last file, at which time no file is
+open and the console's acquisition is closed. `repetition` rests it once the repetition in flight
+has ended, inside the file, with the file and the console's acquisition left open; when that
+repetition is the last of its file, the series rests before its next file instead. The daemon
+refuses a pause that has nowhere to rest, with the sentence the window shows on its greyed button.
+It refuses a job that is not a series, for which `stop` is the only intervention. It refuses
+`point` on a series' last point. It refuses `repetition` on a point whose method is
+`single_frame`, since that method's repetitions are inside the sequencer's table and its file has
+no boundary between them. A pause asked for while another is still on its way replaces it.
+
+Nothing bounds a pause. The job remains the one running, every job queued behind it waits, and
+the series rests until `resume`, `stop` or `shutdown`. While it rests inside a file the daemon
+keeps reading the boxes' serial ports and the console's data stream and asks nothing of either.
+`resume` lifts the pause. After a rest inside a file, the next repetition is prepared as the
+first repetition of a run is: the method's reset sequence is sent, the declared enable line is
+lowered by command, and the frame is held open for the gate check before the start sequence
+releases it. That repetition's record says how long the rest lasted, and the file records the
+same ([template file](template-file-format.md#what-a-rendered-run-records)). `stop` ends a paused
+series where it rests, as a series stopped while paused.
+
+Four events report a pause within the job's own progress. `PauseAsked` and `Held` carry the
+`Hold`, `Resumed` adds who lifted it and the seconds rested, and `StopAsked` carries a stop's
+reason, its `by` and `client`, and whether the series was paused. `note` adds a `Noted` event,
+with the text and the person's initials, to the job running. A note is a record and not a
+command: it reaches every client that follows the job as something to read. With no job running,
+or one that has no run record, the note goes to the day record instead
+([run record](run-record.md#the-day-record)).
+
+The daemon writes each of these acts into the run record of the job acted on, with `by` and
+`client`, under `interventions` ([run record](run-record.md#the-sections)). Every `stop` of an
+acquisition is written there too, whichever client sent it, so that a stop pressed at the window
+and a stop sent by an agent's tool can be told apart afterwards.
+
+Only the window sends `pause` and `resume`. The command line has no verb for either, the MCP
+server has no tool for either, and while `hold` is not null their tools read and note only
+([MCP server](mcp-server.md#while-a-person-has-paused-the-run)). This is capability by absence
+and not a lock. The socket is bound to the loopback address and has no login, so any program on
+the instrument PC that speaks this protocol could send either command. What the arrangement
+guarantees is that no part of clockwork that an agent drives contains a way to lift a person's
+pause.
+
 ## The instrument lock
 
 The daemon holds the same per-user lock the window takes, `%LOCALAPPDATA%\clockwork\instrument.lock`,
@@ -195,7 +260,8 @@ lets go of the lock last, so that a second owner taking it at once finds every p
 closed. While that happens the command socket keeps answering `status` and `events` and refuses
 `submit`. A second Ctrl-C abandons the wait: the console is stopped and the process exits, and
 the run in flight is left as its last completed repetition. What a stopped run leaves on disk is
-a short experiment, not a broken one.
+a short experiment, not a broken one. A series that a person has paused does not hold a shutdown
+up: it ends where it rests, as stopped while paused.
 
 ## Failure modes
 
@@ -244,14 +310,16 @@ its run log and status bar exactly as it shows its own, with the job's `origin` 
 lists another client's running and queued jobs under its run queue. A daemon that is `--fake`
 is followed in the same way, and the window says so in its title and its run log. It greys out its sending and
 acquiring buttons while any job runs, since the daemon runs one job at a time, and its Stop button
-stops whichever run is in flight.
+stops whichever run is in flight. Its two pause buttons, Resume and the note field act on
+whichever job is running in the same way, each under the initials typed in "At the window".
 
 Closing the window leaves the daemon to its clients:
 
 | When the window closes and | it does this |
 |---|---|
-| a send or acquisition it submitted is running or queued | asks whether to stop it after the current repetition and close once its files are closed, leave it running in the daemon and close now, or not close |
-| another client's job is running or queued | says so and closes, leaving the daemon and the job running |
+| a send, acquisition or series it submitted is running or queued | asks whether to stop it after the current repetition and close once its files are closed, leave it running in the daemon and close now, or not close |
+| a series it submitted is paused | asks whether to leave it paused in the daemon and close now, stop it where it rests and close once its files are closed, or not close |
+| another client's job is running or queued | says so and closes, leaving the daemon and the job running, and a paused series paused |
 | nothing is running or queued | shuts the daemon down if this window started it, and leaves one it found running as it was |
 
 The window's run queue belongs to the window and does not outlive it: rows still waiting are
@@ -269,8 +337,8 @@ the instrument lock no longer names it and nothing listens on the console's comm
 
 The daemon writes one line per event worth a person's reading to its terminal, unless it was
 started `--detached`, and to `%LOCALAPPDATA%\clockwork\serve.log`, appended: its start and what
-it found, every request that changes something (`submit`, `stop`, `shutdown`) with the job it
-named, each job's start and end, the console's starts and restarts, and anything it stopped. The window's `errors.log` in the same
+it found, every request that changes something (`submit`, `stop`, `pause`, `resume`, `note`,
+`shutdown`) with the job it named and the client that sent it, each job's start and end, the console's starts and restarts, and anything it stopped. The window's `errors.log` in the same
 directory is left to the window. Each send and each run also leaves its wire transcript and its
 send log beside its files in the output directory, exactly as a run started from the window does.
 

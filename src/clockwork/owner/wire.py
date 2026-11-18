@@ -48,12 +48,13 @@ import numpy as np
 
 from .. import instrument as _instrument
 from .. import method as _method
-from ..acq import BeamGuard, Event, FoldRecord, FrameRecord, Run, Snapshot
+from ..acq import BeamGuard, Event, FoldRecord, FrameRecord, HoldRecord, Run, Snapshot
 from ..acq.wire import Batch
 from ..instrument import Instrument
 from ..method import Method, RfChannel
 from ..mips import BoxHealth, BoxState, Discovery, Found, Silent
 from ..mips.discovery import PortInfo
+from .hold import Hold
 from .interface import Handle, OwnerStatus, Progress, Said
 from .jobs import (
     Armed,
@@ -78,7 +79,7 @@ names never begin with `@`."""
 _PLAIN = (Snapshot, BoxState, Run, FrameRecord, FoldRecord, SendResult, Armed,
           ConsoleStatus, Discovery, Found, Silent, PortInfo, Handle, Progress, OwnerStatus,
           Holder, RfChannel, PlannedPoint, SeriesResult, StandingResult, BoxHealth,
-          SnapshotResult, BeamGuard)
+          SnapshotResult, BeamGuard, Hold, HoldRecord)
 """The dataclasses that cross the interface other than jobs and events, which are
 collected by walking their subclasses so a new one is included without a list.
 `RfChannel` is here for `wire_fingerprint`, which carries a method's RF declarations

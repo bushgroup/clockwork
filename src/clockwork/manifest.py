@@ -40,6 +40,8 @@ count rather than a count of 0.
   sample is if it is anywhere.
 - `outcome`, `reason`, `repetitions_planned`, `repetitions_acquired`: mainspring's run
   outcome record, `unknown` and empty for a file written before there was one.
+- `held_s`: the seconds the run spent held between its repetitions at a person's pause
+  (`ClockworkHeldSeconds`), `None` for a run nothing held.
 - `series_id`, `series_index`, `series_position`, `series_seed`: `ClockworkSeries...`.
 - `declared_us`, `declared_by`, `measured_us`, `ratio`: the pusher-period check as the
   acquisition makes it (`clockwork.acq.check_pusher_period`), the declared period being the
@@ -82,7 +84,7 @@ FIXED = (
     "file", "kind", "day", "stem", "initials", "template_hash", "method_hash", "method",
     "sample",
     "conditions", "outcome", "reason", "repetitions_planned", "repetitions_acquired",
-    "series_id", "series_index", "series_position", "series_seed", "declared_us",
+    "held_s", "series_id", "series_index", "series_position", "series_seed", "declared_us",
     "declared_by", "measured_us", "ratio", "verdict", "notes", "record", "problem",
 )
 """The columns every manifest has, in order; the per-template ones follow them."""
@@ -306,6 +308,7 @@ def _row(path: str, records: _Records) -> tuple[dict[str, Any], list[tuple[str, 
         reason=globals_.run_reason or None,
         repetitions_planned=globals_.repetitions_planned,
         repetitions_acquired=globals_.repetitions_acquired,
+        held_s=_number(text("ClockworkHeldSeconds")),
         series_id=text("ClockworkSeriesId"),
         series_index=_number(text("ClockworkSeriesIndex"), True),
         series_position=_number(text("ClockworkSeriesPosition"), True),

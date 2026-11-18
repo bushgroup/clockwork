@@ -2,13 +2,15 @@
 
 Five calls and a shutdown. `submit` a job and get a `Handle`; read that job's progress
 with `events(handle, after)`; `stop` the run in flight; ask for the `snapshot` the next
-run will be stamped with and the `status` of the whole owner. A front end that holds an
+run will be stamped with and the `status` of the whole owner. Three more are a person's
+at the window and nobody else's: `pause` and `resume` a running series, and `note`
+(`clockwork.owner.hold`). A front end that holds an
 `Owner` holds nothing else -- no `Box`, no `Console`, no thread -- which is what lets
 the same front end drive an owner in its own process (`LocalOwner`) or one in another
 (`RemoteOwner`, the client of `clockwork serve`) without knowing which.
 
 **Everything that crosses is plain data.** Jobs are `clockwork.owner.jobs`; progress is
-the loop's own `Event` family plus the eight below, which say what `Worker`'s signals
+the loop's own `Event` family plus those below, which say what `Worker`'s signals
 used to say on their own; results are the dataclasses the jobs always returned. All of
 it round-trips through JSON by `clockwork.owner.wire`, and `tools/check_public.py`
 round-trips every `Event` subclass so that a new one cannot be added without a wire
@@ -29,6 +31,7 @@ from typing import Protocol
 
 from ..acq import Event, Run, Snapshot
 from ..mips import BoxState, Discovery
+from .hold import POINT, Hold
 from .jobs import Armed, ConsoleStatus, Job
 from .lock import Holder
 
@@ -37,18 +40,23 @@ __all__ = [
     "ConsoleChanged",
     "Discovered",
     "Handle",
+    "Held",
     "JobFailed",
     "JobFinished",
     "JobStarted",
     "LogsOpened",
+    "Noted",
     "Owner",
     "OwnerStatus",
+    "PauseAsked",
     "PointStarted",
     "Progress",
     "RecordBegun",
+    "Resumed",
     "RunDone",
     "Said",
     "StaleHandle",
+    "StopAsked",
 ]
 
 
@@ -114,6 +122,10 @@ class OwnerStatus:
     issued: int = 0
     """The id of the newest handle this owner has issued, 0 before the first. Ids are
     dense from 1, so with this a client can follow every job, whoever submitted it."""
+    hold: Hold | None = None
+    """A person's pause on the series running: asked for, and once `hold.since` is set,
+    in force; None for none (`clockwork.owner.hold`). While it is not None an agent's
+    tools read and note only."""
 
 
 class Owner(Protocol):
@@ -128,8 +140,25 @@ class Owner(Protocol):
         `StaleHandle` for a handle another owner issued."""
         ...
 
-    def stop(self, reason: str = "stopped by the operator") -> None:
-        """End the run in flight after its current repetition and fold."""
+    def stop(self, reason: str = "stopped by the operator", *, by: str = "",
+             client: str = "") -> None:
+        """End the run in flight after its current repetition and fold; one that is
+        paused ends where it rests. `by` is the person who asked, `client` the client
+        it came through, for the run record's `interventions`."""
+        ...
+
+    def pause(self, grain: str = POINT, *, by: str, client: str = "") -> Hold:
+        """Hold the series running after its point or its repetition in flight.
+        `HoldRefused`, with one sentence, where nothing running can be held there."""
+        ...
+
+    def resume(self, *, by: str, client: str = "") -> None:
+        """Lift the pause: the series goes on. `HoldRefused` where nothing is paused."""
+        ...
+
+    def note(self, text: str, *, by: str, client: str = "") -> str:
+        """Keep a person's note: in the run record of the job running, or with nothing
+        running in the day record. Answers where it went, in a few words."""
         ...
 
     def snapshot(self) -> Snapshot | None:
@@ -296,6 +325,81 @@ class PointStarted(Event):
         return (f"point {self.number} of {self.points} (planned {self.index}): "
                 f"{what or 'the defaults'}, {files} from position {self.position}"
                 + ("" if self.sends else ", the boxes already holding it"))
+
+
+@dataclass(frozen=True, slots=True)
+class PauseAsked(Event):
+    """A person at the window asked for the series running to be held (`hold`): it goes
+    on to the boundary the hold's grain names, and `Held` says when it is there."""
+
+    hold: Hold
+
+    @property
+    def text(self) -> str:
+        return self.hold.text
+
+
+@dataclass(frozen=True, slots=True)
+class Held(Event):
+    """The series has come to rest at a person's pause, and waits for a person."""
+
+    hold: Hold
+
+    @property
+    def text(self) -> str:
+        return (f"{self.hold.text}; it waits for a person at the window to resume or "
+                "stop it")
+
+
+@dataclass(frozen=True, slots=True)
+class Resumed(Event):
+    """A person lifted the pause. `seconds` is how long the series rested, 0 for a pause
+    withdrawn before it was reached."""
+
+    hold: Hold
+    by: str
+    client: str = ""
+    seconds: float = 0.0
+
+    @property
+    def text(self) -> str:
+        who = f"{self.by} at the window" if self.by else "a person at the window"
+        if not self.hold.reached:
+            return f"the pause asked for was withdrawn by {who} before it was reached"
+        return f"resumed by {who} after {self.seconds:.0f} s paused"
+
+
+@dataclass(frozen=True, slots=True)
+class StopAsked(Event):
+    """A stop was asked for, and by whom: `by` a person's initials or empty, `client`
+    the client it came through. `while_paused` for a stop that ended a paused series."""
+
+    reason: str
+    by: str = ""
+    client: str = ""
+    while_paused: bool = False
+
+    @property
+    def text(self) -> str:
+        who = (f"{self.by} at the window" if self.by else self.client or "a client")
+        return (f"stop asked by {who}{' while paused' if self.while_paused else ''}: "
+                f"{self.reason}")
+
+
+@dataclass(frozen=True, slots=True)
+class Noted(Event):
+    """A note a person typed at the window while this job ran, kept in its run record.
+
+    **A record, not a command** (the window revision's C1): it reaches every client
+    following the job, an agent's `progress` among them, as data. Nothing acts on it."""
+
+    note: str
+    by: str
+    client: str = ""
+
+    @property
+    def text(self) -> str:
+        return f"note from {self.by} at the window, kept with the data: {self.note}"
 
 
 @dataclass(frozen=True, slots=True)
