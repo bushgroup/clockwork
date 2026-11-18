@@ -680,8 +680,9 @@ def from_dict(data: dict) -> Method:
         # and how to get the other kind from it.
         raise MethodError([
             "this document is a method template, not a method: it has holes to fill. "
-            "Render it to a method first, with clockwork render-template --to FILE or by "
-            "asking Claude, and open that"
+            "Render it to a method first, with File > Build a method from a template in "
+            "the window, clockwork render-template --to FILE or by asking Claude, and "
+            "open that"
         ])
 
     problems: list[str] = []

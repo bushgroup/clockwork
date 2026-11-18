@@ -72,11 +72,13 @@ TEMPLATE = "template"
 
 TEMPLATE_REFUSAL = (
     "This is a method template, not a method: it has holes that knob values fill, and the "
-    "window opens methods only. Render it to a method file with clockwork render-template "
-    "--template PATH --to FILE, or ask Claude for the method you want; then open that file "
-    "here or add it to the run queue.")
-"""What "Open into panes" says of a template (lab record, task 94): no knob panel in the
-window, by decision, so the sentence names the two ways a method is made from one."""
+    "window opens methods only. Render it to a method file with File > Build a method from "
+    "a template, with clockwork render-template --template PATH --to FILE, or ask Claude "
+    "for the method you want; then open that file here or add it to the run queue.")
+"""What File > Open says of a template (lab record, task 94): no knob panel in the
+acquisition window, by decision, so the sentence names the three ways a method is made
+from one, the builder first (task 164). The library's Open on a template goes to the
+builder instead."""
 
 
 @dataclass(frozen=True, slots=True)

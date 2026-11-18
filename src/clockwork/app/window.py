@@ -88,6 +88,7 @@ from ..method.text import PaneResult, render_pane, split_trainee_file, start_ord
 from ..owner import LogsOpened, SeriesJob, SeriesResult
 from . import errors, runqueue
 from .boxstate import Reading
+from .builder import BuildDialog
 from .console_panel import ConsoleBar, ConsoleSettings
 from .launch import (
     open_data_file,
@@ -642,8 +643,14 @@ class MainWindow(QMainWindow):
             "Every method a directory holds, named, hashed, dated and described. Open "
             "one into the panes, or compare two -- or compare one against what the "
             "boxes are holding now.")
+        self.action_build = QAction("&Build a method from a template…", self)
+        self.action_build.setToolTip(
+            "Pick a template, set its knobs within their ranges and its labels, and save "
+            "the method it renders. The method opens here, and its runs stamp the "
+            "template and the knob values until a pane is edited.")
         self.action_quit = QAction("&Quit", self)
-        for action in (self.action_open, self.action_save, self.action_save_as):
+        for action in (self.action_open, self.action_build, self.action_save,
+                       self.action_save_as):
             file_menu.addAction(action)
         file_menu.addSeparator()
         file_menu.addAction(self.action_import)
@@ -721,6 +728,7 @@ class MainWindow(QMainWindow):
         self.action_save_as.triggered.connect(lambda: self.save_method(ask=True))
         self.action_import.triggered.connect(self.open_trainee_file)
         self.action_library.triggered.connect(self.open_library)
+        self.action_build.triggered.connect(lambda: self.build_from_template())
         self.action_quit.triggered.connect(self.close)
         self.action_find.triggered.connect(self.find_boxes)
         self.action_read_state.triggered.connect(self.read_state)
@@ -1095,11 +1103,24 @@ class MainWindow(QMainWindow):
         """
         directory = self.settings.library_dir or clockwork.instrument_dir("golden") or ""
         dialog = LibraryDialog(directory, self.readings, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.chosen_path:
-            self.settings.library_dir = dialog.directory()
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        self.settings.library_dir = dialog.directory()
+        if accepted and dialog.chosen_path:
             self._load_method(dialog.chosen_path)
-        else:
-            self.settings.library_dir = dialog.directory()
+        elif accepted and dialog.chosen_template:
+            self.build_from_template(dialog.chosen_template)
+
+    def build_from_template(self, template_path: str = "") -> BuildDialog:
+        """The method builder (`builder.BuildDialog`): a template rendered at knob values
+        a person sets, saved as a method file and opened here attached, as any file
+        `render-template --to` writes is (lab record, task 164). Answers the dialog, after
+        it has closed, for a test."""
+        library = self.settings.library_dir or clockwork.instrument_dir("golden") or ""
+        dialog = BuildDialog(library, os.path.dirname(self.method_path),
+                             template_path, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.saved_path:
+            self._load_method(dialog.saved_path)
+        return dialog
 
     # -- the instrument document ---------------------------------------------
 

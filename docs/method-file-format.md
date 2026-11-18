@@ -372,8 +372,8 @@ two acquisitions of one document share a hash only when they came from the same 
 
 ## Where a rendered method came from
 
-A template rendered to a file, with `clockwork render-template --to FILE` or by asking Claude,
-produces an ordinary method with one more table at its foot. The table carries the template the
+A template rendered to a file, with **File > Build a method from a template** in the window,
+`clockwork render-template --to FILE` or by asking Claude, produces an ordinary method with one more table at its foot. The table carries the template the
 method was rendered from and the values it was rendered at, so that a run of the file records
 its knobs, labels and marks exactly as a run Claude acquires from the template does.
 

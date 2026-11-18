@@ -70,6 +70,7 @@ from clockwork.app.boxstate import (  # noqa: E402
     Reading,
     state_table,
 )
+from clockwork.app.builder import BuildDialog, default_name  # noqa: E402
 from clockwork.app.launch import (  # noqa: E402
     SHOW_FOR_MODE,
     association_command,
@@ -2898,7 +2899,7 @@ def test_a_queue_row_over_a_rendered_file_stamps_as_rendered(window, tmp_path, q
     assert float(stamped(runs[0].raw_path)["ClockworkKnobBTicks"]) == 300.0
 
 
-def test_the_library_lists_a_template_and_open_refuses_it_with_the_way_to_render(
+def test_the_library_lists_a_template_and_open_on_it_goes_to_the_builder(
         qtbot, tmp_path):
     (tmp_path / "template.toml").write_text(WINDOW_TEMPLATE, encoding="utf-8")
     render_to(tmp_path)
@@ -2907,17 +2908,78 @@ def test_the_library_lists_a_template_and_open_refuses_it_with_the_way_to_render
     rows = {dialog.table.item(row, 3).text(): row for row in range(dialog.table.rowCount())}
     template_row = next(row for text, row in rows.items() if text.startswith("template;"))
     rendered_row = next(row for text, row in rows.items() if text.startswith("rendered from"))
-    refused: list[bool] = []
-    dialog.refuse_template = lambda: refused.append(True)
     dialog.table.selectRow(template_row)
     assert dialog.open_button.isEnabled()
     assert not dialog.diff_instrument_button.isEnabled()
     dialog._open()
-    assert refused == [True] and dialog.chosen_path == ""
+    assert dialog.chosen_template.endswith("template.toml") and dialog.chosen_path == ""
+    dialog.chosen_template = ""
     dialog.table.clearSelection()
     dialog.table.selectRow(rendered_row)
     dialog._open()
-    assert dialog.chosen_path.endswith("cell.toml")
+    assert dialog.chosen_path.endswith("cell.toml") and dialog.chosen_template == ""
+
+
+# --- the method builder (lab record, task 164) -----------------------------------------
+
+
+def test_the_builder_renders_in_range_and_saves_what_render_to_writes(
+        qtbot, tmp_path):
+    library = tmp_path / "library"
+    library.mkdir()
+    (library / "template.toml").write_text(WINDOW_TEMPLATE, encoding="utf-8")
+    dialog = BuildDialog(str(library), str(tmp_path))
+    qtbot.addWidget(dialog)
+    assert dialog.picker.count() == 1 and dialog.template is not None
+    field = dialog.knob_fields["b_ticks"]
+    assert (field.minimum(), field.maximum(), field.value()) == (100, 520, 500)
+    # The sample is required: nothing to save until it is given.
+    assert not dialog.save_button.isEnabled()
+    assert "sample" in dialog.problems.text()
+    dialog.label_fields["sample"].setText("test mixture")
+    assert dialog.save_button.isEnabled()
+    assert dialog.diff_text.toPlainText() == "every knob at its default: no difference"
+    field.setValue(9999)  # clamped to the range: the box offers nothing outside it
+    assert field.value() == 520
+    field.setValue(400)
+    assert ",400:B:0," in dialog.method_text.toPlainText()
+    assert "-" in dialog.diff_text.toPlainText() and ",500:B:0," in dialog.diff_text.toPlainText()
+    assert dialog.problems.text() == (
+        "rendered from window-template at b_ticks 400 ticks, sample 'test mixture'")
+    assert default_name(dialog.template, dialog.template_path, dialog.knobs()) == (
+        "template_b_ticks-400.toml")
+
+    saved = str(tmp_path / "built.toml")
+    assert dialog.write(saved) and dialog.saved_path == saved
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    with open(saved, encoding="utf-8") as built:
+        text = built.read()
+    with open(render_to(tmp_path, b_ticks=400), encoding="utf-8") as written:
+        assert text == written.read()
+    rendered, why = templates.reproduce(method_module.load(saved))
+    assert rendered is not None, why
+    assert rendered.knobs == {"b_ticks": 400}
+
+
+def test_the_window_opens_what_the_builder_saved_attached(window, tmp_path, monkeypatch):
+    library = tmp_path / "library"
+    library.mkdir()
+    (library / "template.toml").write_text(WINDOW_TEMPLATE, encoding="utf-8")
+    window.settings.library_dir = str(library)
+    saved = str(tmp_path / "built.toml")
+
+    def exec_(dialog) -> int:
+        dialog.label_fields["sample"].setText("test mixture")
+        dialog.knob_fields["b_ticks"].setValue(300)
+        assert dialog.write(saved)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(BuildDialog, "exec", exec_)
+    window.build_from_template()
+    assert window.method_path == saved and window.rendered is not None
+    assert window.provenance.text() == (
+        "Rendered from window-template at b_ticks 300 ticks, sample 'test mixture'")
+    assert window.rendered.knobs == {"b_ticks": 300}
 
 
 def test_the_three_boxes_range_to_the_loader_s_ceilings(window):

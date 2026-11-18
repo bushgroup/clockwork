@@ -253,8 +253,14 @@ readback, for the acquisition taken after the fact rather than counted up front.
 A template is a method with holes in its strings and named knobs that fill them, such as a hold
 time or a guard voltage ([`template-file-format.md`](template-file-format.md)). The window opens
 methods, not templates, so a template becomes something to run by rendering it at chosen knob
-values into a method file. There are two ways to get one.
+values into a method file. There are three ways to get one.
 
+- **In the window**, with **File > Build a method from a template**. Pick the template, set each
+  knob and fill in the labels, then press **Save and open**. Each knob's box holds only the values
+  its range allows, and a required label left empty keeps Save unavailable. The right of the
+  dialog shows the method the template renders at those values, and a second tab shows what
+  differs from the template at its defaults. The method is saved where you choose, with the
+  template and the knob values in it, and opens in the window attached, as described below.
 - **Ask Claude**, for example for "the bradykinin CLOCK method with a 25 ms hold, as a file in
   my folder", or for one file per cell of a grid of holds and guard voltages.
 - **From a shell**, with `render-template` and `--to`, as below. An existing file is replaced
@@ -286,7 +292,7 @@ Changing the name, the output directory or the stem does not detach a method, an
 box answering on a different COM port, since none of those changes what a box is sent.
 
 Templates are listed in the method library too, marked as templates with their knobs and ranges.
-**Open into panes** on a template explains how to render it instead of opening it.
+**Open into panes** on a template opens it in **Build a method from a template**.
 
 Anyone may edit a template, in a text editor, and check it with
 `clockwork validate-method --template PATH`. Note that an edited template has a new hash, and the instrument's standing limits

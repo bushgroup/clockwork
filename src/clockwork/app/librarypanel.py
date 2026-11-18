@@ -38,7 +38,6 @@ from PySide6.QtWidgets import (
 from ..method import Method
 from .boxstate import Reading
 from .methodlib import (
-    TEMPLATE_REFUSAL,
     BoxDiff,
     FieldDiff,
     LibraryEntry,
@@ -75,6 +74,9 @@ class LibraryDialog(QDialog):
         self.entries: list[LibraryEntry] = []
         self.chosen_path = ""
         """Set and the dialog closed accepted where "Open into panes" was pressed."""
+        self.chosen_template = ""
+        """Set instead, and the dialog closed accepted, where it was pressed on a
+        template: the window opens the method builder on it (lab record, task 164)."""
 
         self.directory_field = QLineEdit(directory)
         self.directory_field.setToolTip(
@@ -107,7 +109,8 @@ class LibraryDialog(QDialog):
         self.open_button = QPushButton("Open into panes")
         self.open_button.setToolTip(
             "Put this document into the panes and the form, exactly as File > Open "
-            "method does.")
+            "method does. On a template, build a method from it: set its knobs and "
+            "save the method it renders.")
         self.open_button.clicked.connect(self._open)
         self.diff_methods_button = QPushButton("Diff two methods…")
         self.diff_methods_button.setToolTip(
@@ -174,8 +177,8 @@ class LibraryDialog(QDialog):
     def _update_buttons(self) -> None:
         selected = self._selected()
         methods = [entry for entry in selected if not entry.is_template]
-        # Open stays pressable on a template, so that pressing it says how a method is
-        # made from one; the diffs compare methods and have nothing to say about it.
+        # Open on a template opens the method builder on it (task 164); the diffs
+        # compare methods and have nothing to say about a template.
         self.open_button.setEnabled(len(selected) == 1)
         self.diff_methods_button.setEnabled(len(methods) == 2 == len(selected))
         self.diff_instrument_button.setEnabled(len(methods) == 1 == len(selected))
@@ -185,14 +188,10 @@ class LibraryDialog(QDialog):
         if len(selected) != 1:
             return
         if selected[0].is_template:
-            self.refuse_template()
-            return
-        self.chosen_path = selected[0].path
+            self.chosen_template = selected[0].path
+        else:
+            self.chosen_path = selected[0].path
         self.accept()
-
-    def refuse_template(self) -> None:
-        """What Open says of a template; a method of its own so that a test can answer."""
-        QMessageBox.information(self, "A template is not a method", TEMPLATE_REFUSAL)
 
     def _diff_methods(self) -> None:
         selected = self._selected()

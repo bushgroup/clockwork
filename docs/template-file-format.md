@@ -186,8 +186,8 @@ two are equal for a correct template, and the comparison is the first thing to r
 edit to it.
 
 A template handed to the method loader as if it were a method is refused with a sentence
-saying so, and naming the two ways to render it to a method:
-`clockwork render-template --to FILE`, or asking Claude. A library directory holds both kinds of document, and the window's
+saying so, and naming the three ways to render it to a method: **File > Build a method from a
+template** in the window, `clockwork render-template --to FILE`, or asking Claude. A library directory holds both kinds of document, and the window's
 method library lists a template as a template, with its knobs.
 
 ## What a rendered run records
