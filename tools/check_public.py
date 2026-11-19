@@ -918,9 +918,9 @@ def check_hold() -> None:
     from clockwork.summary import summarize
 
     check_true(
-        "the pinned mainspring's writer can still be given a global parameter after a "
-        "file is created (`_upsert_globals`, `_transaction`, `global_keys`)",
-        all(hasattr(UimfWriter, name) for name in ("_upsert_globals", "_transaction")))
+        "the pinned mainspring's writer can be given a global parameter after a file is "
+        "created (`UimfWriter.set_globals`, mainspring 1.18.0)",
+        callable(getattr(UimfWriter, "set_globals", None)))
 
     scans = 32
     table = (f"STBLDAT;0:[A:1,0:A:1:B:1,500:B:0,{method_module.enable_fall_tick(scans)}:"

@@ -101,7 +101,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mainspring", extras = ["fast", "viewer"], git = "https://github.com/bushgroup/mainspring?tag=v1.17.1" },
+    { name = "mainspring", extras = ["fast", "viewer"], git = "https://github.com/bushgroup/mainspring?tag=v1.19.0" },
     { name = "mcp", specifier = "~=2.2" },
     { name = "numpy", specifier = "~=2.5.2" },
     { name = "protobuf", specifier = "~=7.36" },
@@ -310,8 +310,8 @@ wheels = [
 
 [[package]]
 name = "mainspring"
-version = "1.17.1"
-source = { git = "https://github.com/bushgroup/mainspring?tag=v1.17.1#ce6a4ee4e62fc6358d55e66f65cd1056612375de" }
+version = "1.19.0"
+source = { git = "https://github.com/bushgroup/mainspring?tag=v1.19.0#d06ad9eea82cfe62f066e3a788784e462afd04a7" }
 dependencies = [
     { name = "numpy" },
     { name = "scipy" },

@@ -1138,7 +1138,7 @@ class Recording:
         """
         self._require_open()
         self._holds.append((" ".join(str(line).split()), float(seconds)))
-        _set_globals(self._raw, self._hold_globals())
+        self._raw.set_globals(self._hold_globals())
 
     def mark_after_hold(self, frame: int, seconds: float) -> None:
         """Mark raw frame `frame` as the first after a hold of `seconds`
@@ -1156,7 +1156,7 @@ class Recording:
     def _tell_companion_of_holds(self) -> None:
         if self._summed is None or self._companion_holds == len(self._holds):
             return
-        _set_globals(self._summed, self._hold_globals())
+        self._summed.set_globals(self._hold_globals())
         self._companion_holds = len(self._holds)
 
     # --- closing -------------------------------------------------------------------------
@@ -1380,35 +1380,6 @@ def stamp_globals(
     if provenance is not None:
         values.update(provenance_globals(provenance))
     return values
-
-
-def _set_globals(writer: UimfWriter, values: dict[ParamDef, object]) -> None:
-    """Write `Global_Params` rows of clockwork's own into a file already created,
-    replacing any already there.
-
-    `UimfWriter` takes a client's global parameters at creation (`GlobalSpec.extra`) and
-    has no public call for one learned afterwards; what it does have is the upsert its
-    own `set_outcome` is built on, in a transaction of its own, and that is what this
-    uses, on the writer's connection and thread. **Two private names of a pinned
-    dependency**, reached for rather than retyped as SQL so that the table stays the
-    writer's; `tools/check_public.py` fails if the pinned mainspring lacks either, so a
-    moved pin says so there and not at the first held file (lab record, task 167).
-    """
-    upsert = getattr(writer, "_upsert_globals", None)
-    transaction = getattr(writer, "_transaction", None)
-    if upsert is None or transaction is None:
-        raise RuntimeError("this mainspring's UimfWriter cannot add a global parameter "
-                           "to a file already created")
-    for definition in values:
-        existing = writer.global_keys.get(definition.name)
-        if existing is not None and existing != definition:
-            raise ValueError(f"{definition.name!r} is already a global parameter, ID "
-                             f"{existing.param_id}")
-        writer.global_keys[definition.name] = definition
-    if not writer.modern:
-        return  # the legacy table has no column to hold it
-    with transaction():
-        upsert({definition.name: value for definition, value in values.items()})
 
 
 def provenance_globals(provenance: Provenance) -> dict[ParamDef, object]:
