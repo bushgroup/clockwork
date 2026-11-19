@@ -26,7 +26,7 @@ from clockwork.app import runqueue, serving  # noqa: E402
 from clockwork.app.settings import Settings  # noqa: E402
 from clockwork.app.window import MainWindow  # noqa: E402
 from clockwork.app.worker import SERVE, Discover, RemoteWorker  # noqa: E402
-from clockwork.owner import Acquire, Send  # noqa: E402
+from clockwork.owner import Acquire, Send, StartConsole  # noqa: E402
 from clockwork.owner.remote import RemoteOwner  # noqa: E402
 from test_daemon import Daemon, make_instrument, make_method  # noqa: E402
 
@@ -179,13 +179,19 @@ def test_the_window_starts_a_daemon_and_follows_its_own_start(qtbot, tmp_path):
 
 def test_own_jobs_come_back_as_the_objects_submitted(qtbot, daemon):
     worker = RemoteWorker(endpoint=daemon.endpoint, poll_s=0.05)
+    finished = []
+    worker.finished_job.connect(lambda job, result: finished.append(job))
     worker.start()
     try:
         qtbot.waitUntil(lambda: worker.hello is not None, timeout=10_000)
         job = Discover(method=make_method())
-        with qtbot.waitSignal(worker.finished_job, timeout=20_000) as blocker:
-            worker.submit(job)
-        assert blocker.args[0] is job and worker.origin(job) == ""
+        worker.submit(job)
+        # The daemon's own start-up console ends as a `finished_job` too, before or after
+        # this one, or not at all if it ended before the worker joined (lab #29).
+        def own() -> list:
+            return [seen for seen in finished if not isinstance(seen, StartConsole)]
+        qtbot.waitUntil(lambda: bool(own()), timeout=20_000)
+        assert own()[0] is job and worker.origin(job) == ""
         qtbot.waitUntil(lambda: worker.boxes == ("box1",), timeout=10_000)
     finally:
         ended(worker)
@@ -202,10 +208,14 @@ def test_another_clients_job_is_shown_with_its_origin(qtbot, daemon, claude):
         method = make_method()
         claude.submit(Discover(method=method))
         claude.submit(Send(method=method))
-        qtbot.waitUntil(lambda: len(finished) >= 2, timeout=30_000)
-        foreign = [job for job in started if isinstance(job, (Discover, Send))]
-        assert foreign and all(worker.origin(job) == CLAUDE for job in foreign)
-        assert finished[-1] is started[-1]  # one object per job, start to end
+
+        # The daemon's own start-up console starts and ends among these (lab #29).
+        def foreign(jobs: list) -> list:
+            return [job for job in jobs if isinstance(job, (Discover, Send))]
+        qtbot.waitUntil(lambda: len(foreign(finished)) >= 2, timeout=30_000)
+        assert all(worker.origin(job) == CLAUDE for job in foreign(started))
+        # One object per job, start to end.
+        assert [id(job) for job in foreign(finished)] == [id(job) for job in foreign(started)]
         assert not worker.busy_mine() and worker.has_snapshot
     finally:
         ended(worker)
