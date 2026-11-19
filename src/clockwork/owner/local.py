@@ -68,6 +68,7 @@ from ..acq import (
     SECONDS_PER_SAMPLE_2GSPS,
     AcqError,
     BatchSeen,
+    BeamGuard,
     BoxLost,
     Console,
     ConsoleConfig,
@@ -109,13 +110,14 @@ from ..mips import (
 )
 from ..naming import files_of, next_stem, parse_stem
 from ..record import find as find_record
-from .hold import POINT, REPETITION, Hold, HoldRefused
+from .hold import BEAM_GUARD, POINT, REPETITION, Guarding, Hold, HoldRefused
 from .hold import now as _now
 from .hold import refusal as pause_refusal
 from .interface import (
     BoxStateRead,
     ConsoleChanged,
     Discovered,
+    GuardChanged,
     Handle,
     Held,
     JobFailed,
@@ -156,7 +158,7 @@ from .jobs import (
     matches_wire,
     wire_fingerprint,
 )
-from .keeper import RecordKeeper, begin
+from .keeper import RecordKeeper, begin, stem_of
 from .lock import Holder, InstrumentLock, LockError
 from .wire import to_wire
 
@@ -356,6 +358,10 @@ class LocalOwner:
         at once rather than on its next look."""
         self._stem = ""
         """The stem of the file in flight, for the words that say where a hold rests."""
+        self._guarding: Guarding | None = None
+        """The beam guard every acquisition watches, and who armed it
+        (`OwnerStatus.guard`); None for none. Set by `guard`, from any thread, and read
+        by the loop at every repetition (lab record, task 168)."""
 
         self._ids = itertools.count(1)
         self._issued = 0
@@ -529,6 +535,60 @@ class LocalOwner:
             self._report(Noted(note=text, by=by, client=client), handle)
         return "the day record"
 
+    def guard(self, guard: BeamGuard | None, *, by: str, client: str = "") -> str:
+        """Arm, change or disarm (None) the beam guard, as a person at the window, and
+        answer where the change was recorded.
+
+        The owner's from now on (R9, B8; lab record, task 168): every acquisition watches
+        it from its next repetition, whichever client started it, until it is disarmed or
+        the owner ends. Each change is an intervention under the person's initials, in
+        the run record of the job running, or with nothing running, or a job that has no
+        record, a `guard` line in the day record; and a `GuardChanged` event on the job
+        running. No MCP tool or command-line verb sends this (B8). `HoldRefused` with no
+        initials. Never blocks; any thread may call it.
+        """
+        by = by.strip()
+        if not by:
+            raise HoldRefused("the beam guard is a person's: give the initials of who is "
+                              "at the window")
+        guarding = (Guarding(guard=guard, by=by, client=client, since=_now())
+                    if guard is not None else None)
+        with self._guard:
+            before, self._guarding = self._guarding, guarding
+            job, handle = self._job, self._running
+        if before is not None and guarding is not None and before.guard == guard:
+            return "nowhere: the beam guard was already armed so"
+        fields: dict[str, object] = {
+            "armed": guard is not None,
+            "floor": guard.floor if guard is not None else None,
+            "repetitions": guard.repetitions if guard is not None else None,
+            "source": guard.source if guard is not None else "",
+            "was": (None if before is None else {"floor": before.guard.floor,
+                                                 "repetitions": before.guard.repetitions,
+                                                 "source": before.guard.source})}
+        if handle is not None:
+            self._report(GuardChanged(guarding=guarding, by=by, client=client), handle)
+        if (handle is not None and isinstance(job, (Acquire, SeriesJob)) and job.series
+                and find_record(job.directory or os.getcwd(), job.series) is not None):
+            self._intervene(job, handle, kind="guard", by=by, client=client, **fields)
+            return f"the run record of job {handle.id}, request {job.series}"
+        if self.day is None:
+            return "nowhere: no job with a run record is running and this owner keeps no " \
+                   "day record"
+        self.day.write("guard", by=by, client=client,
+                       job=handle.id if handle is not None else None, **fields)
+        return "the day record"
+
+    def _beam_guard(self, job: Acquire) -> Callable[[], BeamGuard | None]:
+        """What a run of `job` watches, asked at every repetition: the job's own guard,
+        where a caller built one in, else the owner's as it stands then."""
+        def current() -> BeamGuard | None:
+            if job.beam_guard is not None:
+                return job.beam_guard
+            guarding = self._guarding
+            return guarding.guard if guarding is not None else None
+        return current
+
     def snapshot(self) -> Snapshot | None:
         return self._snapshot
 
@@ -537,6 +597,7 @@ class LocalOwner:
             queued = tuple(self._pending)
             issued = self._issued
             hold = self._hold
+            guarding = self._guarding
         held = self._lock is not None and self._lock.held
         return OwnerStatus(
             program=self.program,
@@ -553,6 +614,7 @@ class LocalOwner:
             refused=self._refused,
             issued=issued,
             hold=hold,
+            guard=guarding,
         )
 
     def shutdown(self, reason: str = "the owner is shutting down") -> None:
@@ -1350,64 +1412,104 @@ class LocalOwner:
         A person's pause rests it between two points, here, or inside a point's file
         or between two of its files (`_hold_check`, `_acquire`); a stop while it rests
         ends it as any stop does.
+
+        **A point whose file the beam guard ended holds the series** (B8, lab record,
+        task 168): the file ends failed with the guard's sentence, as before, and the
+        series rests, paused by the guard, until a person resumes or stops it. A resume
+        acquires the point again from its start, as new files under the same planned
+        index at the next positions, and the record's `retakes` names the files it
+        replaced; then the series goes on. The guard is the daemon's rule, not a
+        person's choice of point, so nothing else repeats a point (R6).
+
+        A queue's points are saved documents (`PlannedPoint.method_path`): each carries
+        its own document path, conditions note and, for a rendered document, its own
+        template, which stand in for the series'.
         """
         if not job.points:
             raise ValueError("a series has at least one point")
         directory = job.directory or os.getcwd()
         self._stop.clear()
         runs: list[Run] = []
+        numbers: list[int] = []
+        replaced: list[str] = []
         position = max(1, job.first_position)
         sent: Method | None = None
         armed: tuple = ()
         done = 0
         stopped = ""
         for number, point in enumerate(job.points, start=1):
-            if self._stop.is_set():
-                stopped = self._stop_reason
-                break
             method = _needs_method(point.method)
-            sends = sent is None or self._armed is None or not matches_wire(
-                self._armed.fingerprint, method)
-            with self._guard:
-                self._at = (number, method)
-            self._point = PointStarted(
-                index=point.index, position=position, number=number,
-                points=len(job.points), knobs=dict(point.knobs),
-                replicates=point.replicates, reference=point.reference, sends=sends)
-            self._report(self._point)
-            stem = ""
-            if sends:
-                stem = next_stem(directory, job.initials)
-                result = self._send(Send(
-                    label=f"arming point {point.index} of {job.series}", method=method,
-                    setup=job.setup if sent is None else _setup_differs(sent, method),
-                    conditions=job.conditions, directory=directory, stem=stem,
-                    method_path=job.method_path, instrument=job.instrument,
-                    instrument_path=job.instrument_path))
-                sent, armed = method, result.armed
-                self._judge_send(job, point, result.snapshot)
+            method_path = point.method_path or job.method_path
+            conditions = point.conditions or job.conditions
+            retake = 0
+            while not stopped:
                 if self._stop.is_set():
                     stopped = self._stop_reason
                     break
-            made = self._acquire(Acquire(
-                label=f"acquiring point {point.index} of {job.series}", method=method,
-                instrument=job.instrument, instrument_path=job.instrument_path,
-                method_path=job.method_path, directory=directory, stem=stem,
-                initials=job.initials, replicates=point.replicates,
-                # Nothing sent: on the wire it is a replicate of the point before, and
-                # its send log says where the strings went.
-                replicate_only=not sends,
-                conditions=job.conditions, request=job.request, series=job.series,
-                series_index=point.index, series_position=position,
-                series_seed=job.seed,
-                template=job.template,
-                knobs=dict(point.knobs), labels=dict(job.labels)), clear_stop=False)
-            runs += made
-            position += len(made)
-            if len(made) == point.replicates and not any(run.stopped_early for run in made):
-                done += 1
-            if self._stop.is_set() or any(run.stopped_early for run in made):
-                stopped = self._stop_reason or "a run stopped early"
+                sends = sent is None or self._armed is None or not matches_wire(
+                    self._armed.fingerprint, method)
+                with self._guard:
+                    self._at = (number, method)
+                self._point = PointStarted(
+                    index=point.index, position=position, number=number,
+                    points=len(job.points), knobs=dict(point.knobs),
+                    replicates=point.replicates, reference=point.reference, sends=sends,
+                    retake=retake, name=point.name)
+                self._report(self._point)
+                stem = ""
+                if sends:
+                    stem = next_stem(directory, job.initials)
+                    result = self._send(Send(
+                        label=f"arming point {point.index} of {job.series}", method=method,
+                        setup=job.setup if sent is None else _setup_differs(sent, method),
+                        conditions=conditions, directory=directory, stem=stem,
+                        method_path=method_path, instrument=job.instrument,
+                        instrument_path=job.instrument_path))
+                    sent, armed = method, result.armed
+                    self._judge_send(job, point, result.snapshot)
+                    if self._stop.is_set():
+                        stopped = self._stop_reason
+                        break
+                made = self._acquire(Acquire(
+                    label=f"acquiring point {point.index} of {job.series}", method=method,
+                    instrument=job.instrument, instrument_path=job.instrument_path,
+                    method_path=method_path, directory=directory, stem=stem,
+                    initials=job.initials, replicates=point.replicates,
+                    # Nothing sent: on the wire it is a replicate of the point before,
+                    # and its send log says where the strings went.
+                    replicate_only=not sends,
+                    conditions=conditions, request=job.request, series=job.series,
+                    series_index=point.index, series_position=position,
+                    series_seed=job.seed,
+                    template=point.template or job.template,
+                    knobs=dict(point.knobs), labels=dict(point.labels or job.labels)),
+                    clear_stop=False)
+                runs += made
+                numbers += [number] * len(made)
+                position += len(made)
+                lost = next((run.beam_lost for run in made if run.beam_lost), "")
+                if lost and not self._stop.is_set():
+                    stems = [stem_of(run) for run in made]
+                    if not self._guard_hold(job, point, number, lost, stems):
+                        stopped = self._stop_reason or "stopped while the beam guard held"
+                        break
+                    replaced += stems
+                    retake += 1
+                    self._records.retake(directory, job.series, {
+                        "index": point.index, "number": number, "retake": retake,
+                        "job": self._running.id if self._running is not None else None,
+                        "replaces": stems, "beam_lost": lost, "first_place": position})
+                    self._say(f"acquiring point {number} of {len(job.points)} (planned "
+                              f"{point.index}) again from its start: {', '.join(stems)} "
+                              "ended by the beam guard")
+                    continue
+                if (len(made) == point.replicates
+                        and not any(run.stopped_early for run in made)):
+                    done += 1
+                if self._stop.is_set() or any(run.stopped_early for run in made):
+                    stopped = self._stop_reason or "a run stopped early"
+                break
+            if stopped:
                 break
             if number < len(job.points):
                 # A pause of either grain that has not yet come to rest rests here; a
@@ -1419,7 +1521,27 @@ class LocalOwner:
                       f"({len(runs)} files): {stopped}")
         return SeriesResult(runs=tuple(runs), points=len(job.points), points_done=done,
                             stopped=stopped if done < len(job.points) else "",
-                            armed=armed)
+                            armed=armed, numbers=tuple(numbers),
+                            replaced=tuple(replaced))
+
+    def _guard_hold(self, job: SeriesJob, point: PlannedPoint, number: int, lost: str,
+                    stems: list[str]) -> bool:
+        """Hold the series for a person, the beam guard having ended a file of point
+        `number` (B8): an intervention by the guard in the record, then a rest like a
+        person's pause after this point. True once a person resumes, False for a stop."""
+        handle = self._running
+        where = (f"after point {number} of {len(job.points)} (planned {point.index}), "
+                 f"whose file {stems[-1] if stems else ''} the guard ended")
+        with self._guard:
+            self._hold = Hold(job=handle.id if handle is not None else 0, grain=POINT,
+                              by=BEAM_GUARD, client=self.program, asked=_now(),
+                              beam_lost=lost)
+            self._lifted.clear()
+        if handle is not None:
+            self._intervene(job, handle, kind="pause", grain=POINT, by=BEAM_GUARD,
+                            client=self.program, reason=lost)
+        self._rest(where)
+        return not self._stop.is_set()
 
     def _judge_send(self, job: SeriesJob, point: PlannedPoint,
                     snapshot: Snapshot) -> None:
@@ -1536,7 +1658,7 @@ class LocalOwner:
                     stop=self._stop_check,
                     hold=self._hold_check,
                     recover=lambda: self._recover(console, stream, job),
-                    beam_guard=job.beam_guard,
+                    beam_guard=self._beam_guard(job),
                 )
             except Exception as exc:
                 # Written while the transcript is still open: the run log is not the

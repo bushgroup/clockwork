@@ -33,7 +33,9 @@ request ends before its job does.
 **`interventions` is begun by its first entry** (`LATER_SECTIONS`): a person's pause,
 resume, stop or guard change on a running job (lab record, tasks 165 and 167). A record
 with none has no such key, so an `mcp` or `cli` record is byte for byte what it was before
-the section existed, and `record_schema` stays 1.
+the section existed, and `record_schema` stays 1. **`retakes`** is begun the same way: a
+series point the beam guard ended and a person's Resume acquired again, with the files
+it replaced (lab record, task 168).
 
 **A verdict is the person's judgement of one file, not the machine's outcome.** The run
 outcome stamped in the file (`completed`, `stopped`, `failed`, `incomplete`) says how the
@@ -84,7 +86,7 @@ READ_SOURCES = (*SOURCES, "agent")
 
 SECTIONS = ("plans", "arms", "acquisitions", "files", "notes", "routines", "verdicts")
 """The sections every record is begun with, each an empty list."""
-LATER_SECTIONS = ("interventions",)
+LATER_SECTIONS = ("interventions", "retakes")
 """Sections a record gains with their first entry, and lacks until then."""
 
 VERDICTS = {

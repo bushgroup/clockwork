@@ -39,7 +39,7 @@ from dataclasses import dataclass, replace
 import zmq
 
 from .. import __version__
-from ..acq import BatchSeen, Snapshot
+from ..acq import BatchSeen, BeamGuard, Snapshot
 from .hold import POINT, Hold, HoldRefused
 from .interface import Handle, JobFinished, OwnerStatus, Progress, Said, StaleHandle
 from .jobs import Acquire, Job, Send, SeriesJob, StandDown, WarmUp
@@ -377,6 +377,19 @@ class DaemonServer:
         self._said(f"note from {client or 'a client'} by {by}, kept in {where}")
         return where
 
+    def _guard(self, guard: object = None, by: object = "", client: object = "") -> object:
+        """Sent by the window alone (`docs/daemon-protocol.md`, "The beam guard")."""
+        if guard is not None and not isinstance(guard, BeamGuard):
+            raise _Refusal("bad-request", "`guard` is a BeamGuard or null")
+        try:
+            where = self.owner.guard(guard, by=str(by or ""),  # type: ignore[attr-defined]
+                                     client=str(client or ""))
+        except HoldRefused as exc:
+            raise _Refusal("refused", str(exc)) from exc
+        self._said(f"beam guard {'armed' if guard is not None else 'turned off'} from "
+                   f"{client or 'a client'} by {by}, recorded in {where}")
+        return where
+
     def _snapshot(self) -> object:
         return to_wire(self.owner.snapshot())  # type: ignore[attr-defined]
 
@@ -388,6 +401,9 @@ class DaemonServer:
         self.request_shutdown(str(reason))
 
 
+_CANNOT = {"note": "keep a note", "guard": "hold the beam guard"}
+"""How the sentence for an older daemon words a command it lacks, where not by its name."""
+
 _COMMANDS: dict[str, Callable[..., object]] = {
     "hello": DaemonServer._hello,
     "submit": DaemonServer._submit,
@@ -396,6 +412,7 @@ _COMMANDS: dict[str, Callable[..., object]] = {
     "pause": DaemonServer._pause,
     "resume": DaemonServer._resume,
     "note": DaemonServer._note,
+    "guard": DaemonServer._guard,
     "snapshot": DaemonServer._snapshot,
     "status": DaemonServer._status,
     "shutdown": DaemonServer._shutdown,
@@ -578,8 +595,11 @@ class RemoteOwner:
     def note(self, text: str, *, by: str, client: str = "") -> str:
         return str(self._person("note", text=text, by=by, client=client or self.origin))
 
+    def guard(self, guard: BeamGuard | None, *, by: str, client: str = "") -> str:
+        return str(self._person("guard", guard=guard, by=by, client=client or self.origin))
+
     def _person(self, cmd: str, **args: object) -> object:
-        """One of the three commands a person's controls send. A daemon from before
+        """One of the four commands a person's controls send. A daemon from before
         them answers `unknown-command` with its list of commands; that becomes one
         sentence a window can show."""
         try:
@@ -589,8 +609,8 @@ class RemoteOwner:
                 raise
             raise DaemonRefused(
                 "the clockwork serve that is running is older than this window and "
-                f"cannot {cmd if cmd != 'note' else 'keep a note'}; shut it down and "
-                "start it again from this version to pause, resume or keep a note",
+                f"cannot {_CANNOT.get(cmd, cmd)}; shut it down and start it again from "
+                "this version to pause, resume, keep a note or arm the beam guard",
                 exc.kind) from None
 
     def snapshot(self) -> Snapshot | None:

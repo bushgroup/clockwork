@@ -169,9 +169,11 @@ class Acquire(Job):
     knobs: Mapping[str, float] = field(default_factory=dict)
     labels: Mapping[str, str] = field(default_factory=dict)
     beam_guard: BeamGuard | None = None
-    """End each run whose beam is lost (`run_acquisition`'s `beam_guard`); None, the
-    default, watches nothing. The window's run queue sets it on its rows when the
-    guard is armed (lab record, task 134)."""
+    """End each run whose beam is lost (`run_acquisition`'s `beam_guard`), over the
+    guard the owner holds; None, the default, leaves it to that one. The guard is the
+    owner's since lab record task 168, armed by a person at the window
+    (`Owner.guard`); this field is for a caller that builds its own job, a bench script,
+    and no client of clockwork sets it."""
     source: str = ""
     """The route whose run record the owner begins for this job when it starts:
     `window`, for a client that begins none itself. The owner mints the request id,
@@ -200,6 +202,22 @@ class PlannedPoint:
     was not known, or for a job built before points carried it. A follower's minutes
     left are the sum over the points not yet done (lab record, task 166)."""
 
+    # A row of a run queue (F2, lab record, task 168): a saved method document rather
+    # than a template at knob values. Every field below is empty for a plan's point.
+    method_path: str = ""
+    """The document the point's method was read from, at Start; empty for a plan's."""
+    sha256: str = ""
+    """The SHA-256 of that document's text as read at Start, CRLF made LF."""
+    conditions: str = ""
+    """The row's own conditions note, written into its files' logs in place of the
+    series'."""
+    name: str = ""
+    """What the window calls the row: the document's name, with its pass (`2/3`)."""
+    template: str = ""
+    """For a document rendered from a template, that template's text, rendered again by
+    the owner at `knobs` as an `Acquire`'s is; empty for a hand-written document."""
+    labels: Mapping[str, str] = field(default_factory=dict)
+
 
 @dataclass(frozen=True, slots=True)
 class SeriesJob(Job):
@@ -220,6 +238,17 @@ class SeriesJob(Job):
     what each send read back against what its point declares, as `acquire` judges what
     an `arm` read back; empty judges nothing. A plan the window starts carries `caution`:
     what the boxes hold is said, and never refuses a person (R10, lab record, task 166).
+
+    **A run queue is a series too** (F2, lab record, task 168): its points are saved
+    method documents, read and hashed by the window at Start (`PlannedPoint.method_path`),
+    and the job carries the queue's own text in `queue`. One runner for both, so a queue's
+    files stamp a series id, index, position and seed, and it is followed, paused,
+    guarded and stopped as a plan is.
+
+    **The beam guard's trip holds it** (B8): a point whose file the guard ended rests the
+    series, paused by the guard, until a person resumes or stops it; a resume acquires
+    that point again from its start, as new files under the same planned index at the
+    next positions, and then goes on.
     """
 
     label: str = "acquiring a series"
@@ -252,6 +281,15 @@ class SeriesJob(Job):
     wrote its own."""
     plan_path: str = ""
     """The file the plan was opened from, or empty."""
+    queue: str = ""
+    """A run queue's text as Start snapshot it, in the `.queue.toml` form, for a job whose
+    record the owner begins: the record's `plans` entry keeps it, its hash and its rows,
+    where a plan's keeps the plan's (lab record, task 168). Empty for a plan."""
+    queue_path: str = ""
+    """The queue file the rows were last saved to or opened from, or empty."""
+    follows: str = ""
+    """The request id of the queue this one continues: the rows a stopped or failed
+    queue left unrun, started again as a new queue whose record names the first (F1)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,6 +419,14 @@ class SeriesResult:
     armed: tuple = ()
     """What the series' last send put on the wire, as `SendResult.armed`, so that a
     window reads the boxes as holding that and not whatever it last sent itself."""
+    numbers: tuple[int, ...] = ()
+    """For each of `runs`, the place, from 1, among the job's points of the point it was
+    acquired for: what lets a window give each row of its queue its own files, retakes
+    included. Empty from a daemon older than lab record task 168."""
+    replaced: tuple[str, ...] = ()
+    """The stems of the files a retake replaced: each file of a point the beam guard
+    ended, acquired again from its start after a person's Resume (B8). They stay on disk
+    and in `runs`, stamped `failed`, and the record's `retakes` names them."""
 
 
 @dataclass(frozen=True, slots=True)

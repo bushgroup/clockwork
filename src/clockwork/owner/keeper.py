@@ -114,6 +114,8 @@ def begin(job: Acquire | SeriesJob, job_id: int, *,
                                 initials=job.initials, at_window=job.at_window)
         if job.plan:
             _plan_entries(record, job, job_id, directory, limits)
+        elif job.queue:
+            _queue_entries(record, job, job_id)
         else:
             record.append("acquisitions", {
                 "job": job_id, "series": True, "first_place": max(1, job.first_position),
@@ -169,6 +171,50 @@ def _plan_entries(record: RunRecord, job: SeriesJob, job_id: int, directory: str
     entry["order"] = [point.index for point in job.points]
     record.append("plans", entry)
     record.append("acquisitions", judged.acquisitions_entry(job=job_id, first_place=first))
+
+
+def _queue_entries(record: RunRecord, job: SeriesJob, job_id: int) -> None:
+    """A window queue's `plans` and `acquisitions` entries (F1, F2; lab record, task 168).
+
+    The `plans` entry reads as a plan's does, key for key where the two share one, with
+    the queue's text where a plan has its own (`queue`, `sha256`), and `rows` where a
+    plan has `points`: each row's document, the SHA-256 of its text as read at Start, the
+    hash its files stamp, its conditions note, replicates and pass. A queue has no
+    template, no check and no limits, so those keys are null; `follows` names the queue
+    this one continues, where a person started the rows a stopped one left."""
+    from ..planning import sha256  # the planning module imports the owner's jobs
+
+    first = max(1, job.first_position)
+    files = sum(point.replicates for point in job.points)
+    rows = []
+    for point in job.points:
+        row: dict[str, Any] = {
+            "index": point.index, "name": point.name,
+            "method": point.method.metadata.name if point.method is not None else "",
+            "path": point.method_path, "sha256": point.sha256,
+            "method_hash": _hash(point.method), "conditions": point.conditions,
+            "replicates": point.replicates, "template": None}
+        if point.template:
+            try:
+                rendered = render(loads_template(point.template), dict(point.knobs),
+                                  dict(point.labels))
+                row["template"] = {"hash": rendered.template_hash,
+                                   "knobs": dict(rendered.knobs),
+                                   "labels": dict(rendered.labels)}
+            except Exception as exc:  # noqa: BLE001 -- the run refuses it; this says why
+                from .local import sentence
+                row["template"] = {"problem": sentence(exc)}
+        rows.append(row)
+    record.append("plans", {
+        "text": job.request, "job": job_id, "queue": job.queue, "path": job.queue_path,
+        "template": None, "template_hash": None, "labels": {}, "seed": job.seed,
+        "shuffled": job.seed is not None, "first_place": first, "acquisitions": files,
+        "files": files, "minutes": None, "rows": sorted(rows, key=lambda row: row["index"]),
+        "order": [point.index for point in job.points], "sha256": sha256(job.queue),
+        "checked": None, "outside_limits": None, "follows": job.follows or None})
+    record.append("acquisitions", {
+        "job": job_id, "series": True, "queue": True, "replicates": files,
+        "first_place": first, "points": len(job.points), "method": ""})
 
 
 def _acquisition_entry(job: Acquire, job_id: int, limits: Limits | None) -> dict[str, Any]:
@@ -238,6 +284,13 @@ class RecordKeeper:
             self._put(lambda: self._with(
                 directory, request_id,
                 lambda record: record.append("interventions", entry)))
+
+    def retake(self, directory: str, request_id: str, entry: dict[str, Any]) -> None:
+        """Add a point acquired again after the beam guard ended it to the record's
+        `retakes`, naming the files it replaces (B8; lab record, task 168)."""
+        if request_id:
+            self._put(lambda: self._with(
+                directory, request_id, lambda record: record.append("retakes", entry)))
 
     def person_note(self, directory: str, request_id: str, text: str, by: str,
                     client: str) -> None:

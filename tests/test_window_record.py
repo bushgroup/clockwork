@@ -236,7 +236,7 @@ def test_an_mcp_or_cli_record_is_begun_as_it_was(tmp_path):
                                     "client": "the clockwork window (pid 1)", "job": 4,
                                     "reason": ""})
     assert record.read()["interventions"][0]["kind"] == "stop"
-    assert LATER_SECTIONS == ("interventions",)
+    assert LATER_SECTIONS == ("interventions", "retakes")
     with pytest.raises(ValueError):
         record.append("pauses", {})
 

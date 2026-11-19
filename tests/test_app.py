@@ -38,7 +38,6 @@ from mainspring.interface import (  # noqa: E402
     OPTION_SHOW,
     SHOW_WORDS,
 )
-from mainspring.uimf import UimfFile  # noqa: E402
 from PySide6.QtCore import QSettings, Qt  # noqa: E402
 from PySide6.QtWidgets import QDialog  # noqa: E402
 
@@ -1962,106 +1961,11 @@ def test_a_stopped_run_is_neither_done_nor_failed_because_its_files_are_good():
     assert "stopped: by the operator" in row.outcome
 
 
-def test_a_run_the_loop_ended_itself_fails_the_row_with_its_reason():
-    """Nobody pressed Stop: the instrument ended it. So the row is `failed` with the
-    loop's sentence, and the rows after it say a row failed, not that an operator
-    stopped them (lab record, task 134)."""
-    reason = "frame 1.2 came up short twice (5 of 32 scans), so the console is losing data"
-    queue = runqueue.RunQueue([runqueue.QueueRow(method_path="clock.toml"),
-                               runqueue.QueueRow(method_path="next.toml")])
-    row = queue.begin()
-    state = runqueue.outcome_of(row, [a_run("260918_ZZ_001", stopped=reason, asked=False)])
-    assert state == runqueue.FAILED
-    assert not row.stopped_early and row.problem == reason
-    assert not queue.finish(state)
-    assert reason in row.outcome and "stopped:" not in row.outcome
-    assert queue.rows[1].problem == "clock failed and the series stops on a failure"
-
-
-def test_a_row_the_loop_ended_that_says_go_on_is_walked_past():
-    queue = runqueue.RunQueue([runqueue.QueueRow(method_path="a.toml", go_on=True),
-                               runqueue.QueueRow(method_path="b.toml")])
-    row = queue.begin()
-    state = runqueue.outcome_of(
-        row, [a_run("260918_ZZ_001", stopped="3 frames in a row failed", asked=False)])
-    assert state == runqueue.FAILED and queue.finish(state)
-    assert queue.advance() is queue.rows[1]
-
-
 def test_a_run_that_came_back_incomplete_fails_the_row():
     row = runqueue.QueueRow(method_path="clock.toml")
     assert runqueue.outcome_of(row, [a_run("260918_ZZ_001", complete=False)]) \
         == runqueue.FAILED
     assert runqueue.outcome_of(row, []) == runqueue.FAILED
-
-
-def test_a_failed_row_ends_the_series_and_the_rest_are_skipped_with_the_reason():
-    queue = runqueue.RunQueue([runqueue.QueueRow(method_path=f"{n}.toml")
-                               for n in ("a", "b", "c")])
-    assert queue.begin() is queue.rows[0]
-    assert queue.finish(runqueue.FAILED, "TBLSTRT was refused") is False
-    assert [row.state for row in queue.rows] == [
-        runqueue.FAILED, runqueue.SKIPPED, runqueue.SKIPPED]
-    assert "a failed" in queue.rows[1].problem
-    assert queue.advance() is None and not queue.running
-
-
-def test_a_row_that_says_go_on_is_walked_past_and_the_series_continues():
-    queue = runqueue.RunQueue([
-        runqueue.QueueRow(method_path="a.toml", go_on=True),
-        runqueue.QueueRow(method_path="b.toml"),
-    ])
-    queue.begin()
-    assert queue.finish(runqueue.FAILED, "the console would not start") is True
-    assert queue.advance() is queue.rows[1]
-    assert queue.rows[1].state == runqueue.RUNNING
-
-
-def test_stop_skips_what_has_not_started_and_leaves_the_row_in_flight_running():
-    """Stop does not abandon an acquisition: it ends after the current repetition and
-    its fold, so the row in flight is still running here and closes itself later."""
-    queue = runqueue.RunQueue([runqueue.QueueRow(method_path=f"{n}.toml")
-                               for n in ("a", "b")])
-    queue.begin()
-    queue.cancel("stopped by the operator")
-    assert queue.rows[0].state == runqueue.RUNNING
-    assert queue.rows[1].state == runqueue.SKIPPED
-    queue.finish(runqueue.STOPPED)
-    assert queue.advance() is None
-
-
-def test_a_skipped_row_is_offered_again_by_start_and_a_finished_one_is_not():
-    queue = runqueue.RunQueue([runqueue.QueueRow(method_path=f"{n}.toml")
-                               for n in ("a", "b")])
-    queue.begin()
-    queue.finish(runqueue.DONE)
-    queue.advance()
-    queue.cancel("stopped by the operator")
-    queue.finish(runqueue.STOPPED)
-    assert queue.begin() is None, "both rows have run; Start has nothing to offer"
-    queue.rows[1].reset()
-    assert queue.begin() is queue.rows[1]
-
-
-def test_the_row_in_flight_cannot_be_removed_or_moved_and_none_can_pass_it():
-    queue = runqueue.RunQueue([runqueue.QueueRow(method_path=f"{n}.toml")
-                               for n in ("a", "b", "c")])
-    queue.begin()
-    assert queue.remove(0) is False
-    assert queue.move(0, 1) == 0
-    # Row `c` may be brought forward to just after the row running, and no further:
-    # the positions before it have been run or skipped already.
-    assert queue.move(2, -1) == 1
-    assert queue.move(1, -1) == 1
-    assert [row.name for row in queue.rows] == ["a", "c", "b"]
-
-
-def test_a_row_added_while_one_runs_does_not_move_the_index():
-    queue = runqueue.RunQueue([runqueue.QueueRow(method_path=f"{n}.toml")
-                               for n in ("a", "b")])
-    queue.begin()
-    queue.add(runqueue.QueueRow(method_path="c.toml"), at=0)
-    assert queue.current is queue.rows[1] and queue.rows[1].name == "a"
 
 
 # --- randomized passes and the queue file (task 86) -------------------------------------
@@ -2119,20 +2023,6 @@ def test_rows_that_stay_first_open_every_pass_in_the_order_they_were_entered():
         assert sorted(names[2:]) == ["x", "y", "z"]
 
 
-def test_copies_carry_the_rows_settings_and_are_rows_of_their_own():
-    queue = runqueue.RunQueue([runqueue.QueueRow(
-        method_path="a.toml", conditions="10 uM", replicates=3, setup=False,
-        go_on=True)])
-    queue.randomize(2, seed=0)
-    one, two = queue.rows
-    assert one is not two
-    for row in (one, two):
-        assert (row.conditions, row.replicates, row.setup, row.go_on) == (
-            "10 uM", 3, False, True)
-    one.conditions = "edited"
-    assert two.conditions == "10 uM"
-
-
 def test_randomizing_again_rebuilds_from_pass_one_and_does_not_duplicate():
     queue = lettered("a", "b", "c")
     queue.randomize(3, seed=1)
@@ -2153,75 +2043,6 @@ def test_a_row_added_by_hand_after_randomizing_joins_every_new_pass():
     queue.add(runqueue.QueueRow(method_path="c.toml"))
     queue.randomize(2, seed=1)
     assert [sorted(names) for names in passes_of(queue)] == [["a", "b", "c"]] * 2
-
-
-def test_finished_rows_stay_where_they_are_above_the_new_passes():
-    queue = lettered("done", "a", "b")
-    queue.begin()
-    queue.finish(runqueue.DONE)
-    queue.running = False
-    queue.index = -1
-    queue.randomize(2, seed=4)
-    assert queue.rows[0].name == "done" and queue.rows[0].state == runqueue.DONE
-    assert queue.rows[0].pass_number == 0
-    assert len(queue.rows) == 5
-    assert all(row.state == runqueue.WAITING for row in queue.rows[1:])
-
-
-def test_skipped_rows_are_taken_by_a_randomization_rather_than_left_to_run_twice():
-    queue = lettered("a", "b", "c")
-    queue.begin()
-    queue.finish(runqueue.FAILED, "TBLSTRT was refused")
-    queue.advance()
-    queue.randomize(1, seed=9)
-    assert [row.state for row in queue.rows] == [
-        runqueue.FAILED, runqueue.WAITING, runqueue.WAITING]
-    assert sorted(row.name for row in queue.rows[1:]) == ["b", "c"]
-
-
-def test_a_running_queue_and_an_empty_one_refuse_to_randomize():
-    queue = lettered("a", "b")
-    queue.begin()
-    with pytest.raises(ValueError, match="running"):
-        queue.randomize(2)
-    with pytest.raises(ValueError, match="no waiting rows"):
-        runqueue.RunQueue().randomize(2)
-    with pytest.raises(ValueError, match="at least one pass"):
-        lettered("a").randomize(0)
-
-
-def test_a_failure_without_go_on_skips_the_later_passes_too():
-    queue = lettered("a", "b")
-    queue.randomize(3, seed=5)
-    queue.begin()
-    queue.finish(runqueue.FAILED, "the console would not start")
-    assert [row.state for row in queue.rows[1:]] == [runqueue.SKIPPED] * 5
-    assert queue.advance() is None
-
-
-def test_a_queue_file_round_trips_its_rows_passes_and_seed(tmp_path):
-    for name in ("a", "b", "blank"):
-        (tmp_path / f"{name}.toml").write_text("", encoding="utf-8")
-    queue = runqueue.RunQueue([
-        runqueue.QueueRow(method_path=str(tmp_path / "a.toml"), conditions="1 uM",
-                          replicates=2, setup=False, go_on=True),
-        runqueue.QueueRow(method_path=str(tmp_path / "b.toml")),
-        runqueue.QueueRow(method_path=str(tmp_path / "blank.toml"), stays_first=True),
-    ])
-    queue.randomize(2, seed=99)
-    queue.rows[0].state = runqueue.DONE
-    queue.rows[0].stems = ("260926_ZZ_001",)
-    path = str(tmp_path / "series.queue.toml")
-    runqueue.save(queue, path)
-
-    opened = runqueue.load(path)
-    assert opened.seed == 99
-    fields = ("method_path", "conditions", "replicates", "setup", "go_on",
-              "stays_first", "pass_number", "pass_count")
-    assert [[getattr(row, f) for f in fields] for row in opened.rows] == \
-        [[getattr(row, f) for f in fields] for row in queue.rows]
-    assert all(row.state == runqueue.WAITING and not row.stems for row in opened.rows), \
-        "a queue file is a plan, not a record"
 
 
 def test_a_queue_copied_with_its_methods_opens_by_the_relative_path(tmp_path):
@@ -2274,95 +2095,6 @@ def queued(window, tmp_path, name: str, method, **row) -> str:
     return path
 
 
-def test_a_queue_of_two_methods_runs_both_in_order_and_records_where_they_went(
-        window, tmp_path, qtbot):
-    """The whole of what the queue is for: two rows, unattended, each sent before its
-    own acquisition because the two rows may name different methods."""
-    ready_to_acquire(window, qtbot, tmp_path)
-    queued(window, tmp_path, "first", make_method(), conditions="10 uM bradykinin")
-    queued(window, tmp_path, "second", make_method(scans=SCANS * 2), replicates=2)
-
-    runs: list[object] = []
-    window.worker.run_done.connect(runs.append)
-    window.start_queue()
-    until(qtbot, lambda: not window.queue.running and idle(window), timeout=300_000)
-
-    first, second = window.queue.rows
-    assert [row.state for row in window.queue.rows] == [runqueue.DONE, runqueue.DONE]
-    assert len(first.stems) == 1 and len(second.stems) == 2
-    assert len(set(first.stems + second.stems)) == 3, "three runs, three names"
-    assert len(runs) == 3
-    # The row's note reaches the file it was queued against, not the field's last value.
-    assert first.conditions == "10 uM bradykinin"
-    for stem in first.stems + second.stems:
-        assert (tmp_path / f"{stem}.sent.txt").is_file()
-    # The second row's method is the one that ran it: the window's panes were reloaded
-    # from the row's own document before it was sent.
-    assert window.scans.value() == SCANS * 2
-
-
-def test_a_queue_row_whose_method_will_not_open_fails_and_stops_the_series(
-        window, tmp_path, qtbot):
-    """And without a message box: a modal dialog raised by row four of an overnight
-    series holds the instrument until somebody walks in and clicks OK."""
-    ready_to_acquire(window, qtbot, tmp_path)
-    broken = tmp_path / "broken.toml"
-    broken.write_text("this is not a method\n", encoding="utf-8")
-    window.queue.add(runqueue.QueueRow(method_path=str(broken)))
-    queued(window, tmp_path, "after", make_method())
-
-    complaints: list[str] = []
-    window._complain = lambda title, detail: complaints.append(title)
-    window.start_queue()
-    until(qtbot, lambda: not window.queue.running and idle(window), timeout=120_000)
-
-    assert [row.state for row in window.queue.rows] == [
-        runqueue.FAILED, runqueue.SKIPPED]
-    assert complaints == [], "a failed row must not raise a dialog nobody is there for"
-    assert "could not be opened" in window.queue.rows[0].problem
-    assert "stops on a failure" in window.queue.rows[1].problem
-
-
-def test_a_row_that_says_go_on_lets_the_series_reach_the_next_one(
-        window, tmp_path, qtbot):
-    ready_to_acquire(window, qtbot, tmp_path)
-    broken = tmp_path / "broken.toml"
-    broken.write_text("not a method\n", encoding="utf-8")
-    window.queue.add(runqueue.QueueRow(method_path=str(broken), go_on=True))
-    queued(window, tmp_path, "after", make_method())
-
-    window.start_queue()
-    until(qtbot, lambda: not window.queue.running and idle(window), timeout=300_000)
-    assert [row.state for row in window.queue.rows] == [
-        runqueue.FAILED, runqueue.DONE]
-
-
-def test_a_waiting_row_is_edited_while_the_row_above_it_runs(window, tmp_path, qtbot):
-    """The queue exists to be added to and changed while it runs; only the row in
-    flight is fixed, because its values were on the wire before the edit."""
-    ready_to_acquire(window, qtbot, tmp_path)
-    queued(window, tmp_path, "first", make_method(accumulations=6))
-    queued(window, tmp_path, "second", make_method())
-
-    window.start_queue()
-    qtbot.waitUntil(lambda: window.run_panel.progress.repetition >= 1, timeout=120_000)
-    assert window.queue.index == 0
-    panel = window.queue_panel
-    panel.tree.topLevelItem(1).setText(CONDITIONS, "changed while row 1 ran")
-    panel.tree.topLevelItem(1).setText(REPS, "2")
-    # The running row's cells are not a form: what it is doing was decided when it
-    # started.
-    assert not panel.tree.topLevelItem(0).flags() & Qt.ItemFlag.ItemIsEditable
-    assert panel.tree.topLevelItem(1).flags() & Qt.ItemFlag.ItemIsEditable
-
-    window.stop()
-    until(qtbot, lambda: not window.queue.running and idle(window), timeout=180_000)
-    assert window.queue.rows[1].conditions == "changed while row 1 ran"
-    assert window.queue.rows[1].replicates == 2
-    assert window.queue.rows[0].state == runqueue.STOPPED
-    assert window.queue.rows[1].state == runqueue.SKIPPED
-
-
 def test_the_buttons_a_trainee_presses_are_greyed_out_while_the_queue_runs(
         window, tmp_path, qtbot):
     ready_to_acquire(window, qtbot, tmp_path)
@@ -2389,21 +2121,6 @@ def test_the_queue_panel_puts_back_a_cell_the_queue_owns(qtbot):
     assert item.text(OUTCOME) == ""
     item.setText(REPS, "not a number")
     assert queue.rows[0].replicates == 3 and item.text(REPS) == "3"
-
-
-def test_start_stays_pressable_after_a_failed_row_because_it_runs_the_skipped_ones(qtbot):
-    """`begin` offers skipped rows again, as the user guide says, so a panel that counted
-    only waiting rows greyed Start after a failure until the trainee pressed Reset."""
-    queue = lettered("a", "b", "c")
-    panel = QueuePanel(queue)
-    qtbot.addWidget(panel)
-    queue.begin()
-    queue.finish(runqueue.FAILED, "TBLSTRT was refused")
-    queue.advance()
-    panel.refresh()
-    assert queue.waiting == 0 and queue.to_run == 2
-    assert panel.start_button.isEnabled()
-    assert "2 to run" in panel.caption.text()
 
 
 def test_stays_first_is_a_check_box_and_the_pass_column_appears_with_passes(qtbot):
@@ -3069,35 +2786,6 @@ def test_a_run_inside_qt_s_int_is_drawn_in_scans(qtbot):
 # --- the beam guard (lab record, task 134) --------------------------------------------
 
 
-def test_a_row_the_beam_guard_ended_failed_and_stops_even_a_go_on_series():
-    """Not `stopped`: nobody pressed Stop. And not walked past: what failed is the source
-    every later row needs."""
-    from clockwork.owner.wire import example
-
-    reason = "the beam was lost: 5 repetitions in a row read under 2.8e+05 ions (0, 0)"
-    lost = replace(example(Run), stopped_early=reason, stop_asked=False, beam_lost=reason)
-    queue = runqueue.RunQueue([runqueue.QueueRow(method_path="a.toml", go_on=True),
-                               runqueue.QueueRow(method_path="b.toml")])
-    row = queue.begin()
-    state = runqueue.outcome_of(row, [lost])
-    assert state == runqueue.FAILED
-    assert row.beam_lost == reason and not row.stopped_early
-    assert not queue.finish(state)
-    assert reason in row.outcome and "stopped:" not in row.outcome
-    assert queue.rows[1].state == runqueue.SKIPPED
-    assert queue.rows[1].problem == "the beam guard stopped the series at a"
-    row.reset()
-    assert row.beam_lost == ""
-
-
-def test_the_beam_guard_is_not_saved_with_the_queue(tmp_path):
-    """Its floor is a reading of the day's beam, not part of the plan."""
-    queue = runqueue.RunQueue([runqueue.QueueRow(method_path=str(tmp_path / "a.toml"))])
-    queue.guard = BeamGuard(floor=2.5e5)
-    assert "floor" not in runqueue.dumps(queue)
-    assert runqueue.loads(runqueue.dumps(queue)).guard is None
-
-
 def test_the_guard_dialog_takes_its_floor_from_a_run_or_a_number(qtbot, tmp_path,
                                                                  monkeypatch):
     seen: list[str] = []
@@ -3124,45 +2812,3 @@ def test_the_guard_dialog_takes_its_floor_from_a_run_or_a_number(qtbot, tmp_path
     with pytest.raises(ValueError, match="type a floor"):
         dialog.chosen()
 
-
-def test_a_queue_whose_beam_is_lost_mid_row_fails_that_row_and_stops(
-        window, tmp_path, qtbot):
-    """On the fake rack: the beam goes three repetitions into the first row, the guard
-    ends that row after its count, the row fails, the rows after it are skipped, and the
-    run log says why. Then the same queue, guard off, walks on as it always has."""
-    ready_to_acquire(window, qtbot, tmp_path)
-    queued(window, tmp_path, "first", make_method(accumulations=10), go_on=True)
-    queued(window, tmp_path, "second", make_method())
-    guard = BeamGuard(floor=1000.0, repetitions=3, source="a test's floor")
-    window._ask_guard = lambda current: (guard,)
-    window.queue_guard()
-    assert window.queue.guard == guard
-    assert window.queue_panel.guard_button.text() == "Beam guard: armed…"
-    window.worker.console.fake.beam = [1.0, 1.0, 1.0] + [0.0] * 20
-
-    lines: list[str] = []
-    window.run_panel.say = lambda text, **_: lines.append(text)
-    window.start_queue()
-    until(qtbot, lambda: not window.queue.running and idle(window), timeout=300_000)
-
-    first, second = window.queue.rows
-    assert (first.state, second.state) == (runqueue.FAILED, runqueue.SKIPPED)
-    assert first.beam_lost.startswith("the beam was lost: 3 repetitions in a row")
-    assert len(first.stems) == 1
-    assert second.problem == "the beam guard stopped the series at first"
-    assert f"the beam guard is armed: {guard.text}" in lines
-    assert any(line.startswith("queue row 1 (first): failed") and first.beam_lost in line
-               for line in lines)
-    acquired = UimfFile(str(tmp_path / f"{first.stems[0]}.uimf")).global_params()
-    assert (acquired.run_outcome, acquired.repetitions_acquired) == ("failed", 6)
-
-    window._ask_guard = lambda current: (None,)
-    window.queue_guard()
-    assert window.queue.guard is None
-    for row in window.queue.rows:
-        row.reset()
-    window.worker.console.fake.beam = [0.0] * 20
-    window.start_queue()
-    until(qtbot, lambda: not window.queue.running and idle(window), timeout=300_000)
-    assert [row.state for row in window.queue.rows] == [runqueue.DONE, runqueue.DONE]
-    assert "the beam guard is off" in lines

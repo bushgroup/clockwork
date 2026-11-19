@@ -92,9 +92,11 @@ from ..method.text import PaneResult, render_pane, split_trainee_file, start_ord
 from ..owner import (
     POINT,
     REPETITION,
+    GuardChanged,
     Held,
     LogsOpened,
     PauseAsked,
+    PlannedPoint,
     PointStarted,
     RecordBegun,
     Resumed,
@@ -121,7 +123,7 @@ from .panes import BoxPane
 from .planpanel import FollowedSeries, PlanPanel, SeriesFollow
 from .queuepanel import BeamGuardDialog, QueuePanel, RandomizeDialog
 from .runlog import RunPanel
-from .runqueue import FAILED, STOPPED, QueueRow, RunQueue, outcome_of
+from .runqueue import QueueRow, RunQueue
 from .serving import serve_command, start_serve
 from .settings import Settings
 from .worker import (
@@ -274,9 +276,10 @@ class MainWindow(QMainWindow):
         buttons do, one row at a time, so a queued acquisition and a pressed one are the
         same path onto the wire and leave the same files and logs behind."""
 
-        self._queue_job: Job | None = None
-        """The job the queue is waiting on, so the sequencer reacts to its own work and
-        not to a discovery or a state reading that happened to land in between."""
+        self._queue_job: SeriesJob | None = None
+        """The queue job this window started, while it runs: the owner's series job
+        whose points are the rows (lab record, task 168). Its progress is written back
+        onto the rows; the queue itself is the owner's and outlives this window."""
 
         self._plan_job: SeriesJob | None = None
         """The series a person started here off an open plan, until it comes back."""
@@ -1026,10 +1029,9 @@ class MainWindow(QMainWindow):
     def _load_method(self, path: str, *, quiet: bool = False) -> bool:
         """Put a document into the panes and the form, and say whether it opened.
 
-        `quiet` sends the failure to the run log instead of a message box, and exists
-        for the queue: a modal dialog raised by row four of an overnight series would
-        stop the instrument at three in the morning and hold it there until somebody
-        walked in and clicked OK.
+        `quiet` sends the failure to the run log instead of a message box. It existed for
+        the queue's rows, which no longer come through the panes (lab record, task 168),
+        and is kept for any caller that must not raise a dialog nobody is there to close.
         """
         try:
             method = method_module.load(path)
@@ -1315,8 +1317,7 @@ class MainWindow(QMainWindow):
         self.worker.submit(job)
         return job
 
-    def acquire(self, *, replicate_only: bool = False,
-                beam_guard: BeamGuard | None = None) -> Acquire | None:
+    def acquire(self, *, replicate_only: bool = False) -> Acquire | None:
         """Queue an acquisition of the panes, and hand the job back.
 
         Every one is a request of its own with a run record, begun by the owner when the
@@ -1354,7 +1355,6 @@ class MainWindow(QMainWindow):
             template=rendered.template_text if rendered is not None else "",
             knobs=dict(rendered.knobs) if rendered is not None else {},
             labels=dict(rendered.labels) if rendered is not None else {},
-            beam_guard=beam_guard,
             request=self.run_panel.purpose.text().strip(),
             source="window",
             at_window=person,
@@ -1422,15 +1422,11 @@ class MainWindow(QMainWindow):
         self.run_panel.say("stopping the paused series where it rests"
                            if hold is not None and hold.reached
                            else "stopping after this repetition and its fold", warn=True)
-        if self.queue.running:
-            # The row in flight is not abandoned: `run_acquisition` ends after the
-            # current repetition and its fold, and the row closes itself when its job
-            # comes back. What Stop decides here is that nothing after it starts.
-            self.queue.cancel("stopped by the operator")
-            self.run_panel.say(
-                "the queue stops with this row; the rows after it are skipped",
-                warn=True)
-            self.queue_panel.refresh()
+        if self.queue.running and self._job is self._queue_job:
+            # The owner ends the queue as it ends any series: the row in flight closes
+            # its files, and the rows after it come back skipped, for a new queue.
+            self.run_panel.say("the queue stops with this row; the rows after it are "
+                               "skipped, and Start runs them as a new queue", warn=True)
         self._refresh_actions()
 
     # -- the queue -----------------------------------------------------------
@@ -1515,23 +1511,30 @@ class MainWindow(QMainWindow):
         self._refresh_actions()
 
     def queue_guard(self) -> None:
-        """Arm, change or disarm the beam guard every queue row's acquisition carries.
+        """Arm, change or disarm the owner's beam guard, under the initials at the window.
 
-        Kept by the window and not saved with the queue: the floor is a reading of the
-        day's beam, so a queue opened after arming keeps it (lab record, task 134).
-        """
-        if self.queue.running:
-            return
-        answer = self._ask_guard(self.queue.guard)
+        The owner's since lab record task 168 (R9, B8): every acquisition watches it,
+        whichever client started it, and it is armed on whatever is running as readily
+        as with nothing running; each change is recorded with who made it, in the
+        running job's record or the day record. Never the queue file's: the floor is a
+        reading of the day's beam."""
+        current = self.worker.guarding
+        answer = self._ask_guard(current.guard if current is not None else None)
         if answer is None:
             return
         guard = answer[0]
-        if guard == self.queue.guard:
+        if guard == (current.guard if current is not None else None):
             return
-        self.queue.guard = guard
+        person = self._signed("the beam guard")
+        if not person:
+            return
+        self.worker.guard(guard, person)
         self.run_panel.say(f"the beam guard is armed: {guard.text}" if guard is not None
                            else "the beam guard is off")
-        self.queue_panel.refresh()
+
+    def _show_guard(self) -> None:
+        """The guard button says what the owner holds, whoever armed it."""
+        self.queue_panel.show_guard(self.worker.guarding)
 
     def _ask_guard(self, guard: BeamGuard | None) -> tuple[BeamGuard | None] | None:
         """The guard dialog, a method of its own so that a test can answer it: the
@@ -1566,6 +1569,7 @@ class MainWindow(QMainWindow):
             path += runqueue.QUEUE_SUFFIX
         try:
             runqueue.save(self.queue, path)
+            self.queue.path = os.path.abspath(path)
         except OSError as exc:
             self._complain("The queue could not be saved", str(exc))
             return
@@ -1595,8 +1599,15 @@ class MainWindow(QMainWindow):
             return
         self.queue.rows = opened.rows
         self.queue.seed = opened.seed
-        self.queue.index = -1
-        self.queue.cancelled = ""
+        self.queue.path = opened.path
+        self.queue.follows = ""
+        self.queue.started = []
+        if opened.ignored:
+            self.run_panel.say(
+                f"{opened.ignored} row(s) of {os.path.basename(path)} carry the \"setup\" "
+                "and \"go on if it fails\" values an earlier clockwork wrote; both are "
+                "ignored now: every queue sends setup only where it differs from what the "
+                "boxes were last sent, and a failed row ends the queue", warn=True)
         missing = sum(1 for row in opened.rows if not os.path.isfile(row.method_path))
         self.run_panel.say(
             f"the queue is opened from {path}: {len(opened.rows)} row(s)"
@@ -1628,100 +1639,132 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Cancel)
         return answer == QMessageBox.StandardButton.Yes
 
-    def start_queue(self) -> None:
-        """Walk every waiting row in order: load it, send it, acquire its replicates."""
-        if self.queue.running or self._job is not None:
-            return
-        if not self._at_window():
-            self.run_panel.say("type your initials in \"At the window\" first: every row "
-                               "the queue runs records who started it", warn=True)
+    def start_queue(self) -> SeriesJob | None:
+        """Hand every waiting row to the owner as one series job (F1, F2; task 168).
+
+        Every row's document is read and hashed now and the job carries what was read,
+        so what runs is what the files said at Start, and the queue runs on if this
+        window closes. A row whose document will not open, or that the acquisition loop
+        would refuse, keeps the queue from starting and says why on the row: a snapshot
+        with a hole in it is not the queue the table shows."""
+        if (self.queue.running or self._job is not None or self._plan_job is not None):
+            return None
+        person = self._at_window()
+        if not person:
+            self.run_panel.say("type your initials in \"At the window\" first: every run "
+                               "you start records who started it", warn=True)
             self.run_panel.at_window.setFocus()
-            return
-        row = self.queue.begin()
+            return None
+        if not clean_initials(self.initials.text()):
+            self.run_panel.say("set the file initials first: they name the queue's files",
+                               warn=True)
+            return None
+        rows = self.queue.begin()
         self.queue_panel.refresh()
-        if row is None:
+        if not rows:
             self.run_panel.say("the queue has no waiting rows", warn=True)
             self._refresh_actions()
-            return
-        self.run_panel.say(
-            f"the queue starts: {self.queue.waiting + 1} row(s) to run")
-        guard = self.queue.guard
-        self.run_panel.say(f"the beam guard is armed: {guard.text}" if guard is not None
-                           else "the beam guard is off")
-        self._start_row(row)
-
-    def _start_row(self, row: QueueRow) -> None:
-        """Open the row's method into the panes and put it on the wire.
-
-        The document goes through the panes rather than past them, so what a queued row
-        sends is what `build_method` makes of the panes -- the same method a trainee
-        would have sent by hand -- and the window shows the experiment that is running
-        rather than the one before it.
-        """
-        self.run_panel.say(
-            f"queue row {self.queue.index + 1} of {len(self.queue.rows)}: {row.name}"
-            + (f" -- {row.conditions}" if row.conditions else ""))
-        if not self._load_method(row.method_path, quiet=True):
-            self._row_finished(FAILED, "that method could not be opened")
-            return
-        self.conditions.setPlainText(row.conditions)
-        self.replicates.setValue(row.replicates)
-        method = self.build_method()
-        problems = (refusals(method) if method is not None
-                    else ["no boxes answered, so there is nothing to send to"])
+            return None
+        points: list[PlannedPoint] = []
+        problems: list[str] = []
+        for number, row in enumerate(rows, start=1):
+            try:
+                points.append(self._row_point(number, row))
+            except (OSError, UnicodeDecodeError, method_module.MethodError,
+                    ValueError) as exc:
+                row.problem = f"not started: {exc}"
+                problems.append(f"row {self.queue.rows.index(row) + 1} ({row.name}): {exc}")
         if problems:
-            self._row_finished(FAILED, "; ".join(problems))
-            return
-        row.step = "sending"
-        self.queue_panel.refresh()
-        self._queue_job = self.send(setup=row.setup)
-        if self._queue_job is None:
-            self._row_finished(FAILED, "there was no method to send")
-
-    def _queue_step(self, job: Job, result: object) -> None:
-        """One of the queue's own jobs came back: acquire the row, or close it off."""
-        if isinstance(job, Send):
-            if self.queue.cancelled:
-                self._row_finished(STOPPED, self.queue.cancelled)
-                return
-            row = self.queue.current
-            if row is None:
-                return
-            row.step = "acquiring"
             self.queue_panel.refresh()
-            self._queue_job = self.acquire(beam_guard=self.queue.guard)
-            if self._queue_job is None:
-                self._row_finished(FAILED, "there was no method to acquire")
-            return
-        row = self.queue.current
-        if row is None:
-            return
-        # A list in process and a tuple off the daemon's wire (`clockwork.owner.wire`):
-        # taking only the list failed every row a window ran through `clockwork serve`
-        # (on the rack, 2026-09-28; lab record, task 86).
-        runs = list(result) if isinstance(result, (list, tuple)) else []
-        self._row_finished(outcome_of(row, runs))
-
-    def _row_finished(self, state: str, problem: str = "") -> None:
-        """Close the row in flight off and start the next one, or end the series."""
-        self._queue_job = None
-        row = self.queue.current
-        if row is None:
-            return
-        where = self.queue.index + 1
-        self.queue.finish(state, problem)
-        self.run_panel.say(
-            f"queue row {where} ({row.name}): {row.state}"
-            + (f" -- {row.outcome}" if row.outcome else ""),
-            warn=row.state in (FAILED, STOPPED))
-        following = self.queue.advance()
+            self.run_panel.say("the queue did not start, because Start reads every row "
+                               "first: " + "; ".join(problems), warn=True)
+            return None
+        for row in rows:
+            row.problem = ""
+        if not self.worker.console_alive:
+            self.run_panel.say("starting the acquisition console first")
+            self.start_console()
+        snapshot = RunQueue(rows)
+        snapshot.seed = self.queue.seed
+        name = (os.path.basename(self.queue.path) if self.queue.path
+                else f"{len(rows)} row(s)")
+        seed = self.queue.stamped_seed
+        job = SeriesJob(
+            label=f"acquiring the queue {name}", points=tuple(points), seed=seed,
+            directory=self._directory(), initials=clean_initials(self.initials.text()),
+            request=self.run_panel.purpose.text().strip(), instrument=self.instrument,
+            instrument_path=self.instrument_path, source="window", at_window=person,
+            queue=runqueue.dumps(snapshot, os.path.dirname(self.queue.path)
+                                 if self.queue.path else ""),
+            queue_path=self.queue.path, follows=self.queue.follows)
+        self.queue.start(rows)
         self.queue_panel.refresh()
-        if following is not None:
-            self._start_row(following)
-            return
-        self.run_panel.say(self.queue.summary, warn=bool(self.queue.cancelled))
-        self.statusBar().showMessage(self.queue.summary)
+        files = sum(point.replicates for point in points)
+        self.run_panel.say(
+            f"the queue starts in clockwork serve: {len(points)} row(s), {files} file(s), "
+            + (f"seed {seed}" if seed is not None else "in table order")
+            + (f"; it continues request {self.queue.follows}" if self.queue.follows
+               else ""))
+        guarding = self.worker.guarding
+        self.run_panel.say(f"the beam guard is {guarding.text}" if guarding is not None
+                           else "the beam guard is off")
+        self._queue_job = job
+        self.worker.submit(job)
         self._refresh_actions()
+        return job
+
+    def _row_point(self, number: int, row: QueueRow) -> PlannedPoint:
+        """One row as a point of the queue's series job: its document read now, hashed
+        as its text stands, its boxes on the ports this window knows them by, and for a
+        rendered document its template, so its files stamp as rendered (task 168)."""
+        with open(row.method_path, encoding="utf-8") as handle:
+            text = handle.read()
+        method = method_module.loads(text)
+        method = replace(method, boxes=tuple(
+            replace(entry, port=self.ports.get(entry.name) or entry.port)
+            for entry in method.boxes))
+        problems = refusals(method)
+        if problems:
+            raise ValueError("; ".join(problems))
+        rendered = None
+        if method.rendered_from is not None:
+            rendered, why = templates.reproduce(method)
+            if rendered is None:
+                self.run_panel.say(f"{row.name} was rendered from a template, but {why}; "
+                                   "it runs as a hand-written method", warn=True)
+        name = row.name + (f" (pass {row.pass_label})" if row.pass_label else "")
+        return PlannedPoint(
+            index=number, method=method, replicates=row.replicates,
+            method_path=os.path.abspath(row.method_path), sha256=planning.sha256(text),
+            conditions=row.conditions, name=name,
+            template=rendered.template_text if rendered is not None else "",
+            knobs=dict(rendered.knobs) if rendered is not None else {},
+            labels=dict(rendered.labels) if rendered is not None else {})
+
+    def _queue_ended(self, result: object = None, failed: str = "") -> None:
+        """The window's queue job came back: each row's state from its own files."""
+        self._queue_job = None
+        followed = self.followed
+        if not self.queue.request_id and followed is not None and followed.request_id:
+            # A `RecordBegun` drained before the job's start was seen here is in the
+            # followed table, which reads it whatever the order.
+            self.queue.request_id = followed.request_id
+        if failed:
+            self.queue.failed(failed)
+        elif isinstance(result, SeriesResult):
+            self.queue.ended(result.runs, result.numbers, result.replaced, result.stopped)
+        else:
+            self.queue.ended((), (), stopped="the queue job came back with no result")
+        for number, row in enumerate(self.queue.started, start=1):
+            self.run_panel.say(f"queue row {number} ({row.name}): {row.state}"
+                               + (f" -- {row.outcome}" if row.outcome else ""),
+                               warn=row.state in (runqueue.FAILED, runqueue.STOPPED))
+        self.queue_panel.refresh()
+        unrun = sum(row.state == runqueue.SKIPPED for row in self.queue.started)
+        summary = self.queue.summary + (
+            f"; Start runs the {unrun} row(s) not run as a new queue" if unrun else "")
+        self.run_panel.say(summary, warn=bool(failed or unrun))
+        self.statusBar().showMessage(summary)
 
     # -- a series plan (lab record, task 166) --------------------------------
 
@@ -2017,12 +2060,20 @@ class MainWindow(QMainWindow):
             if followed is not None and not followed.ended and isinstance(
                     event, (PointStarted, Warned, RecordBegun)):
                 if isinstance(event, PointStarted):
-                    followed.point_started(event.number)
+                    followed.point_started(event.number, event.retake)
+                    if self._own_queue_running():
+                        self.queue.point_started(event.number, event.retake)
+                        self.queue_panel.refresh()
                 elif isinstance(event, Warned):
                     followed.warned()
                 elif not followed.request_id:
                     followed.request_id = event.request_id
+                if isinstance(event, RecordBegun) and self._own_queue_running():
+                    self.queue.request_id = event.request_id
+                    self.queue_panel.refresh()
                 self.follow.refresh()
+            if isinstance(event, GuardChanged):
+                self._show_guard()
             if isinstance(event, (PauseAsked, Held, Resumed, StopAsked)):
                 # A person's pause, whoever's window asked for it: the followed table
                 # shows where the series rests, and the controls follow the owner.
@@ -2030,6 +2081,13 @@ class MainWindow(QMainWindow):
                     followed.hold = (event.hold if isinstance(event, (PauseAsked, Held))
                                      else None)
                     self.follow.refresh()
+                if self._own_queue_running():
+                    held = isinstance(event, Held)
+                    for row in self.queue.started:
+                        if row.state == runqueue.RUNNING:
+                            row.step = ("held by the beam guard" if held and event.hold.guard
+                                        else "held" if held else "")
+                    self.queue_panel.refresh()
                 if isinstance(event, Held):
                     self.run_panel.caption.setText(event.hold.text)
                 self._refresh_actions()
@@ -2088,7 +2146,7 @@ class MainWindow(QMainWindow):
         # queue is submitted from here, and a window that had already re-enabled Acquire
         # would offer a button that the very next statement takes away again.
         if job is self._queue_job:
-            self._queue_step(job, result)
+            self._queue_ended(result)
         self._scan_if_put_off()
         self._refresh_actions()
         self._close_if_asked()
@@ -2115,7 +2173,7 @@ class MainWindow(QMainWindow):
         if job is self._plan_job:
             self._plan_job = None
         if job is self._queue_job:
-            self._row_finished(FAILED, message)
+            self._queue_ended(failed=message)
         self._scan_if_put_off()
         self._refresh_actions()
         self._close_if_asked()
@@ -2172,6 +2230,7 @@ class MainWindow(QMainWindow):
             lines = [f"{state}: {handle.label} (from {handle.origin or 'clockwork serve'})"
                      for state, handle in worker.others()]
         self.queue_panel.show_others(lines)
+        self._show_guard()
         self._scan_if_put_off()
         self._refresh_actions()
 
@@ -2253,10 +2312,19 @@ class MainWindow(QMainWindow):
         channel = self.enable_channel.text().strip()
         return Enable(box=box, channel=channel.upper()) if box and channel else None
 
+    def _own_queue_running(self) -> bool:
+        """Whether the job running is this window's queue: not merely submitted, since it
+        may wait behind another client's series, whose points are not its rows."""
+        return (self._queue_job is not None and self._job is self._queue_job
+                and self.queue.running)
+
     def _run_done(self, run: object) -> None:
         followed = self.followed
         if followed is not None and not followed.ended:
-            followed.run_done()
+            number = followed.run_done()
+            if self._own_queue_running() and number:
+                self.queue.run_done(number, run)  # type: ignore[arg-type]
+                self.queue_panel.refresh()
             self.follow.refresh()
         raw = getattr(run, "raw_path", "")
         summed = getattr(run, "summed_path", "")
@@ -2551,7 +2619,7 @@ class MainWindow(QMainWindow):
             return self._job is None
         if worker.status is None:
             return True
-        mine = worker.busy_mine() or self.queue.running
+        mine = worker.busy_mine() or self._queue_job is not None
         others = worker.others()
         hold = worker.hold
         if mine:
@@ -2568,9 +2636,7 @@ class MainWindow(QMainWindow):
                 self.run_panel.say("closing once the run has stopped and its files are "
                                    "closed", warn=True)
                 return False
-            # Left running: the queue is this window's and cannot outlive it.
-            if self.queue.running:
-                self.queue.cancel("the window was closed")
+            # Left running: a queue is the daemon's series job, and runs on (R9).
             return True
         if others:
             state, handle = others[0]

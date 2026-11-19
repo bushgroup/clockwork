@@ -45,7 +45,15 @@ from collections.abc import Callable, Sequence
 
 from PySide6.QtCore import QThread, Signal
 
-from ..acq import ConsoleConfig, ConsoleProcess, ConsoleSupervisor, Event, Snapshot, find_console
+from ..acq import (
+    BeamGuard,
+    ConsoleConfig,
+    ConsoleProcess,
+    ConsoleSupervisor,
+    Event,
+    Snapshot,
+    find_console,
+)
 from ..mips import Box, discover
 from ..owner import (
     FAKE_FRAME_HOLD_S,
@@ -72,7 +80,7 @@ from ..owner import (
     matches_wire,
     wire_fingerprint,
 )
-from ..owner.hold import Hold, HoldRefused
+from ..owner.hold import Guarding, Hold, HoldRefused
 from ..owner.interface import OwnerStatus, StaleHandle
 from ..owner.local import sentence
 from ..owner.remote import (
@@ -294,6 +302,13 @@ class Worker(_Signals):
         self._person(lambda: self.said.emit(
             f"note kept in {self.owner.note(text, by=by, client=PROGRAM)}"))
 
+    def guard(self, guard: BeamGuard | None, by: str) -> None:
+        """Arm, change or disarm the owner's beam guard; where the change was recorded
+        comes back as a `said` line (lab record, task 168)."""
+        self._person(lambda: self.said.emit(
+            f"beam guard change recorded in "
+            f"{self.owner.guard(guard, by=by, client=PROGRAM)}"))
+
     def _person(self, act: Callable[[], object]) -> None:
         try:
             act()
@@ -304,6 +319,11 @@ class Worker(_Signals):
     def hold(self) -> Hold | None:
         """A person's pause on the series running, asked for or in force."""
         return self.owner.status().hold
+
+    @property
+    def guarding(self) -> Guarding | None:
+        """The owner's beam guard, and who armed it, or None for none."""
+        return self.owner.status().guard
 
     @property
     def stopping(self) -> bool:
@@ -471,6 +491,11 @@ class RemoteWorker(_Signals):
         line."""
         self._inbox.put(("note", (text, by)))
 
+    def guard(self, guard: BeamGuard | None, by: str) -> None:
+        """Ask the daemon to arm, change or disarm its beam guard; where the change was
+        recorded comes back as a `said` line, and the guard itself in the status."""
+        self._inbox.put(("guard", (guard, by)))
+
     def shutdown_daemon(self, reason: str = "the window that started it is closing") -> None:
         """Ask the daemon to shut down: the run in flight ends after its repetition and
         fold, and the console, the boxes and the lock are let go."""
@@ -517,6 +542,12 @@ class RemoteWorker(_Signals):
         this window's or another's, since the pause is the daemon's."""
         status = self.status
         return status.hold if status is not None else None
+
+    @property
+    def guarding(self) -> Guarding | None:
+        """The daemon's beam guard and who armed it, or None for none."""
+        status = self.status
+        return getattr(status, "guard", None) if status is not None else None
 
     @property
     def console_alive(self) -> bool:
@@ -633,6 +664,10 @@ class RemoteWorker(_Signals):
                 elif what == "note":
                     text, by = value  # type: ignore[misc]
                     self.said.emit(f"note kept in {self.owner.note(str(text), by=str(by))}")
+                elif what == "guard":
+                    guard, by = value  # type: ignore[misc]
+                    where = self.owner.guard(guard, by=str(by))
+                    self.said.emit(f"beam guard change recorded in {where}")
             except DaemonRefused as exc:
                 # The daemon's own sentence: why nothing here can be paused, that nothing
                 # is paused, or that it is too old to know the command.

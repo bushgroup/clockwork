@@ -226,7 +226,16 @@ Three terms carry more than one sense and are given both in one entry: *table*, 
 - **Pause, hold.** A person's rest of a running series, asked for at the window after the point
   or the repetition in flight and lifted only by a person at the window. It is the daemon's
   state, so it outlives the window that asked for it, and an agent's tools read and note only
-  while it stands ([daemon protocol](daemon-protocol.md#a-persons-pause)).
+  while it stands ([daemon protocol](daemon-protocol.md#a-persons-pause)). The beam guard sets
+  one too, when it ends a file of a series.
+- **Beam guard.** The daemon's rule that a file whose repetitions count fewer ions than a floor,
+  a set number of times in a row, ends as failed, armed by a person at the window on every
+  acquisition. In a series or a run queue it then holds the series, and a person's Resume
+  acquires that point or row again, a retake, under the same planned index
+  ([daemon protocol](daemon-protocol.md#the-beam-guard)).
+- **Run queue.** The window's list of saved method documents, read and hashed at Start and run
+  by the daemon as one series, so that it outlives the window and leaves one run record
+  ([user guide](user-guide.md#the-run-queue)).
 - **Method.** The saved experiment a trainee loads: the strings each box needs in three phases, the
   acquisition settings, the order the boxes are started in, and the map from box name to serial
   port, as one flat TOML document. Its shape is

@@ -29,9 +29,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..acq import Event, Run, Snapshot
+from ..acq import BeamGuard, Event, Run, Snapshot
 from ..mips import BoxState, Discovery
-from .hold import POINT, Hold
+from .hold import POINT, Guarding, Hold
 from .jobs import Armed, ConsoleStatus, Job
 from .lock import Holder
 
@@ -39,6 +39,7 @@ __all__ = [
     "BoxStateRead",
     "ConsoleChanged",
     "Discovered",
+    "GuardChanged",
     "Handle",
     "Held",
     "JobFailed",
@@ -126,6 +127,9 @@ class OwnerStatus:
     """A person's pause on the series running: asked for, and once `hold.since` is set,
     in force; None for none (`clockwork.owner.hold`). While it is not None an agent's
     tools read and note only."""
+    guard: Guarding | None = None
+    """The beam guard the owner holds and who armed it, or None for none: every
+    acquisition watches it (lab record, task 168)."""
 
 
 class Owner(Protocol):
@@ -159,6 +163,13 @@ class Owner(Protocol):
     def note(self, text: str, *, by: str, client: str = "") -> str:
         """Keep a person's note: in the run record of the job running, or with nothing
         running in the day record. Answers where it went, in a few words."""
+        ...
+
+    def guard(self, guard: BeamGuard | None, *, by: str, client: str = "") -> str:
+        """Arm, change or disarm (None) the beam guard every acquisition watches, as a
+        person at the window: an intervention in the running job's record, or a line in
+        the day record with nothing running. Answers where it was recorded.
+        `HoldRefused`, with one sentence, for no initials."""
         ...
 
     def snapshot(self) -> Snapshot | None:
@@ -316,14 +327,21 @@ class PointStarted(Event):
     reference: str = ""
     sends: bool = True
     """False for a point the boxes already hold from the point before."""
+    retake: int = 0
+    """0 for a point's first attempt; 1 and on for each time it is acquired again from
+    its start after the beam guard ended it and a person resumed (B8, task 168)."""
+    name: str = ""
+    """A queue row's name, as `PlannedPoint.name`; empty for a plan's point."""
 
     @property
     def text(self) -> str:
-        what = (f"the {self.reference} reference" if self.reference
+        what = (self.name if self.name else f"the {self.reference} reference"
+                if self.reference
                 else ", ".join(f"{name} {value:g}" for name, value in self.knobs.items()))
         files = f"{self.replicates} file{'s' if self.replicates != 1 else ''}"
+        again = f", acquired again (retake {self.retake})" if self.retake else ""
         return (f"point {self.number} of {self.points} (planned {self.index}): "
-                f"{what or 'the defaults'}, {files} from position {self.position}"
+                f"{what or 'the defaults'}, {files} from position {self.position}{again}"
                 + ("" if self.sends else ", the boxes already holding it"))
 
 
@@ -400,6 +418,22 @@ class Noted(Event):
     @property
     def text(self) -> str:
         return f"note from {self.by} at the window, kept with the data: {self.note}"
+
+
+@dataclass(frozen=True, slots=True)
+class GuardChanged(Event):
+    """A person at the window armed, changed or disarmed the owner's beam guard while
+    this job ran; `guarding` is the guard now, None for none (lab record, task 168)."""
+
+    guarding: Guarding | None
+    by: str
+    client: str = ""
+
+    @property
+    def text(self) -> str:
+        if self.guarding is None:
+            return f"the beam guard is off, turned off by {self.by} at the window"
+        return f"the beam guard is {self.guarding.text}"
 
 
 @dataclass(frozen=True, slots=True)

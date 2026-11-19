@@ -35,10 +35,12 @@ from __future__ import annotations
 import datetime as _dt
 from dataclasses import dataclass
 
+from ..acq import BeamGuard
 from ..method import Method
 from .jobs import Job, SeriesJob
 
-__all__ = ["GRAINS", "POINT", "REPETITION", "Hold", "HoldRefused", "held", "now", "refusal"]
+__all__ = ["BEAM_GUARD", "GRAINS", "POINT", "REPETITION", "Guarding", "Hold", "HoldRefused",
+           "held", "now", "refusal"]
 
 POINT = "point"
 REPETITION = "repetition"
@@ -46,8 +48,13 @@ GRAINS = (POINT, REPETITION)
 """Where a pause rests its series: after the point in flight, or after the repetition."""
 
 
+BEAM_GUARD = "the beam guard"
+"""What a hold the guard set says in `Hold.by`: the owner's own, not a person's (B8)."""
+
+
 class HoldRefused(ValueError):
-    """A pause, a resume or a note the owner declined; the message is one sentence."""
+    """A pause, a resume, a note or a guard change the owner declined; the message is
+    one sentence."""
 
 
 def now() -> str:
@@ -76,18 +83,55 @@ class Hold:
     """When the series came to rest, local time; empty until it has."""
     where: str = ""
     """Where it rests, in words: `after point 3 of 12 (planned 7)`; empty until it has."""
+    beam_lost: str = ""
+    """For the hold the beam guard set when it ended a file (`by` is `BEAM_GUARD`), the
+    guard's sentence; empty for a person's (B8, lab record, task 168)."""
 
     @property
     def reached(self) -> bool:
         return bool(self.since)
 
     @property
+    def guard(self) -> bool:
+        """Whether this is the beam guard's hold, from which a person's Resume retakes
+        the point it ended."""
+        return self.by == BEAM_GUARD
+
+    @property
     def text(self) -> str:
+        if self.guard:
+            lost = f" ({self.beam_lost})" if self.beam_lost else ""
+            return (f"paused by the beam guard since {self.since or self.asked}, "
+                    f"{self.where or 'after the file it ended'}{lost}; a person's Resume "
+                    "acquires that point again from its start")
         who = f"{self.by} at the window" if self.by else "a person at the window"
         if self.reached:
             return f"paused by {who} since {self.since}, {self.where}"
         return (f"pause asked by {who} at {self.asked}: after this "
                 f"{'repetition' if self.grain == REPETITION else 'point'}")
+
+
+@dataclass(frozen=True, slots=True)
+class Guarding:
+    """The beam guard the owner holds, and who armed it: `OwnerStatus.guard`.
+
+    The owner's and not a front end's (R9, B8; lab record, task 168): armed, changed
+    and disarmed only by a person at the window, on whatever is running or with nothing
+    running, and applied to every acquisition the owner makes until it is disarmed or
+    the owner ends. A trip ends the file in flight as failed; inside a series or a queue
+    it then holds the series for a person (`Hold.guard`), and a lone acquisition simply
+    ends, since it has nothing to hold (B2)."""
+
+    guard: BeamGuard
+    by: str
+    """The initials of the person who armed it, or last changed it."""
+    client: str = ""
+    since: str = ""
+    """When it was armed or last changed, local time."""
+
+    @property
+    def text(self) -> str:
+        return f"armed by {self.by} at {self.since}: {self.guard.text}"
 
 
 def refusal(job: Job | None, grain: str, *, number: int = 0,
@@ -128,6 +172,10 @@ def refusal(job: Job | None, grain: str, *, number: int = 0,
 
 def held(hold: Hold) -> str:
     """The one sentence a tool refuses with while `hold` stands (B7)."""
+    if hold.guard:
+        return (f"job {hold.job} is {hold.text}. Only a person at the window resumes or "
+                "stops it; until then this route reads and notes only, and nothing here "
+                "resumes, retakes or works around the guard")
     return (f"job {hold.job} is {hold.text}. Only a person at the window resumes or "
             "stops it; until then this route reads and notes only, and nothing here "
             "pauses, resumes or works around a pause")

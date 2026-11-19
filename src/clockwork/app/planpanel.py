@@ -249,6 +249,15 @@ class FollowedPoint:
     state: str = WAITING
     files: int = 0
     warnings: int = 0
+    name: str = ""
+    """A queue row's name, shown in place of knobs; empty for a plan's point."""
+    retakes: int = 0
+    """How many times the beam guard's hold had it acquired again (B8)."""
+
+    @property
+    def what(self) -> str:
+        """The point in words: a row's name, or its knobs."""
+        return self.name or knob_text(self.knobs, self.reference)
 
 
 @dataclass
@@ -307,7 +316,8 @@ class FollowedSeries:
         client that started it, empty for this window."""
         points = [FollowedPoint(index=point.index, knobs=dict(point.knobs),
                                 replicates=point.replicates, reference=point.reference,
-                                minutes=getattr(point, "minutes", None))
+                                minutes=getattr(point, "minutes", None),
+                                name=getattr(point, "name", ""))
                   for point in getattr(job, "points", ())]
         person = getattr(job, "at_window", "")
         who = origin or "this window"
@@ -320,26 +330,34 @@ class FollowedSeries:
     def point(self) -> FollowedPoint | None:
         return self.points[self.current] if self.current is not None else None
 
-    def point_started(self, number: int) -> None:
+    def point_started(self, number: int, retake: int = 0) -> None:
         """Point `number` (its place in the order acquired, from 1) has begun; the one
-        before it, if still running, ended with every file it was asked for."""
-        if self.point is not None and self.point.state == RUNNING:
+        before it, if still running, ended with every file it was asked for. A retake,
+        after the beam guard ended one of its files, begins its files again."""
+        if (self.point is not None and self.point.state == RUNNING
+                and self.current != number - 1):
             self.point.state = DONE
         if 1 <= number <= len(self.points):
             self.current = number - 1
-            self.points[self.current].state = RUNNING
+            point = self.points[self.current]
+            point.state = RUNNING
+            if retake:
+                point.files, point.retakes = 0, retake
 
-    def run_done(self) -> None:
+    def run_done(self) -> int:
         """One file written: the first point, in the order acquired, without all its files.
 
         Counted by order rather than against the point in flight, because a file comes as a
         signal and a point's start through the mailbox, and the two can arrive out of order
         (the full suite caught a file credited to the point after its own). A series' files
-        come in that order, each point's replicates whole, until a stop or a failure ends it."""
-        for point in self.points:
+        come in that order, each point's replicates whole, until a stop or a failure ends it.
+        The point credited, as its place from 1, or 0 for none; a file the beam guard
+        ended is credited to its point and a retake's `point_started` counts again."""
+        for number, point in enumerate(self.points, start=1):
             if point.files < point.replicates:
                 point.files += 1
-                return
+                return number
+        return 0
 
     def warned(self) -> None:
         if self.point is not None:
@@ -398,7 +416,7 @@ class FollowedSeries:
         where = "between points"
         if point is not None:
             where = (f"point {self.current + 1} of {len(self.points)} (planned "
-                     f"{point.index}), {knob_text(point.knobs, point.reference)}, file "
+                     f"{point.index}), {point.what}, file "
                      f"{min(point.files + 1, point.replicates)} of {point.replicates}")
         paused = f"; {self.hold.text}" if self.hold is not None else ""
         return (f"{head}: {where}; about {_minutes(self.minutes_left)} minutes left"
@@ -454,7 +472,8 @@ class SeriesFollow(QWidget):
             state = series.shown(number - 1)
             item = QTreeWidgetItem([
                 str(number), str(point.index), state,
-                knob_text(point.knobs, point.reference),
+                point.what + (f" (acquired again x{point.retakes})" if point.retakes
+                              else ""),
                 f"{point.files} of {point.replicates}", _minutes(point.minutes),
                 str(point.warnings) if point.warnings else ""])
             if point.state == RUNNING:

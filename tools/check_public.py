@@ -3920,10 +3920,11 @@ def main() -> int:
     )
 
     section("the run queue")
-    # Task 53. `clockwork.app.runqueue` is the whole of what an unattended series
-    # decides -- which row runs next, what a row's outcome says in the morning, and when
-    # a failure ends the night -- and it imports no Qt, so a clone with no display
-    # checks the rules the table draws. The table itself is `tests/test_app.py`.
+    # Task 53, and since lab record task 168 the owner's series job: `clockwork.app.
+    # runqueue` is what a started queue writes back onto its rows -- which row each file
+    # is, what a row's outcome says in the morning, which rows a stop or a failure left
+    # unrun -- and it imports no Qt, so a clone with no display checks the rules the
+    # table draws. The table itself is `tests/test_app_queue.py`.
     from clockwork.app import runqueue
 
     queue = runqueue.RunQueue([
@@ -3933,44 +3934,30 @@ def main() -> int:
         "a queue names its rows by their document rather than by their path",
         [row.name for row in queue.rows] == ["blank", "sample", "wash"],
     )
+    queue.start(queue.begin())
     check_true(
-        "Start takes the first waiting row, and the row in flight can then be neither "
-        "removed nor moved: its strings are already on the wire",
-        queue.begin() is queue.rows[0] and not queue.remove(0)
-        and queue.move(0, 1) == 0,
+        "a started queue is a snapshot: no row can then be removed, moved or randomized",
+        not queue.remove(0) and queue.move(2, -1) == 2
+        and [row.name for row in queue.rows] == ["blank", "sample", "wash"],
     )
+    queue.request_id = "260918-120000-abcdef"
+    queue.point_started(1)
     check_true(
-        "a waiting row may be brought forward to just behind the row in flight and no "
-        "further, the positions before it having been run or skipped",
-        queue.move(2, -1) == 1 and queue.move(1, -1) == 1,
-    )
-    check_true(
-        "a failed row ends the series and the rest carry the reason they did not run",
-        queue.finish(runqueue.FAILED, "TBLSTRT was refused") is False
-        and queue.advance() is None
+        "a failed row ends the queue and the rest carry the reason they did not run, "
+        "and the next Start runs them as a queue naming this one",
+        queue.failed("TBLSTRT was refused") is None
         and [row.state for row in queue.rows] == [
             runqueue.FAILED, runqueue.SKIPPED, runqueue.SKIPPED]
-        and "failed" in queue.rows[1].problem,
+        and "failed" in queue.rows[1].problem
+        and queue.follows == "260918-120000-abcdef"
+        and [row.name for row in queue.begin()] == ["sample", "wash"],
     )
-    going_on = runqueue.RunQueue([
-        runqueue.QueueRow(method_path="a.toml", go_on=True),
-        runqueue.QueueRow(method_path="b.toml")])
-    going_on.begin()
     check_true(
-        "a row that says go on is walked past instead, because a series of independent "
-        "samples should not lose the night to one of them",
-        going_on.finish(runqueue.FAILED, "the console would not start") is True
-        and going_on.advance() is going_on.rows[1],
-    )
-    stopping = runqueue.RunQueue([runqueue.QueueRow(method_path="a.toml"),
-                                  runqueue.QueueRow(method_path="b.toml")])
-    stopping.begin()
-    stopping.cancel("stopped by the operator")
-    check_true(
-        "Stop skips everything that has not started and leaves the row in flight "
-        "running, which is what ending after the current repetition and its fold means",
-        stopping.rows[0].state == runqueue.RUNNING
-        and stopping.rows[1].state == runqueue.SKIPPED,
+        "a queue file no longer writes the retired setup and go-on keys, and opens one "
+        "that has them with both ignored",
+        "go_on" not in runqueue.dumps(queue)
+        and runqueue.loads("schema_version = 1\n[[rows]]\nmethod = 'a.toml'\n"
+                           "setup = false\ngo_on = true\n").ignored == 1,
     )
 
     queued_method = method_module.from_dict({
@@ -4032,21 +4019,26 @@ def main() -> int:
         and gave_up.problem == "3 frames in a row failed"
         and "stopped:" not in gave_up.outcome,
     )
-    lost_beam = runqueue.RunQueue([
-        runqueue.QueueRow(method_path="a.toml", go_on=True),
-        runqueue.QueueRow(method_path="b.toml")])
-    tripped = lost_beam.begin()
+    lost_beam = runqueue.RunQueue([runqueue.QueueRow(method_path="a.toml")])
+    lost_beam.start(lost_beam.begin())
     reason = "the beam was lost: 5 repetitions in a row read under 2.8e+05 ions"
-    state = runqueue.outcome_of(tripped, [dataclasses.replace(
-        queued_run("260918_QQ_004", stopped=reason), stop_asked=False,
-        beam_lost=reason)])
+    lost = dataclasses.replace(queued_run("260918_QQ_004", stopped=reason),
+                               stop_asked=False, beam_lost=reason)
+    retaken = queued_run("260918_QQ_006")
+    lost_beam.point_started(1)
+    lost_beam.run_done(1, lost)
+    lost_beam.point_started(1, retake=1)
+    lost_beam.run_done(1, retaken)
+    lost_beam.ended([lost, retaken], [1, 1], replaced=["260918_QQ_004"])
+    tripped = lost_beam.rows[0]
     check_true(
-        "a row the beam guard ended has failed rather than stopped, and ends the series "
-        "even where it says go on, because every later row needs the same source "
-        "(lab record, task 134)",
-        state == runqueue.FAILED and lost_beam.finish(state) is False
-        and lost_beam.rows[1].state == runqueue.SKIPPED
-        and reason in tripped.outcome,
+        "a row the beam guard ended and a person's Resume acquired again is judged on "
+        "its own files, the replaced one named in its outcome (lab record, task 168)",
+        runqueue.outcome_of(runqueue.QueueRow(method_path="a.toml"), [lost])
+        == runqueue.FAILED
+        and tripped.state == runqueue.DONE and tripped.stems == ("260918_QQ_006",)
+        and tripped.replaced == ("260918_QQ_004",)
+        and "260918_QQ_004" in tripped.outcome,
     )
     shuffled = runqueue.RunQueue(
         [runqueue.QueueRow(method_path="blank.toml", stays_first=True)]

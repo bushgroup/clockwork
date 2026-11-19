@@ -436,7 +436,9 @@ def test_a_queue_row_run_through_the_daemon_is_done(
     # The daemon began the row's run record, with the person at the window in it
     # (lab record, task 165).
     from clockwork.record import load
-    data = load(str(tmp_path / f"{row.stems[0]}.request.json"))
+    # One Start of the queue is one request; its record is named for the queue's start.
+    [name] = [name for name in os.listdir(tmp_path) if name.endswith(".request.json")]
+    data = load(str(tmp_path / name))
     assert data["request"]["source"] == "window"
     assert data["request"]["at_window"] == "ZZ"
     assert [entry["stem"] for entry in data["files"]] == list(row.stems)
@@ -582,3 +584,100 @@ def test_stop_then_close_ends_a_paused_series_where_it_rests(
     made.close()
     qtbot.waitUntil(lambda: not made.isVisible(), timeout=120_000)
     assert len(stopped) == 1 and claude.status().hold is None
+
+
+# -- the queue and the guard in the daemon (lab record, task 168) ---------------------------
+
+
+def queue_window(qtbot, daemon, claude, tmp_path) -> MainWindow:
+    """A window on the daemon, its folder, initials and instrument set and its rack built."""
+    idle_daemon(qtbot, claude)
+    made = remote_window(qtbot, daemon.endpoint)
+    made.output_dir.setText(str(tmp_path))
+    made.initials.setText("ZZ")
+    made._initials_changed()
+    instrument = str(tmp_path / "instrument.toml")
+    instrument_module.save(make_instrument(), instrument)
+    made._load_instrument(instrument)
+    qtbot.waitUntil(lambda: made._job is None and made.worker.status is not None
+                    and made.worker.status.issued == 2
+                    and made.worker.status.running is None, timeout=30_000)
+    made.worker.submit(Discover(method=make_method()))
+    qtbot.waitUntil(lambda: made._job is None and bool(made.worker.boxes)
+                    and made.worker.console_alive, timeout=60_000)
+    return made
+
+
+def test_a_queue_outlives_the_window_that_started_it(
+        qtbot, scratch_settings, daemon, claude, tmp_path):
+    """R9: the queue is the daemon's series job. Closing the window over it, leaving it
+    running, loses no row: the daemon acquires both and writes the whole record."""
+    made = queue_window(qtbot, daemon, claude, tmp_path)
+    for name, method in (("long", make_method(frames=2, accumulations=4)),
+                         ("after", make_method())):
+        path = str(tmp_path / f"{name}.toml")
+        method_module.save(method, path)
+        made.queue.add(runqueue.QueueRow(method_path=path))
+    made.queue_panel.refresh()
+    job = made.start_queue()
+    qtbot.waitUntil(lambda: made._job is job, timeout=60_000)
+    made.worker.spawned = Started()
+    stopped: list[str] = []
+    made.worker.shutdown_daemon = lambda reason="": stopped.append(reason)
+    made._ask_close = lambda: "leave"
+    made.close()
+    assert not made.isVisible() and stopped == []
+    from clockwork.record import load
+
+    def record() -> dict:
+        names = [name for name in os.listdir(tmp_path) if name.endswith(".request.json")]
+        return load(str(tmp_path / names[0])) if names else {}
+
+    # The record, not the status: the daemon is idle a moment before its last entry is in.
+    qtbot.waitUntil(lambda: len(record().get("files", [])) == 2, timeout=240_000)
+    record = record()
+    assert record["request"]["source"] == "window"
+    assert [row["name"] for row in record["plans"][0]["rows"]] == ["long", "after"]
+    assert len(record["files"]) == 2 and all(entry["complete"]
+                                             for entry in record["files"])
+
+
+def test_the_guard_armed_at_the_window_holds_an_agents_series_and_resume_retakes(
+        qtbot, scratch_settings, daemon, claude, tmp_path):
+    """B8 through the daemon: an agent's series running, a person arms the guard at the
+    window; the beam is lost, the series is held by the guard, the agent's client reads
+    the hold and cannot lift it, and the window's Resume acquires the point again."""
+    from dataclasses import replace
+
+    from clockwork.acq import BeamGuard
+    from clockwork.owner import JobFinished
+    from test_daemon import ended as job_end
+    from test_plan_runner import PLAN, window_check, window_job
+    from test_series import TWO_KNOBS
+
+    made = queue_window(qtbot, daemon, claude, tmp_path)
+    library = tmp_path / "library"
+    library.mkdir()
+    (library / "two-knob.toml").write_text(TWO_KNOBS, encoding="utf-8")
+    plan = tmp_path / "plan.toml"
+    plan.write_text(PLAN, encoding="utf-8")
+    job = replace(window_job(window_check(str(plan), str(library)), tmp_path),
+                  source="", at_window="", plan="", plan_path="")
+    claude.submit(Discover(method=job.points[0].method))
+    handle = claude.submit(job)
+    made.run_panel.at_window.setText("MB")
+    qtbot.waitUntil(lambda: claude.status().running == handle, timeout=60_000)
+    made._ask_guard = lambda current: (BeamGuard(floor=1000.0, repetitions=1),)
+    made.queue_guard()
+    qtbot.waitUntil(lambda: made.worker.guarding is not None, timeout=10_000)
+    assert claude.status().guard.by == "MB"
+    daemon.server.owner.console.fake.beam = [0.0]
+    qtbot.waitUntil(lambda: claude.status().hold is not None
+                    and claude.status().hold.reached, timeout=120_000)
+    hold = claude.status().hold
+    assert hold.guard and hold.job == handle.id
+    made.resume()
+    finished = job_end(claude, handle, timeout=240)
+    assert isinstance(finished, JobFinished)
+    result = finished.result
+    assert len(result.replaced) == 1 and result.points_done == len(job.points)

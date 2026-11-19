@@ -155,6 +155,10 @@ the plan cut, before anyone is asked to run it.
 
 ## At the window
 
+The window's run queue is acquired by the same job: its points are saved method documents rather
+than a template at knob values, read and hashed when the person presses Start, and its files stamp
+a series identifier, index, position and seed as a plan's do ([user guide](user-guide.md#the-run-queue)).
+
 To run a plan an agent wrote, or one written by hand, a person opens it in the window's queue dock
 with Open plan… and starts it there. The window checks the plan as the `series` tool does with
 `check` true and shows the answer as a table: each point in planned order with its knob values,

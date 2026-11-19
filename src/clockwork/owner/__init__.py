@@ -11,7 +11,8 @@ it never imports Qt (enforced by `tests/test_architecture.py` and
     local.py      `LocalOwner`: the queue, the thread, every wire call, in this process
     keeper.py     `RecordKeeper`: each file a request's job writes, entered in its run
                   record by the owner that wrote it
-    hold.py       a person's pause on a running series: the `Hold`, when one may be
+    hold.py       a pause on a running series, a person's or the beam guard's, and the
+                  guard the owner holds: the `Hold`, when one may be
                   asked for, and the sentence an agent's tools refuse with meanwhile
     lock.py       the instrument lock: one owner per user, refused before any port
     wire.py       every job, event and result to and from JSON-ready data
@@ -28,11 +29,12 @@ record, task 68).
 
 from __future__ import annotations
 
-from .hold import GRAINS, POINT, REPETITION, Hold, HoldRefused
+from .hold import BEAM_GUARD, GRAINS, POINT, REPETITION, Guarding, Hold, HoldRefused
 from .interface import (
     BoxStateRead,
     ConsoleChanged,
     Discovered,
+    GuardChanged,
     Handle,
     Held,
     JobFailed,
@@ -104,6 +106,9 @@ __all__ = [
     "Handle",
     "Held",
     "Hello",
+    "BEAM_GUARD",
+    "GuardChanged",
+    "Guarding",
     "Hold",
     "HoldRefused",
     "Holder",

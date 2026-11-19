@@ -168,9 +168,9 @@ relative to the output directory, unless it is absolute.
 | | `snapshot_boxes` | `note`, `directory` | Every box read back with getters only, its settings and its controller's health (uptime, the cause of the last reset, the failed bus transfers, its threads, its DC power, its last error), written to a send log, a transcript and a JSON file under one stem ([command line](command-line.md#a-snapshot-of-the-boxes)) |
 | Acquisition | `acquire` | as `arm` without `setup` and `conditions`, plus `replicates` | A job number, at once; the run proceeds on the owner |
 | | `series` | `request`, `initials`, `plan`, `conditions`, `setup`, `request_id`, `check` | A job number, at once, with the seed, the order drawn, the counts and the minutes; the daemon arms and acquires every point of the [series plan](series-file-format.md). With `check`, each point's repetitions and minutes and nothing sent |
-| | `progress` | `job`, `after`, `wait_s` | The job's events since number `after`, how many files are done of how many were asked for, whether it is done, and `paused` while a person has paused it |
+| | `progress` | `job`, `after`, `wait_s` | The job's events since number `after`, how many files are done of how many were asked for, whether it is done, `paused` while a person or the beam guard has paused it, and the beam guard in force |
 | | `stop` | `reason` | Whether a run was in flight; it ends after its current repetition and fold. Refused while a person has paused the run |
-| | `status` | none | Simulated or real, the console, the boxes, the running and queued jobs, a person's pause on the running series if there is one, the method the boxes were last armed with, why sends are refused if they are, the limits in force and the acquisitions the daemon session has made |
+| | `status` | none | Simulated or real, the console, the boxes, the running and queued jobs, a person's or the beam guard's pause on the running series if there is one, the beam guard if a person has armed one, the method the boxes were last armed with, why sends are refused if they are, the limits in force and the acquisitions the daemon session has made |
 | | `note` | `request_id`, `text` | Adds one note to the request's run record |
 | | `verdict` | `path`, `verdict`, `initials`, `words` | Records a person's verdict on one run (`worked`, `no_signal`, `saturated`, `wrong_sample` or `other`) in its run record, beginning a record for a run that has none |
 | Data | `list_files` | `directory` (optional) | Each run's files with sizes and times, its logs, the request it served, and whether its summed file was written |
@@ -278,6 +278,17 @@ Only a series can be paused. A request acquired with `acquire` is one job of one
 for which Stop is the person's only intervention, whereas a request acquired with `series` can be
 held at any point. A session that expects a person to intervene therefore runs the request as a
 series.
+
+A person at the window may also arm the beam guard, which watches every acquisition, a session's
+included ([daemon protocol](daemon-protocol.md#the-beam-guard)). `status` and `progress` report it
+under `beam_guard`: the floor in ions a repetition, how many repetitions in a row under it end a
+file, where the floor came from, and who armed it when; null when it is off. No tool arms, changes
+or turns it off. When it ends a file of a series, the series is paused by the guard: `paused`
+names `the beam guard` as `by`, and the tools behave as under a person's pause. A person's Resume
+then acquires that point again from its start, as new files under the same planned index, which
+`progress` shows as a `PointStarted` event with `retake` 1 and the run record lists under
+`retakes`. A file the guard ends in a request acquired with `acquire` ends that job, its file
+`failed` with the guard's sentence, and nothing is held.
 
 A person can also type a note at the window while a session's run is in flight. The daemon keeps
 the note in the run's record under the person's initials and adds a `Noted` event to the job, so

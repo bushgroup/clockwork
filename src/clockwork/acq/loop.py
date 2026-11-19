@@ -2434,7 +2434,7 @@ def run_acquisition(
     stop: Callable[[], str | None] | None = None,
     hold: Callable[[int, int], str | None] | None = None,
     recover: Callable[[], TofWidth] | None = None,
-    beam_guard: BeamGuard | None = None,
+    beam_guard: BeamGuard | Callable[[], BeamGuard | None] | None = None,
     clock: Callable[[], float] = time.perf_counter,
 ) -> Run:
     """Acquire everything one method asks for, into one pair of files.
@@ -2582,7 +2582,10 @@ def run_acquisition(
     134). The difference is whose decision it is. A stop is the caller's and the file
     says `stopped`; a trip is the run's own finding that what it acquires is not the
     experiment, so the file says `failed` with the guard's sentence, and `Run.beam_lost`
-    carries it as well as `Run.stopped_early`.
+    carries it as well as `Run.stopped_early`. A callable in its place is asked for the
+    guard at every repetition, None for none, so that a guard armed, changed or
+    disarmed while the run acquires applies from the next repetition, its count begun
+    again (the daemon's guard, lab record, task 168).
 
     Returns a `Run` describing what happened, including the frames that did not work: an
     empty frame, a console error and a frame that never ended are outcomes recorded
@@ -2934,7 +2937,11 @@ class _Loop:
     recover: Callable[[], TofWidth] | None = None
     """Restart the console and open its chain again, returning the new chain's width;
     None where nothing in reach can (`run_acquisition`'s `recover`)."""
-    beam_guard: BeamGuard | None = None
+    beam_guard: BeamGuard | Callable[[], BeamGuard | None] | None = None
+    """The guard, or a callable asked for it at every repetition (`run_acquisition`)."""
+    _guard_seen: BeamGuard | None = None
+    """The guard the count under the floor was made against: one changed while the run
+    acquires starts the count again."""
 
     start_step_gap: float = START_STEP_GAP_S
     row_settle: float = ROW_SETTLE_S
@@ -3111,7 +3118,10 @@ class _Loop:
         the run ends as the loop's own decision, so its file says `failed` with the
         guard's sentence rather than `stopped` (`outcome`, `BeamGuard`).
         """
-        guard = self.beam_guard
+        guard = self.beam_guard() if callable(self.beam_guard) else self.beam_guard
+        if guard != self._guard_seen:
+            self._under_floor.clear()
+            self._guard_seen = guard
         if guard is None or self.stopped_early is not None or not self.frames:
             return
         record = self.frames[-1]

@@ -1,16 +1,14 @@
 """The table an unattended series is written in, and the buttons that edit it.
 
 The widget half of the run queue (lab record, task 53). `clockwork.app.runqueue` holds
-the rows and the rules; this draws them, lets a trainee edit the ones that have not
-started, and emits what it cannot do itself. It holds no worker and submits no job: the
-window is the sequencer.
+the rows and the rules; this draws them, lets a person edit them while nothing runs, and
+emits what it cannot do itself. It holds no worker and submits no job: the window hands
+the started queue to the owner as one series job (lab record, task 168).
 
-**Editable while running, and the running row is not.** The point of the queue is that a
-trainee can add tomorrow's samples to it at ten o'clock while the eight o'clock row is
-still acquiring, so every waiting row's note, replicate count and two flags stay
-editable throughout. The row in flight does not: its values were read when it started
-and were on the wire before the edit, so an editable cell would be a promise the
-sequencer cannot keep.
+**A running queue is a snapshot, and is not edited** (F1). Start read every row's
+document and the owner holds what it read, so a cell edited afterwards would be a
+promise the queue cannot keep. To change course, Stop, edit, and Start the rows not yet
+run, which is a new queue whose record names the first.
 
 **The whole table is rebuilt on every change.** A dozen rows of seven columns is nothing
 to redraw, and the alternative -- keeping widget state in step with a model that a
@@ -24,10 +22,12 @@ does to the rows is `RunQueue.randomize`, and the window applies it, asks before
 replacing passes that exist, and writes the seed and order to the run log. The `pass`
 column is shown only once a queue has passes.
 
-**The beam guard is armed here and kept by the window** (lab record, task 134). The
-dialog takes a floor typed in or worked out from a run picked off disk, and how many
-repetitions in a row under it end a run; the button says whether it is armed, so a
-trainee leaving the rack reads it there.
+**The beam guard is armed here and kept by the owner** (lab record, tasks 134 and 168).
+The dialog takes a floor typed in or worked out from a run picked off disk, and how many
+repetitions in a row under it end a run; the window sends it to the owner, which every
+acquisition then watches whoever started it, and the button says what the owner holds,
+so a person leaving the rack reads it there. It is never greyed by a running job: a
+person may arm it on any client's series or queue.
 """
 
 from __future__ import annotations
@@ -58,6 +58,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..acq import GUARD_FRACTION, GUARD_REPETITIONS, BeamGuard, from_run
+from ..owner.hold import Guarding
 from .runqueue import (
     DONE,
     FAILED,
@@ -70,23 +71,21 @@ from .runqueue import (
 
 __all__ = ["HEADINGS", "BeamGuardDialog", "QueuePanel", "RandomizeDialog"]
 
-HEADINGS = ("", "pass", "state", "method", "sample or conditions", "reps", "setup",
-            "stays first", "go on if it fails", "outcome")
+HEADINGS = ("", "pass", "state", "method", "sample or conditions", "reps",
+            "stays first", "outcome")
 
 PASS_COLUMN = 1
 STATE_COLUMN = 2
 METHOD_COLUMN = 3
 CONDITIONS_COLUMN = 4
 REPLICATES_COLUMN = 5
-SETUP_COLUMN = 6
-STAYS_FIRST_COLUMN = 7
-GO_ON_COLUMN = 8
-OUTCOME_COLUMN = 9
+STAYS_FIRST_COLUMN = 6
+OUTCOME_COLUMN = 7
 
 EDITABLE = (CONDITIONS_COLUMN, REPLICATES_COLUMN)
 """The two columns a trainee types into. The method is a document, chosen with a
-picker rather than typed, because a path typed wrong is a row that fails at three in
-the morning; the three flags are check boxes; the rest is what the queue reports."""
+picker rather than typed, because a path typed wrong is a queue that will not start;
+"stays first" is a check box; the rest is what the queue reports."""
 
 STRETCH_COLUMN = OUTCOME_COLUMN
 """The column that absorbs the width left over. The outcome is the longest thing in
@@ -96,9 +95,11 @@ one whose tail a trainee can afford to read in the tooltip."""
 
 GUARD_OFF = "Beam guard: off…"
 GUARD_ON = "Beam guard: armed…"
-GUARD_TIP = ("Stop the queue when the beam is lost: a run whose repetitions read under a "
-             "floor of ions, several in a row, ends after the current repetition, its "
-             "row fails and the rows after it are skipped.")
+GUARD_TIP = ("Hold whatever is running when the beam is lost: a file whose repetitions "
+             "read under a floor of ions, several in a row, ends after the current "
+             "repetition and says failed; a queue or series then waits, paused by the "
+             "guard, until a person resumes it, and Resume acquires that row or point "
+             "again. Kept by clockwork serve, so it watches every client's runs.")
 
 
 class QueuePanel(QWidget):
@@ -123,15 +124,17 @@ class QueuePanel(QWidget):
     open_requested = Signal()
     """Save the queue to a file, or replace it with one. The dialogs are the window's."""
     guard_requested = Signal()
-    """Arm, change or disarm the beam guard. The window asks and keeps it."""
+    """Arm, change or disarm the beam guard. The window asks; the owner keeps it."""
 
     def __init__(self, queue: RunQueue, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.queue = queue
         self._busy = False
-        """Whether the worker has a job of its own in flight. A queue cannot be started
-        on top of a send or an acquisition a trainee pressed by hand: they are the same
-        worker, and the queue's first act is to arm the boxes."""
+        """Whether the owner has a job in flight. A queue cannot be started on top of a
+        send or an acquisition: one owner runs one job at a time, and a queue's first
+        act is to arm the boxes."""
+        self.guarding: Guarding | None = None
+        """The owner's beam guard as the window last read it, for the button."""
         self._rebuilding = False
         """`itemChanged` fires while the tree is being filled, and a row written back
         from a half-built item would overwrite the model with the widget's defaults."""
@@ -208,13 +211,15 @@ class QueuePanel(QWidget):
                                "opens waiting: the file is a plan, not a record."),
             (self.save_button, "Save the rows, their passes and the seed to a file, to "
                                "run the same series again."),
-            (self.start_button, "Run every waiting row in order on the one worker: the "
-                                "row's method, sent, then its replicates, then the "
-                                "next row. A failed row ends the series unless it says "
-                                "to go on."),
-            (self.stop_button, "End the series after the current repetition and its "
+            (self.start_button, "Read every waiting row's method now and hand the "
+                                "whole queue to clockwork serve as one series: each "
+                                "row sent where the boxes do not hold it, then its "
+                                "replicates. It runs on if this window closes, and a "
+                                "failed row ends it."),
+            (self.stop_button, "End the queue after the current repetition and its "
                                "fold. The row in flight keeps the files it has "
-                               "written; everything after it is skipped."),
+                               "written; the rows after it are skipped, and Start runs "
+                               "them as a new queue."),
         ):
             button.setToolTip(tip)
         self.add_button.clicked.connect(lambda: self.add_requested.emit())
@@ -278,17 +283,15 @@ class QueuePanel(QWidget):
         item.setTextAlignment(REPLICATES_COLUMN,
                               Qt.AlignmentFlag.AlignRight
                               | Qt.AlignmentFlag.AlignVCenter)
-        item.setCheckState(SETUP_COLUMN, _checked(row.setup))
         item.setCheckState(STAYS_FIRST_COLUMN, _checked(row.stays_first))
-        item.setCheckState(GO_ON_COLUMN, _checked(row.go_on))
 
-        # A row that has run, and the row in flight, are a record rather than a form:
-        # editing either would describe an experiment that has already happened. The
-        # flags are set after the check states, because `setCheckState` turns
-        # `ItemIsUserCheckable` on by itself.
+        # A row that has run is a record rather than a form, and a running queue's rows
+        # are its snapshot: editing either would describe an experiment that is not the
+        # one acquired. The flags are set after the check state, because
+        # `setCheckState` turns `ItemIsUserCheckable` on by itself.
         settable = (Qt.ItemFlag.ItemIsEditable | Qt.ItemFlag.ItemIsUserCheckable)
         flags = item.flags() & ~settable
-        if row.state not in (RUNNING, DONE, FAILED, STOPPED):
+        if not self.queue.running and row.state not in (RUNNING, DONE, FAILED, STOPPED):
             flags |= settable
         item.setFlags(flags)
         if row.state == RUNNING:
@@ -317,22 +320,29 @@ class QueuePanel(QWidget):
         muted.setAlpha(140)
         return muted
 
-    def _refresh_caption(self) -> None:
-        guard = self.queue.guard
-        self.guard_button.setText(GUARD_ON if guard is not None else GUARD_OFF)
+    def show_guard(self, guarding: Guarding | None) -> None:
+        """The owner's beam guard, as the button says it."""
+        self.guarding = guarding
+        self.guard_button.setText(GUARD_ON if guarding is not None else GUARD_OFF)
         self.guard_button.setToolTip(
-            f"Armed: {guard.text}. {GUARD_TIP}" if guard is not None else GUARD_TIP)
+            f"{guarding.text[:1].upper()}{guarding.text[1:]}. {GUARD_TIP}"
+            if guarding is not None else GUARD_TIP)
+
+    def _refresh_caption(self) -> None:
         if not self.queue.rows:
             self.caption.setText(
                 "Nothing queued. Add methods here to run a series of samples or "
-                "conditions unattended: each row is sent and acquired in turn on the "
-                "one worker, and Stop ends the series after the current repetition.")
+                "conditions unattended: Start reads them all and clockwork serve runs "
+                "them in turn, and Stop ends the queue after the current repetition.")
             return
         if self.queue.running:
-            current = self.queue.current
-            where = f"row {self.queue.index + 1} of {len(self.queue.rows)}"
-            name = current.name if current is not None else "between rows"
-            self.caption.setText(f"running {where}: {name}")
+            current = next((number for number, row in enumerate(self.queue.started, 1)
+                            if row.state == RUNNING), 0)
+            where = (f"row {current} of {len(self.queue.started)}" if current
+                     else "between rows")
+            record = (f", request {self.queue.request_id}" if self.queue.request_id
+                      else "")
+            self.caption.setText(f"running in clockwork serve, {where}{record}")
         else:
             passes = (f" in {self.queue.passes} randomized passes"
                       if self.queue.passes else "")
@@ -341,8 +351,9 @@ class QueuePanel(QWidget):
 
     def _refresh_buttons(self) -> None:
         running = self.queue.running
-        selected = self.selection()
-        editable = [index for index in selected if index != self.queue.index]
+        editable = [] if running else self.selection()
+        self.add_button.setEnabled(not running)
+        self.add_open_button.setEnabled(not running)
         self.remove_button.setEnabled(bool(editable))
         self.reset_button.setEnabled(bool(editable))
         self.up_button.setEnabled(len(editable) == 1)
@@ -353,7 +364,6 @@ class QueuePanel(QWidget):
         self.randomize_button.setEnabled(
             not running and not self._busy and bool(self.queue.template()))
         self.open_button.setEnabled(not running)
-        self.guard_button.setEnabled(not running)
         self.save_button.setEnabled(bool(self.queue.rows))
 
     def show_others(self, lines: list[str]) -> None:
@@ -386,7 +396,7 @@ class QueuePanel(QWidget):
         if self._rebuilding:
             return
         index = self.tree.indexOfTopLevelItem(item)
-        if not 0 <= index < len(self.queue.rows) or index == self.queue.index:
+        if not 0 <= index < len(self.queue.rows) or self.queue.running:
             return
         row = self.queue.rows[index]
         self._rebuilding = True
@@ -397,10 +407,6 @@ class QueuePanel(QWidget):
             elif column == REPLICATES_COLUMN:
                 row.replicates = _as_count(item.text(column), row.replicates)
                 item.setText(column, str(row.replicates))
-            elif column == SETUP_COLUMN:
-                row.setup = item.checkState(column) == Qt.CheckState.Checked
-            elif column == GO_ON_COLUMN:
-                row.go_on = item.checkState(column) == Qt.CheckState.Checked
             elif column == STAYS_FIRST_COLUMN:
                 row.stays_first = item.checkState(column) == Qt.CheckState.Checked
             else:
@@ -447,9 +453,10 @@ class QueuePanel(QWidget):
         self.changed.emit()
 
     def _reset(self) -> None:
+        if self.queue.running:
+            return
         for index in self.selection():
-            if index != self.queue.index:
-                self.queue.rows[index].reset()
+            self.queue.rows[index].reset()
         self.refresh()
         self.changed.emit()
 

@@ -213,10 +213,9 @@ ends `the previous frame's triggers read again`.
 A repetition that comes up short a second time ends the run after it, as **Stop** does, but as a
 failure: the run's files say `failed` with the reason. The repetitions before it are summed into
 the companion and that one is left out of the sum; it stays in the raw file, marked unfinished.
-In the run queue the row is **failed** with the same reason, so the series stops there unless the
-row's **go on if it fails** box is ticked. Every other reason clockwork has to end a run early,
-such as three frames failing in a row, is a failed row in the same way, and only **Stop** makes a
-row **stopped**.
+In the run queue the row is **failed** with the same reason, and the queue ends there. Every
+other reason clockwork has to end a run early, such as three frames failing in a row, is a failed
+row in the same way, and only **Stop** makes a row **stopped**.
 
 A row of the run queue counts both events in its outcome: `2 repetition(s) acquired again` for
 the repetitions that came up short, and `console reported 3 errors` for the `[error]` lines the
@@ -308,27 +307,50 @@ as one an agent wrote and checked. Under both, the dock follows whatever series 
 running, whichever client started it.
 
 To run a series of samples or conditions unattended, open **Run > Run queue** and add a row
-for each method document. A row names a saved method, a conditions note and a replicate count,
-and the document is read when the row starts, not when it was added, so a typo fixed in the
-file before the row runs is the version that runs. The table and the run log call a row by its
-document's file name, or by the document's folder when the file is `method.toml`, as every
-document in the method library is. Each row sends its method and then acquires
-its replicates back to back. **setup** sends the whole setup, readback included; unticked, the
-row loads and arms only, for a row whose method the boxes already have. A row that fails ends
-the series and leaves the rows after it **skipped**, unless its **go on if it fails** box is
-ticked. **Start the queue** runs every waiting row, skipped rows included, and **Stop** ends the
-series after the current repetition and its fold.
+for each method document. A row names a saved method, a conditions note and a replicate count.
+The table and the run log call a row by its document's file name, or by the document's folder
+when the file is `method.toml`, as every document in the method library is.
+
+**Start the queue** reads every row's document, records the SHA-256 of each one's text, and hands
+the whole queue to clockwork's background service, `clockwork serve`, as one series, in the same
+way as a series plan. What runs is therefore what the files said at the moment Start was
+pressed, and a document edited afterwards changes nothing in the queue that is running. A row
+whose document does not open, or that clockwork would refuse to acquire, keeps the queue from
+starting, and its outcome says why. Each row is sent where the boxes do not already hold it, its
+`setup` strings only where they differ from the ones last sent, and then its replicates are
+acquired back to back. Start needs your initials in **At the window** and the file initials, and
+fills nothing else in for you: the **Purpose** line is recorded as typed, empty included.
+
+The queue runs on if the window is closed, and a window opened later follows it as it follows any
+series. One Start is one request with one run record, `source` `window`, whose `plans` entry
+holds the queue as started: the text of its queue file, each row's document and that document's
+SHA-256, and the hash its files stamp ([run record](run-record.md#the-sections)). Every file the
+queue writes stamps the request's identifier, its row's place in the queue as its planned index,
+its position in the order acquired, and the seed for a randomized queue, as every file of a series
+plan does.
+
+While a queue runs, its rows are not edited, moved or added to. **Stop** ends it after the current
+repetition and its fold: the row in flight keeps the files it has written, and the rows after it
+are **skipped**. Pressing **Start the queue** again runs the skipped rows, after any edits, as a new
+queue whose run record names the first one under `follows`. A row that fails ends the queue in the
+same way, as a failed point ends a series plan, and the rows after it are skipped. Before
+clockwork 1.2.0 each row had a **setup** box and a **go on if it fails** box. Both are gone: the
+service sends `setup` only where it differs, and a failure always ends the queue, because the
+next row usually depends on the same instrument state that the failed one did not have. The
+**pause** buttons, the note and **Stop** act on a running queue exactly as they do on a series
+plan ([pausing a run](#pausing-resuming-and-annotating-a-run)).
 
 To spread technical replicates over a series rather than acquire them back to back, press
 **Randomize…**, choose a number of passes, and press OK. Each pass runs every waiting row once,
-in its own shuffled order, and a row's own replicates stay together as one send and its
-acquisitions. The result is ordinary rows, labelled in the **pass** column (`2/3` is the second
-of three passes), so the table shows exactly what will run before **Start** is pressed, and any
-row can still be edited, moved or removed. With **new order each pass** unticked, one shuffled
-order is repeated in every pass, and one pass is a plain shuffle. Rows ticked **stays first**
-open every pass, in the order they were entered, ahead of the shuffled rows, which suits a
-blank or a calibrant. A closing wash is added by hand after randomizing. The run log records the
-seed and every pass's order each time Randomize is applied.
+in its own shuffled order, and a row's own replicates stay together. The result is ordinary
+rows, labelled in the **pass** column (`2/3` is the second of three passes), so the table shows
+exactly what will run before **Start** is pressed, and any row can still be edited, moved or
+removed. With **new order each pass** unticked, one shuffled order is repeated in every pass, and
+one pass is a plain shuffle. Rows ticked **stays first** open every pass, in the order they were
+entered, ahead of the shuffled rows, which suits a blank or a calibrant. A closing wash is added
+by hand after randomizing. The run log records the seed and every pass's order each time
+Randomize is applied, and a queue started with its passes stamps the seed into every file and its
+run record.
 
 Randomizing a queue that already has passes rebuilds them from pass 1, after asking. An edit
 made to a row of pass 2 or later is lost; to change every pass, edit the row in pass 1 and
@@ -337,41 +359,55 @@ already run stay where they are, above the new passes. Randomize is unavailable 
 queue runs.
 
 To keep a series for another day, press **Save queue…**. The file, which ends in
-`.queue.toml`, holds each row's method, note, replicate count, the three check boxes and its
-pass, and the last seed. **Open queue…** replaces the queue with a saved one. Every row opens
-waiting, because the file is a plan rather than a record; what the rows did is in the run log
-and their files. Each method is stored by its full path and by its path relative to the queue
-file, so a folder of methods copied to another PC with its queue file beside them still opens.
-A row whose method is found by neither path fails when it starts, and says so in the run log.
-The beam guard, below, is not in the file.
+`.queue.toml`, holds each row's method, note, replicate count, **stays first** box and pass, and
+the last seed. **Open queue…** replaces the queue with a saved one. Every row opens waiting,
+because the file is a plan rather than a record; what the rows did is in the run record and their
+files. Each method is stored by its full path and by its path relative to the queue file, so a
+folder of methods copied to another PC with its queue file beside it still opens. A queue file
+saved by an earlier clockwork opens too, and the run log says that its **setup** and **go on if
+it fails** values are ignored. A file saved now omits both, which an earlier clockwork reads as
+**setup** ticked and **go on if it fails** unticked.
 
-To stop the series when the beam is lost, arm the beam guard before pressing **Start the
-queue**. A beam lost at the source leaves every frame counting out and every fold writing, so
-without the guard each remaining row reads **done** and the loss is found only in the files.
-With the guard armed, every repetition of every row counts its ions, i.e., the sum of its scans'
-TIC as the console publishes them, and a run whose repetitions read under a floor several times
-in a row ends after the current repetition and its fold. Its row is marked **failed**, with the
-reason in the outcome and the run log, the rows after it are **skipped**, and the series stops
-even where the row's **go on if it fails** box is ticked, because every later row needs the
-same source. The run's files say `failed`, with the same sentence as the reason, and keep every
-repetition acquired before the stop.
+### The beam guard
 
-To arm the guard, press **Beam guard: off…**, tick **stop the queue when the beam is lost**,
-and set the floor in total ions a repetition. **From a run…** reads a run's per-repetition
-file, usually the day's gate run on a beam known to be good, and sets the floor to the fraction
-beside it of that run's median, 0.10 by default; a number typed into the field replaces it.
-**In a row** is how many consecutive repetitions under the floor end a run, 5 by default. The
-button then reads **Beam guard: armed…**, and the run log states the floor and where it came
-from each time the queue starts. The window keeps the guard rather than the queue file, so a
-queue opened after arming keeps it, and closing the window turns it off.
+To hold a run when the beam is lost, arm the beam guard. A beam lost at the source leaves every
+frame counting out and every fold writing, so without the guard each remaining row reads **done**
+and the loss is found only in the files. With the guard armed, every repetition counts its ions,
+i.e., the sum of its scans' TIC as the console publishes them, and a file whose repetitions read
+under a floor several times in a row ends after the current repetition and its fold. The file
+says `failed`, with the guard's sentence as the reason, and keeps every repetition acquired
+before it ended.
+
+The guard belongs to `clockwork serve`, not to the queue or the window, so it watches every
+acquisition the service makes, whichever client started it: a queue, a series plan, an agent's
+series or a single **Acquire**. In a queue or any series, a file the guard ends then holds the
+series, paused by the guard, at the row or point it ended, and the line above the run log says
+so. The series waits there until a person presses **Resume** or **Stop**. **Resume** acquires that
+row or point again from its start, as new files under the same planned index and at the next
+positions, and then goes on. The ended files stay on disk, stamped `failed`, and the run record
+lists them under `retakes` as the files the retake replaced. An agent's tools report the guard's
+pause as they report a person's and cannot lift it. A single acquisition has nothing to hold, so
+a file the guard ends there simply ends the acquisition, as before 1.2.0.
+
+To arm the guard, press **Beam guard: off…**, tick the box, and set the floor in total ions a
+repetition. **From a run…** reads a run's per-repetition file, usually the day's gate run on a
+beam known to be good, and sets the floor to the fraction beside it of that run's median, 0.10 by
+default; a number typed into the field replaces it. **In a row** is how many consecutive
+repetitions under the floor end a file, 5 by default. Arming needs your initials in **At the
+window**, and the button is never greyed by a running job: the guard can be armed, changed or
+turned off on any client's run at any time, and takes effect from the next repetition. Each
+change is recorded with your initials, in the run record of the job running or in the day record
+when nothing runs. The button then reads **Beam guard: armed…**, in every window that follows the
+service, and the guard stays armed until a person turns it off or the service stops. It is not
+saved in the queue file, because the floor is a reading of the day's beam.
 
 The defaults come from the 336 runs of one queued sweep, on which the beam was lost twice. At
-0.10 of the gate run's median and 5 in a row, both losses stopped the row they began in, on its
+0.10 of the gate run's median and 5 in a row, both losses ended the row they began in, on its
 5th and 9th repetition without beam, whereas in none of the 277 runs acquired on a good beam did
 5 consecutive repetitions all read under 0.34 of their gate run's median. Note that the count starts again
-with each run, so a row with fewer repetitions than the count cannot trip it, and a row whose
+with each file, so a row with fewer repetitions than the count cannot trip it, and a row whose
 repetitions gather ions far longer than the gate run's, such as a 40 s hold, can read above the
-floor with no beam at all. In both cases the next ordinary row stops the series.
+floor with no beam at all. In both cases the next ordinary row trips the guard.
 
 ## Running a series plan
 
@@ -418,8 +454,8 @@ its tooltip says why: the last point of a series has no point after it, and a `s
 method has no boundary between its repetitions, so its points offer only the pause after the
 point. A single acquisition cannot be paused, and **Stop** is the only way to end it early.
 
-A paused series holds the instrument. The line above the run log says who paused it, since when
-and where it rests, the table that follows the series shows the point it rests at as **held**,
+A paused series holds the instrument. The line above the run log says who paused it, or that
+the [beam guard](#the-beam-guard) did, since when and where it rests, the table that follows the series shows the point it rests at as **held**,
 and every sending and acquiring button stays grey, for you and for an agent, until a person
 presses **Resume** or **Stop**. Nothing ends a pause on its own, however long it lasts.
 **Resume** continues the series under the initials then in **At the window**, which need not be
@@ -508,13 +544,15 @@ for a method rendered from a template the template's hash and every knob value, 
 each file with its frame count, total counts, base peak and pusher period. **At the window** takes
 your initials, starts out as the file initials, is remembered on the PC, and must be filled in
 before Acquire or the run queue's Start will run; the purpose may be left empty, and is recorded
-empty. One press of Acquire is one record, however many replicates it asks for. The record is
+empty. One press of Acquire is one record, however many replicates it asks for, and so is one
+Start of a series plan or of the run queue, however many points or rows it has. The record is
 written by `clockwork serve` as the run proceeds, so it is whole even if the window is closed
 while the run goes on, and where a template's knob value lies outside the limits an agent is held
 to, the record says so; a person at the window is never held to them. An agent's run leaves the
 same document, which [the run record](run-record.md) describes in full. The output directory also
 holds `day-record.jsonl`, the daemon's record of the day: the instrument document and limits it
-was started with, and each start and restart of the daemon and the acquisition console.
+was started with, each start and restart of the daemon and the acquisition console, and each
+change to the beam guard made while nothing was running.
 
 **Open the log**, beside the acquire buttons, opens the send log and the transcript at once. When something goes wrong, the
 send log is where to start: it is what a trainee reads, and it already carries the boxes' own

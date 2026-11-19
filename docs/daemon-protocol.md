@@ -104,8 +104,9 @@ that every handle it holds has gone with the old one. `error.kind` is one of fou
 
 ## Commands
 
-One command per call of the owner protocol, and `hello`. Three of them, `pause`, `resume` and
-`note`, are a person's at the window ([A person's pause](#a-persons-pause)).
+One command per call of the owner protocol, and `hello`. Four of them, `pause`, `resume`,
+`note` and `guard`, are a person's at the window ([A person's pause](#a-persons-pause),
+[the beam guard](#the-beam-guard)).
 
 | `cmd` | `args` | `result` |
 |---|---|---|
@@ -116,8 +117,9 @@ One command per call of the owner protocol, and `hello`. Three of them, `pause`,
 | `pause` | `grain` (`point` or `repetition`, default `point`), `by`, `client` (optional) | A `Hold`, at once. The series running rests after its point or its repetition in flight |
 | `resume` | `by`, `client` (optional) | null. The pause is lifted and the series goes on |
 | `note` | `text`, `by`, `client` (optional) | A few words saying where the note was kept: the run record of the job running, or the day record |
+| `guard` | `guard` (a `BeamGuard`, or null to turn it off), `by`, `client` (optional) | A few words saying where the change was recorded. The daemon's beam guard is armed, changed or turned off from the next repetition of every acquisition |
 | `snapshot` | none | The `Snapshot` the next run will be stamped with, or null before any send |
-| `status` | none | An `OwnerStatus`: console, boxes, ports held, running and queued handles, stopping, the lock holder, the lock's refusal if there is one, `armed`, what the last send that finished left the boxes holding (the method's name, what went on the wire, and the stem the send named), or null before any send and while one is under way, `issued`, the id of the newest handle this session has issued, 0 before the first, and `hold`, a person's pause on the series running, or null |
+| `status` | none | An `OwnerStatus`: console, boxes, ports held, running and queued handles, stopping, the lock holder, the lock's refusal if there is one, `armed`, what the last send that finished left the boxes holding (the method's name, what went on the wire, and the stem the send named), or null before any send and while one is under way, `issued`, the id of the newest handle this session has issued, 0 before the first, `hold`, a pause on the series running, a person's or the beam guard's, or null, and `guard`, the beam guard with who armed it, or null |
 | `shutdown` | `reason` (optional) | null, sent before the shutdown begins (under Shutting down) |
 
 A client checks `protocol` in the `hello` reply and refuses to go on if it is not the version it
@@ -125,9 +127,9 @@ was written for. This document describes protocol 1. `origin`, `issued` and the 
 paths were added to it without a new version: each has a default, an empty string or 0, that a
 client written before it never reads and a daemon written before it never sends. `pause`,
 `resume`, `note`, the `by` and `client` of `stop`, and `hold` were added in the same way, with
-`hold` null by default. A daemon written before the three commands answers each with
-`unknown-command`, which the window shows as one sentence saying that the daemon is older than
-the window. A daemon written before `stop` took `by` and `client` refuses them as a
+`hold` null by default, and so were `guard` and the status's `guard`, null by default. A daemon
+written before any of the four commands answers it with `unknown-command`, which the window
+shows as one sentence saying that the daemon is older than the window. A daemon written before `stop` took `by` and `client` refuses them as a
 `bad-request`, and the Python client then sends the reason alone.
 
 Handle ids are counted from 1 for each session with no gaps, which with `issued` lets a client
@@ -228,13 +230,37 @@ The daemon writes each of these acts into the run record of the job acted on, wi
 acquisition is written there too, whichever client sent it, so that a stop pressed at the window
 and a stop sent by an agent's tool can be told apart afterwards.
 
-Only the window sends `pause` and `resume`. The command line has no verb for either, the MCP
-server has no tool for either, and while `hold` is not null their tools read and note only
+Only the window sends `pause`, `resume` and `guard`. The command line has no verb for any of
+them, the MCP server has no tool for any of them, and while `hold` is not null their tools read and note only
 ([MCP server](mcp-server.md#while-a-person-has-paused-the-run)). This is capability by absence
 and not a lock. The socket is bound to the loopback address and has no login, so any program on
 the instrument PC that speaks this protocol could send either command. What the arrangement
 guarantees is that no part of clockwork that an agent drives contains a way to lift a person's
-pause.
+pause or to arm, change or turn off the beam guard.
+
+## The beam guard
+
+The beam guard ends a file whose beam was lost at the source: a file whose repetitions count fewer
+ions than a floor, a set number of times in a row, ends after the current repetition and its
+fold, and says `failed` with the guard's sentence. It is the daemon's state, armed by a person at
+the window with `guard` and reported to every client in `status` as `guard`: the `guard` itself
+(`floor`, `repetitions` and `source`, the floor's origin in words), `by`, `client` and `since`.
+Every acquisition the daemon makes watches it from its next repetition, whichever client
+submitted the job, until a person turns it off or the daemon stops. A `guard` sent while a job
+runs adds a `GuardChanged` event to that job, and every change is written with `by` and `client`,
+as a `guard` entry in the `interventions` of the running job's run record, or with nothing
+running as a `guard` line in the day record ([run record](run-record.md)).
+
+A file the guard ends inside a series job, a plan or a queue, then holds the series. The daemon
+sets `hold` itself, with `by` `the beam guard`, `grain` `point`, the guard's sentence as
+`beam_lost`, and `where` naming the point and the file, and writes a `pause` intervention by the
+beam guard into the record. The series rests as at a person's pause after the point, until a
+person sends `resume` or any client's `stop` ends it, under the same rules: the agent's tools
+read the hold and cannot lift it. On `resume` the daemon acquires the point again from its start,
+as new files under the same planned index at the next positions, adds an entry to the record's
+`retakes` naming the files it replaced, and goes on. The point's `PointStarted` event then
+carries `retake`, 1 for the first retake. A single `Acquire` has no series to hold, so a file the
+guard ends there ends the job, which finishes with that file's `Run` carrying `beam_lost`.
 
 ## The instrument lock
 
@@ -322,8 +348,10 @@ Closing the window leaves the daemon to its clients:
 | another client's job is running or queued | says so and closes, leaving the daemon and the job running, and a paused series paused |
 | nothing is running or queued | shuts the daemon down if this window started it, and leaves one it found running as it was |
 
-The window's run queue belongs to the window and does not outlive it: rows still waiting are
-skipped whichever way it closes. Under `--fake` the window runs its simulated instrument in its
+The window's run queue is a series job like a plan's, submitted with every row's document read
+at Start, so it outlives the window as any job does, and a paused queue stays paused. Before
+clockwork 1.2.0 the queue belonged to the window, and its waiting rows were skipped whichever way
+the window closed. Under `--fake` the window runs its simulated instrument in its
 own process and starts no daemon.
 
 Two verbs of the [command line](command-line.md#the-two-ends-of-a-day) start and stop a daemon
@@ -338,7 +366,7 @@ the instrument lock no longer names it and nothing listens on the console's comm
 The daemon writes one line per event worth a person's reading to its terminal, unless it was
 started `--detached`, and to `%LOCALAPPDATA%\clockwork\serve.log`, appended: its start and what
 it found, every request that changes something (`submit`, `stop`, `pause`, `resume`, `note`,
-`shutdown`) with the job it named and the client that sent it, each job's start and end, the console's starts and restarts, and anything it stopped. The window's `errors.log` in the same
+`guard`, `shutdown`) with the job it named and the client that sent it, each job's start and end, the console's starts and restarts, and anything it stopped. The window's `errors.log` in the same
 directory is left to the window. Each send and each run also leaves its wire transcript and its
 send log beside its files in the output directory, exactly as a run started from the window does.
 

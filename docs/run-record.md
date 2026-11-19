@@ -20,7 +20,7 @@ A run record is begun on the route the request came by, and that route is its `s
 |---|---|---|
 | `mcp` | a session's tool call through `clockwork-mcp` | the MCP server, as it arms or submits the job |
 | `cli` | a verb of `clockwork-cli`, typed by a person or run from an agent's shell | the command line, as it arms or submits the job |
-| `window` | a person pressing Acquire, or starting a series plan, at the window | the daemon, when it starts the job |
+| `window` | a person pressing Acquire, or starting a series plan or the run queue, at the window | the daemon, when it starts the job |
 
 Records written before clockwork 1.2.0 say `agent` for both `mcp` and `cli`, without saying which;
 the audit log's `via` tells them apart. A request continued under its identifier from another
@@ -32,7 +32,7 @@ acquired before 1.2.0. From 1.2.0 every run started at the window has a record o
 moment its job starts, written by the daemon that acquires it, so a window run's record is whole
 however the window ends. One press of Acquire is one request and one record, whatever its replicate
 count; a press of Replicate is another, and so is each Start of a series plan, however many points
-it has.
+it has, and so is each Start of the run queue, however many rows it has.
 
 The daemon enters each file in its request's record as the file is written, on every route, before
 it reports the job's end. A client that waits for a job to end and then reads the record therefore
@@ -54,7 +54,8 @@ The top level is an object:
 | `record_schema` | `1`. Additions to the format keep the number; a change that a reader of the number would misread moves it |
 | `request` | The request block, below |
 | `plans`, `arms`, `acquisitions`, `files`, `notes`, `routines`, `verdicts` | One list per section, each entry stamped with its `time`, oldest first |
-| `interventions` | A person's pauses and resumes of a running job, and every stop of one; present only once there is an entry |
+| `interventions` | A person's pauses and resumes of a running job, the beam guard's pauses, every change to the beam guard made while the job ran, and every stop of one; present only once there is an entry |
+| `retakes` | Each series point the beam guard ended and a person's resume acquired again, with the files the retake replaced; present only once there is an entry |
 
 Every `time` is local time, ISO 8601 to the second, as `2026-11-18T14:02:11`. A reader ignores a key
 it does not know: later releases add keys to the request block and to entries without moving
@@ -93,6 +94,21 @@ replicates, reference and minutes), and `order`, the planned indices in the orde
 A series started at the window has the same `plans` entry, written by the daemon when the job
 starts, with `path` the file the person opened, and the same `acquisitions` entry less
 `cold_start`, which the window's series says in the run log as each point is sent.
+
+A run queue started at the window has a `plans` entry with the same keys where a queue has the
+same thing to say, and its own where it has not. `text` is the purpose line, `queue` holds the
+queue's text as Start read it, in the [`.queue.toml`](user-guide.md#the-run-queue) form, `path`
+the queue file it was last saved to or opened from, and `sha256` the hash of `queue`. `rows`
+stands where a plan has `points`: each row's `index`, its `name` as the window shows it (with its
+pass, as `(pass 2/3)`, for a randomized queue), `method` (the document's name), `path`, `sha256`
+(the SHA-256 of the document's text as read at Start, Windows line endings made Unix ones),
+`method_hash` (the hash its files stamp), `conditions`, `replicates`, and `template`, the
+template's `{hash, knobs, labels}` for a document rendered from one, or null. `seed` and
+`shuffled` are the randomization's, `order` is the indices in the order acquired, and `follows`
+is the identifier of the queue whose unrun rows this one runs, or null. `template`,
+`template_hash`, `minutes`, `checked` and `outside_limits` are null, since a queue has no template
+and no check. Its `acquisitions` entry has `series` and `queue` both `true`, `points`, the number of
+rows, and `replicates`, the number of files asked for.
 
 `arms` holds each send an agent's `arm` made: `stem`, `method` (its name), `hash` (the method's
 SHA-256, cut to its first characters), `template` (as below, or null for a hand-written method),
@@ -148,14 +164,23 @@ sent it. The daemon writes each entry as the act is made:
 
 | Key | What it holds |
 |---|---|
-| `kind` | What was done: `pause`, `resume`, `stop` or `guard` |
+| `kind` | What was done: `pause`, `resume`, `stop` or `guard`, the last a change to the beam guard |
 | `grain` | For a pause and for its resume, where the job rests: `point` (after the point in flight) or `repetition` (after the repetition in flight); empty otherwise |
-| `by` | The initials of the person who acted, or the client's name where no person did |
+| `by` | The initials of the person who acted, `the beam guard` for the pause the guard set when it ended a file, or the client's name where no person did |
 | `client` | The client the act came through, as the daemon names it: `the clockwork window (pid 5120)`, or `Claude, through clockwork mcp` for an agent's `stop` |
 | `job` | The daemon's job number |
-| `reason` | The words given with a stop, or empty |
+| `reason` | The words given with a stop, or for the beam guard's pause its sentence, or empty |
 | `held_since`, `held_s`, `where` | A resume only: when the series came to rest, how many seconds it rested, and where in words. For a pause withdrawn before the series reached it, `held_s` is 0 and the other two are empty |
 | `while_paused` | A stop only: `true` when it ended a paused series, and absent otherwise |
+| `armed`, `floor`, `repetitions`, `source`, `was` | A `guard` entry only: whether the guard is now armed, its floor in ions a repetition, how many repetitions in a row under it end a file and where the floor came from, each null or empty once it is turned off, and `was`, the guard before the change as `{floor, repetitions, source}`, or null |
+
+`retakes` holds one entry per point acquired again after the beam guard ended one of its files and
+a person resumed the series: `index` (the planned index, which the new files stamp as the old ones
+did), `number` (the point's place among the series' points as acquired), `retake` (1 for the
+first time the point was acquired again, 2 for the second), `job`, `replaces` (the stems of the
+files the guard ended, which stay on disk and in `files`, stamped `failed`), `beam_lost` (the
+guard's sentence) and `first_place`, the position the retake's first file takes. A reader that
+keeps one set of files per planned index keeps the files whose stems no `replaces` names.
 
 A `pause` entry records the moment the pause was asked for, and the `resume` or `stop` that
 follows it records how the pause ended. A pause that the series never reached, because the series
@@ -174,11 +199,12 @@ line has `time` and `kind`, and `by` where a person or a client caused it:
 | `daemon` | The daemon started or stopped | `event` (`started` or `stopped`), `session`, `reason` |
 | `console` | The acquisition console started, restarted or stopped | `event` (`started`, `restarted`, `stopped` or `failed`), `job`, `by` (the client whose job it was, or the daemon itself), `detail` |
 | `note` | A person typed a note at the window with no job running, or while a job with no run record ran | `text`, `by` (the person's initials), `client` (the window), `job` (the job running, or null) |
+| `guard` | A person armed, changed or turned off the beam guard with no job running, or while a job with no run record ran | `by`, `client`, `job`, and as a `guard` intervention, `armed`, `floor`, `repetitions`, `source` and `was` |
 
 The SHA-256 of each document is what lets a reader confirm, months later, which limits a day's
 runs were checked against, since the files on disk may have changed since. A console restart
-between two runs, which belongs to neither, is recorded here, and so is a note typed with nothing
-running. A later release adds `guard` lines, for a change to the beam guard with nothing running.
+between two runs, which belongs to neither, is recorded here, and so are a note typed and a
+change to the beam guard made with nothing running.
 
 The day record is kept in segments in the same way as the audit log, so that a folder once listed
 never changes. `day-record.jsonl` is the live segment, the only one written to. The two calls that
