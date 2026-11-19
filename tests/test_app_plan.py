@@ -216,7 +216,9 @@ def test_a_person_pauses_notes_and_resumes_a_plan_from_the_run_panel(
     assert hold.by == "MB" and hold.where == "after point 1 of 4 (planned 1)"
     until(qtbot, lambda: not panel.held.isHidden() and panel.pause_point.isHidden())
     assert not panel.resume_button.isHidden() and panel.stop_run.isEnabled()
-    assert panel.caption.text() == hold.text
+    # The polled status can see the hold reached before the `Held` event, which is what
+    # sets the caption, has come through the event stream.
+    until(qtbot, lambda: panel.caption.text() == hold.text)
     until(qtbot, lambda: window.followed.shown(1) == HELD)
     followed = window.followed
     assert [followed.shown(number) for number in range(4)] == [
