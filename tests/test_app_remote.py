@@ -267,8 +267,8 @@ def test_a_restarted_daemons_job_is_not_taken_for_the_old_one_of_its_number(
             worker.submit(job)
             # Identity, not equality: the old Discover is equal to this one by value. The
             # daemon's own start-up job may finish in between, so not the first after.
-            qtbot.waitUntil(lambda: any(seen is old or seen is job
-                                        for seen in finished[count:]), timeout=20_000)
+            qtbot.waitUntil(lambda job=job, count=count: any(
+                seen is old or seen is job for seen in finished[count:]), timeout=20_000)
             assert all(seen is not old for seen in finished[count:])
             assert worker.origin(job) == ""
     finally:
