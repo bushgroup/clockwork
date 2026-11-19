@@ -25,7 +25,7 @@ import types
 import pytest
 from mcp import Client, StdioServerParameters
 
-from clockwork import envelope
+from clockwork import dayrecord, envelope
 from clockwork import method as method_module
 from clockwork.acq.uimf import SUMMED_SUFFIX
 from clockwork.mcp import (
@@ -613,6 +613,26 @@ def test_segments_are_read_in_the_order_of_their_first_lines_the_live_one_last(t
     assert log.requests() == {"r": "fourth"}
     os.remove(tmp_path / LOG_NAME)
     assert log.requests() == {"r": "third"}
+
+
+@pytest.mark.parametrize("sorter, live, extension", [
+    (segments, LOG_NAME, "log"), (dayrecord.segments, dayrecord.LIVE_NAME, "jsonl")],
+    ids=["audit", "day record"])
+def test_segments_begun_in_one_second_are_read_in_the_order_they_were_sealed(
+        tmp_path, sorter, live, extension):
+    """Seals in one second take `-2` and on, which sorts before the unsuffixed name, and
+    NTFS gives files written milliseconds apart one mtime: the seal's own stamp and
+    number order them, a third begun in that second but sealed in the next among them,
+    a tail split off by hand after every sealed one (lab #24)."""
+    prefix = live.split(".")[0]
+    names = [f"{prefix}.20261119-100000.{extension}", f"{prefix}.20261119-100000-2.{extension}",
+             f"{prefix}.20261119-100001.{extension}",
+             f"{prefix}.after-20261119-100002.{extension}", live]
+    for name in reversed(names):
+        path = tmp_path / name
+        path.write_text(json.dumps({"time": "2026-11-19T10:00:00"}) + "\n", encoding="utf-8")
+        os.utime(path, ns=(1, 1))
+    assert [os.path.basename(path) for path in sorter(str(tmp_path))] == names
 
 
 def test_a_seal_never_overwrites_a_segment_and_seals_nothing_with_no_live_file(

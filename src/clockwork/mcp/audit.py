@@ -42,6 +42,8 @@ import threading
 import time
 from collections.abc import Iterator, Mapping
 
+from ..dayrecord import seal_order
+
 __all__ = ["LOG_NAME", "LONG_TEXT", "SEAL_WAIT_S", "SEGMENTS", "AuditLog", "SealFailure",
            "hashed", "segments", "summarised"]
 
@@ -108,9 +110,11 @@ def segments(directory: str) -> list[str]:
     live = os.path.join(directory, LOG_NAME)
     found = [path for path in glob.glob(os.path.join(glob.escape(directory), SEGMENTS))
              if os.path.isfile(path) and os.path.normcase(path) != os.path.normcase(live)]
-    # Times are to the second, and two seals in one second begin two segments in it:
-    # the one last written to is the later (`-2` sorts before `.log` by name).
-    found.sort(key=lambda path: (_first_time(path), _modified(path), os.path.basename(path)))
+    # Times are to the second, and two seals in one second begin two segments in it: the
+    # seal's own stamp and number order them, since mtimes written milliseconds apart tie
+    # on NTFS and by name `-2` sorts before the unsuffixed seal it follows.
+    found.sort(key=lambda path: (_first_time(path), seal_order(path), _modified(path),
+                                 os.path.basename(path)))
     return found + ([live] if os.path.isfile(live) else [])
 
 

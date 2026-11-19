@@ -33,11 +33,12 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 
-__all__ = ["LIVE_NAME", "SEGMENTS", "DayRecord", "segments"]
+__all__ = ["LIVE_NAME", "SEGMENTS", "DayRecord", "seal_order", "segments"]
 
 LIVE_NAME = "day-record.jsonl"
 """The live segment, the only one written to."""
@@ -64,12 +65,26 @@ def _first_time(path: str) -> str:
     return str(line.get("time") or "") if isinstance(line, dict) else ""
 
 
+_SEALED = re.compile(r"\.(\d{8}-\d{6})(?:-(\d+))?\.(?:log|jsonl)$")
+
+
+def seal_order(path: str) -> tuple[str, int]:
+    """Where a segment's name puts its seal: `(<YYYYMMDD-HHMMSS>, N)`, N being 1 with no
+    suffix and N for `-N`; a name a seal did not give (a tail split off by hand) after
+    every sealed one. Times in the lines are to the second, so two segments can begin in
+    the same one, and their names, not their lines, say which was sealed first: by name
+    alone `-2` sorts before the unsuffixed seal it follows. Shared with
+    `clockwork.mcp.audit`, whose segments are named the same way."""
+    match = _SEALED.search(os.path.basename(path))
+    return (match.group(1), int(match.group(2) or 1)) if match else ("~", 0)
+
+
 def segments(directory: str) -> list[str]:
     """Every segment of the day record in `directory`, oldest first, the live one last."""
     live = os.path.join(directory, LIVE_NAME)
     found = [path for path in glob.glob(os.path.join(glob.escape(directory), SEGMENTS))
              if os.path.isfile(path) and os.path.normcase(path) != os.path.normcase(live)]
-    found.sort(key=lambda path: (_first_time(path), os.path.basename(path)))
+    found.sort(key=lambda path: (_first_time(path), seal_order(path), os.path.basename(path)))
     return found + ([live] if os.path.isfile(live) else [])
 
 
