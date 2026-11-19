@@ -16,21 +16,18 @@ import pytest
 
 import clockwork
 from clockwork import method as method_module
-from clockwork.app.boxstate import AGREES, DIFFERS, FOUND, Reading
 from clockwork.app.methodlib import (
     TEMPLATE as TEMPLATE_KIND,
 )
 from clockwork.app.methodlib import (
     TEMPLATE_REFUSAL,
     LibraryEntry,
-    instrument_diff,
     method_diff,
     open_entry,
     scan_library,
 )
 from clockwork.method import BoxMethod, Metadata, Method, RfChannel
 from clockwork.method import template as templates
-from clockwork.mips import Box, FakeBox, read_state
 from test_method_template import LABELS, TEMPLATE
 
 BOX = "box1"
@@ -239,40 +236,3 @@ def test_the_two_golden_methods_differ_on_repetition_mode(name):
     by_label = {f.label: f for f in diff.acquisition}
     assert by_label["repetition_mode"].differs
     assert {box.name for box in diff.boxes} == {"auklet", "bufflehead", "cormorant"}
-
-
-# --- instrument_diff ---------------------------------------------------------------------
-
-
-def rack_box() -> Box:
-    fake = FakeBox(name="MIPS-A", version="1.243t", dcb_channels=2, rf_channels=0,
-                   arb_modules=0)
-    fake.dc_bias = [5.0, -1.0]
-    return Box(transport=fake, name=BOX)
-
-
-def test_instrument_diff_marks_every_box_the_method_names():
-    state = read_state(rack_box())
-    picked = make_method(boxes=(
-        BoxMethod(name=BOX, port="COM3", dc_bias=((1, 5.0), (2, 0.0))),
-    ))
-    tables = instrument_diff(picked, {BOX: Reading(state=state, when="on demand")})
-    assert set(tables) == {BOX}
-    rows = {row.label: row for section in tables[BOX].sections for row in section.rows}
-    assert rows["channel 1"].mark == AGREES
-    assert rows["channel 2"].mark == DIFFERS
-
-
-def test_instrument_diff_reads_not_read_yet_for_a_box_with_no_reading():
-    picked = make_method(boxes=(BoxMethod(name=BOX, port="COM3"),))
-    tables = instrument_diff(picked, {})
-    assert tables[BOX].empty
-    assert tables[BOX].caption == "not read yet"
-
-
-def test_instrument_diff_leaves_an_undeclared_setting_marked_left_as_found():
-    state = read_state(rack_box())
-    picked = make_method(boxes=(BoxMethod(name=BOX, port="COM3"),))
-    tables = instrument_diff(picked, {BOX: Reading(state=state, when="on demand")})
-    rows = {row.label: row for section in tables[BOX].sections for row in section.rows}
-    assert rows["channel 1"].mark == FOUND

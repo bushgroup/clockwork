@@ -1506,6 +1506,147 @@ at_most = 0
             owner.join(30)
 
 
+def check_window_revision() -> None:
+    """The Qt-free half of the window's 1.2.0 revision (lab record, task 169).
+
+    **Send by the owner's memory** (E7): a `Send` with `as_needed` over the stand-ins
+    sends every phase to boxes nothing is known to hold, nothing to boxes that hold the
+    method, and the table alone where only the table moved -- recording the setup the
+    boxes still hold. Then the agent's range a knob is shown against in the Template tab
+    (`envelope.agent_ranges`, R10), and the Day tab's reading of a run record as the
+    record words it (`clockwork.app.daylist`, D3).
+    """
+    import dataclasses
+    import datetime as dt
+    import tempfile
+
+    from clockwork import envelope
+    from clockwork import method as method_module
+    from clockwork.app.daylist import day_lines, request_line
+    from clockwork.method import template as templates
+    from clockwork.owner import Discover, JobFinished, LocalOwner, Send
+
+    def table(scans: int, high: int = 500) -> str:
+        return (f"STBLDAT;0:[A:1,0:A:1:B:1,{high}:B:0,"
+                f"{method_module.enable_fall_tick(scans)}:A:0,"
+                f"{method_module.table_period(scans)}:];")
+
+    method = method_module.from_dict({
+        "schema_version": 2,
+        "metadata": {"name": "revision self-check", "created": dt.date(2026, 11, 18)},
+        "acquisition": {"frames": 1, "scans": 32, "accumulations": 2,
+                        "file_stem": "261118_ZZ_001", "repetition_mode": "per_repetition",
+                        "keep_raw": True, "enable": {"box": "box1", "channel": "A"}},
+        "boxes": [{"name": "box1", "port": "COM3", "setup": ["STBLCLK,EXT", "STBLTRG,POS"],
+                   "load": [table(32)], "arm": ["SMOD,TBL"]}],
+        "start": [["box1", "TBLSTRT"]],
+        "reset": [["box1", "SMOD,LOC"], ["box1", "SMOD,TBL"]],
+    })
+    moved = dataclasses.replace(method, boxes=(dataclasses.replace(
+        method.boxes[0], load=(table(32, 501),)),))
+    with tempfile.TemporaryDirectory() as scratch:
+        owner = LocalOwner(fake=True, kept_root="").start()
+        try:
+            _ended(owner, owner.submit(Discover(method=method)))
+            results = []
+            for number, (sent, setup) in enumerate(
+                    ((method, False), (method, False), (moved, False)), start=1):
+                handle = owner.submit(Send(method=sent, setup=setup, as_needed=True,
+                                           directory=scratch,
+                                           stem=f"261118_ZZ_{number:03d}"))
+                ended = _ended(owner, handle, timeout=30)
+                results.append(ended.result if isinstance(ended, JobFinished) else None)
+            first, again, table_only = results
+            check_true("a Send as needed sends every phase to boxes nothing is known to "
+                       "hold", first is not None and first.sent and first.setup)
+            check_true("and nothing to boxes that hold the method",
+                       again is not None and not again.sent)
+            log = os.path.join(scratch, "261118_ZZ_003.sent.txt")
+            text = open(log, encoding="utf-8").read() if os.path.isfile(log) else ""
+            armed = owner.status().armed
+            check_true(
+                "and the table alone where only the table moved, the setup the boxes "
+                "still hold kept in what they are known to hold",
+                table_only is not None and table_only.sent and not table_only.setup
+                and "501:B:0" in text and "STBLCLK,EXT" not in text
+                and armed is not None
+                and armed.fingerprint[0][1] == ("STBLCLK,EXT", "STBLTRG,POS"))
+        finally:
+            owner.shutdown()
+            owner.join(10)
+
+    template = templates.loads_template("""\
+template_schema = 1
+renders = 2
+start = [["box1", "TBLSTRT"]]
+reset = [["box1", "SMOD,LOC"]]
+
+[knobs]
+b_ticks = { default = 300, min = 100, max = 520, unit = "ticks" }
+level = { default = 2, min = 1, max = 5, unit = "" }
+
+[metadata]
+name = "revision-check"
+created = 2026-11-18
+
+[acquisition]
+frames = 1
+scans = 32
+accumulations = 2
+repetition_mode = "per_repetition"
+keep_raw = true
+file_stem = "revision-check"
+
+[[boxes]]
+name = "box1"
+port = "COM3"
+setup = ["SDCB,1,{level}"]
+load = ["STBLDAT;0:[A:1,{b_ticks}:A:0,600:];"]
+arm = ["SMOD,TBL"]
+""")
+    limits = envelope.loads(f"""\
+schema_version = 2
+
+[allow]
+boxes = ["box1"]
+
+[templates.check]
+hash = "{template.hash[:12]}"
+
+[templates.check.knobs]
+b_ticks = {{ min = 200, max = 450 }}
+
+[templates.check.fixed]
+level = 3
+""")
+    ranges = envelope.agent_ranges(template.hash, limits, ["b_ticks", "level"])
+    check_true(
+        "the agent's range a knob is shown against: the entry's bounds, or the value "
+        "it fixes the knob at",
+        ranges is not None and ranges["b_ticks"].text("ticks") == "200 to 450 ticks"
+        and ranges["b_ticks"].holds(300) and not ranges["b_ticks"].holds(480)
+        and ranges["level"].text() == "fixed at 3" and not ranges["level"].holds(2))
+    check_true("and none for a template the limits do not admit",
+               envelope.agent_ranges("0" * 64, limits, ["b_ticks"]) is None)
+
+    line = request_line({
+        "request": {"id": "x", "text": "why", "source": "window", "at_window": "MB",
+                    "initials": "BK", "opened": "2026-11-18T14:02:11"},
+        "files": [{"stem": "261118_BK_001", "complete": True}],
+        "verdicts": [{"stem": "261118_BK_001", "verdict": "worked", "by": "MB"}],
+    })
+    check_true(
+        "the Day tab reads a run record as it is worded: route, person, purpose, files, "
+        "how it ended and a person's verdict",
+        (line.time, line.route, line.person, line.purpose, line.files) ==
+        ("14:02:11", "window", "MB", "why", ("261118_BK_001",))
+        and line.ended == "1 file: 1 complete"
+        and line.verdict == "261118_BK_001: worked (MB)" and not line.state)
+    with tempfile.TemporaryDirectory() as scratch:
+        check_true("and lists nothing for a folder with no records",
+                   day_lines(scratch) == [])
+
+
 def _ended(owner: object, handle: object, timeout: float = 10.0) -> object | None:
     """The `JobFinished` or `JobFailed` of `handle`, polled for; None on a timeout."""
     import time as _time
@@ -1546,7 +1687,7 @@ LOWER_LAYERS = ("clockwork.mips", "clockwork.acq", "clockwork.method",
                 "clockwork.owner.remote", "clockwork.owner.daemon", "clockwork.summary",
                 "clockwork.mcp", "clockwork.mcp.server", "clockwork.mcp.cli",
                 "clockwork.envelope", "clockwork.record", "clockwork.routine",
-                "clockwork.report", "clockwork.keep")
+                "clockwork.report", "clockwork.keep", "clockwork.app.daylist")
 QT_PREFIXES = ("PySide6", "PyQt", "pyqtgraph", "shiboken")
 
 # --- opaque lab references ------------------------------------------------------------
@@ -3767,6 +3908,9 @@ def main() -> int:
 
     section("a person's pause")
     check_hold()
+
+    section("the window's 1.2.0 revision")
+    check_window_revision()
 
     section("the window")
     # Task 50. Nothing here opens a window: what a clone can establish without a

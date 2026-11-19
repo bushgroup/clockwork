@@ -78,7 +78,6 @@ clockwork's rather than the trainee's.
 """
 
 _COMMAND_WORD = re.compile(r"[A-Z][A-Z0-9]*\Z")
-_LABEL = re.compile(r"MIPS[\s-]*([A-Z])\b")
 
 
 def head(command: str) -> str:
@@ -498,94 +497,6 @@ def _units(steps: Sequence[Step]) -> list[tuple[tuple[Step, ...], Step | None]]:
     return units
 
 
-def split_trainee_file(
-    text: str, boxes: Mapping[str, str] | None = None
-) -> dict[str | None, str]:
-    """A multi-box paste file as one pane per box, for opening an old file once.
-
-    The trainees' files name their boxes in comments -- "Send to MIPS A", "sent
-    to MIPS B" -- so a group of strings under such a comment, and a command whose
-    own trailing comment names a box, can be attributed. `boxes` maps a label's
-    letter form (`"MIPS A"`, matched case-insensitively) to a box name; without
-    it each label is its own key, which is what a caller with no map wants.
-
-    Everything the file does not attribute comes back under `None`, whole and in
-    order, for the trainee's clipboard. That is not a failure of the heuristic:
-    one golden file gives its travelling-wave frequency and amplitude block once,
-    unlabelled, for two boxes, and the other names no box anywhere. A rule that
-    guessed would put strings on a box the file never said to put them on.
-
-    A trailing comment on a command (`TARBTRG #sent to MIPS B.`) is moved onto
-    its own line above it, because a pane is one command per line and the box
-    would reject the line as written. Nothing else is rewritten.
-    """
-    labels = {key.upper(): value for key, value in (boxes or {}).items()}
-    panes: dict[str | None, list[list[str]]] = {}
-    for group in _groups(text):
-        lines = [line for raw in group for line in _split_trailing(raw)]
-        label = next((found for line in lines if is_comment(line)
-                      and (found := _label(line, labels)) is not None), None)
-        blocks: dict[str | None, list[str]] = {}
-        for index, line in enumerate(lines):
-            if is_comment(line):
-                own = _label(line, labels) or label
-            elif index and is_comment(lines[index - 1]):
-                # A command's own trailing comment, now the line above it, is what
-                # names its box: the CLOCK start group is three commands under one
-                # unlabelled heading, each going to a different box.
-                own = _label(lines[index - 1], labels) or label
-            else:
-                own = label
-            blocks.setdefault(own, []).append(line)
-        for name, block in blocks.items():
-            panes.setdefault(name, []).append(block)
-    return {name: "\n\n".join("\n".join(block) for block in blocks)
-            for name, blocks in panes.items()}
-
-
-def _groups(text: str) -> list[list[str]]:
-    """The file's blank-line-separated groups, stripped, blanks dropped."""
-    groups: list[list[str]] = []
-    for raw in text.splitlines():
-        stripped = raw.strip()
-        if not stripped:
-            if groups and groups[-1]:
-                groups.append([])
-            continue
-        if not groups:
-            groups.append([])
-        groups[-1].append(stripped)
-    return [group for group in groups if group]
-
-
-def _split_trailing(line: str) -> list[str]:
-    """`TARBTRG #sent to MIPS B.` -> the comment, then the command.
-
-    Only where what precedes the `#` is command-like: `Ion Mobility Scans = 5000
-    #number of pushes in frame` is prose with a note on it and stays one line,
-    which leaves it unplaced rather than half-placed.
-    """
-    stripped = line.strip()
-    if is_comment(stripped):
-        return [stripped]
-    at = stripped.find("#")
-    if at <= 0:
-        return [stripped]
-    command = stripped[:at].strip()
-    if not is_command_like(command):
-        return [stripped]
-    return [stripped[at:].strip(), command]
-
-
-def _label(comment: str, labels: Mapping[str, str]) -> str | None:
-    """The box a comment names, mapped through `labels`; None where it names none."""
-    match = _LABEL.search(comment)
-    if match is None:
-        return None
-    found = f"MIPS {match.group(1)}"
-    return labels.get(found.upper(), found)
-
-
 __all__ = [
     "LOAD_COMMANDS",
     "PHASES",
@@ -600,6 +511,5 @@ __all__ = [
     "is_command_like",
     "parse_pane",
     "render_pane",
-    "split_trainee_file",
     "start_order",
 ]

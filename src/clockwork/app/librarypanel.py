@@ -1,18 +1,18 @@
-"""The method library browser, and the two diff dialogs it opens into.
+"""The method library browser, and the method-against-method diff it opens into.
 
 The Qt half of task 54, over `clockwork.app.methodlib`: a table of what a directory
-setting finds, "Open into panes" for the panel this replaces MIPS_QT6's paste box with,
-and two comparisons a trainee reaches from the same window -- today's method against the
-one that worked, and today's method against what the boxes are holding right now.
+setting finds, Open for the Method tab (a method) or the Template tab (a template), and
+today's method against the one that worked. The method-against-instrument diff is cut
+(the window revision's E8; lab record, task 169): the state panels under the panes are
+that comparison now, against what the boxes were last sent (E2).
 
-Nothing here decides what differs. `methodlib.method_diff` and `methodlib.instrument_diff`
-do that; every widget below only draws what they hand back.
+Nothing here decides what differs. `methodlib.method_diff` does that; every widget below
+only draws what it hands back.
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
 
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
@@ -26,7 +26,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
     QTreeWidget,
@@ -35,8 +34,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..method import Method
-from .boxstate import Reading
 from .methodlib import (
     BoxDiff,
     FieldDiff,
@@ -47,15 +44,14 @@ from .methodlib import (
     open_entry,
     scan_library,
 )
-from .statepanel import StatePanel
 
-__all__ = ["InstrumentDiffDialog", "LibraryDialog", "MethodDiffDialog"]
+__all__ = ["LibraryDialog", "MethodDiffDialog"]
 
 _COLUMNS = ("Name", "Hash", "Date", "Description")
 
 
 class LibraryDialog(QDialog):
-    """A directory of methods, and the way into both diffs.
+    """A directory of methods and templates, and the way into the diff.
 
     Modal, like "Open method" and the console settings dialog: a trainee picking a
     method to open or compare is not doing anything else with the window in the
@@ -63,20 +59,16 @@ class LibraryDialog(QDialog):
     of "what method is this" for the window to keep in sync with the one it is running.
     """
 
-    def __init__(
-        self, directory: str, readings: Mapping[str, Reading],
-        parent: QWidget | None = None,
-    ) -> None:
+    def __init__(self, directory: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Method library")
         self.resize(720, 420)
-        self._readings = readings
         self.entries: list[LibraryEntry] = []
         self.chosen_path = ""
-        """Set and the dialog closed accepted where "Open into panes" was pressed."""
+        """Set and the dialog closed accepted where Open was pressed on a method."""
         self.chosen_template = ""
         """Set instead, and the dialog closed accepted, where it was pressed on a
-        template: the window opens the method builder on it (lab record, task 164)."""
+        template: the window opens it in the Template tab (lab record, task 169)."""
 
         self.directory_field = QLineEdit(directory)
         self.directory_field.setToolTip(
@@ -106,11 +98,11 @@ class LibraryDialog(QDialog):
         self.table.itemSelectionChanged.connect(self._update_buttons)
         self.table.itemDoubleClicked.connect(lambda *_: self._open())
 
-        self.open_button = QPushButton("Open into panes")
+        self.open_button = QPushButton("Open")
         self.open_button.setToolTip(
-            "Put this document into the panes and the form, exactly as File > Open "
-            "method does. On a template, build a method from it: set its knobs and "
-            "save the method it renders.")
+            "A method: into the Method tab's panes and form, exactly as File > Open "
+            "method does. A template: into the Template tab, to set its knobs and run "
+            "or save what it renders.")
         self.open_button.clicked.connect(self._open)
         self.diff_methods_button = QPushButton("Diff two methods…")
         self.diff_methods_button.setToolTip(
@@ -118,17 +110,10 @@ class LibraryDialog(QDialog):
             "removed and changed; the acquisition settings and the declared tables side "
             "by side.")
         self.diff_methods_button.clicked.connect(self._diff_methods)
-        self.diff_instrument_button = QPushButton("Diff against the instrument…")
-        self.diff_instrument_button.setToolTip(
-            "Compare the selected document's setup phase against the boxes' last "
-            "reading in this window: every setter whose getter is known, beside what "
-            "the box currently reports.")
-        self.diff_instrument_button.clicked.connect(self._diff_instrument)
 
         buttons_row = QHBoxLayout()
         buttons_row.addWidget(self.open_button)
         buttons_row.addWidget(self.diff_methods_button)
-        buttons_row.addWidget(self.diff_instrument_button)
         buttons_row.addStretch(1)
 
         close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -177,11 +162,10 @@ class LibraryDialog(QDialog):
     def _update_buttons(self) -> None:
         selected = self._selected()
         methods = [entry for entry in selected if not entry.is_template]
-        # Open on a template opens the method builder on it (task 164); the diffs
-        # compare methods and have nothing to say about a template.
+        # Open on a template opens it in the Template tab (task 169); the diff compares
+        # methods and has nothing to say about a template.
         self.open_button.setEnabled(len(selected) == 1)
         self.diff_methods_button.setEnabled(len(methods) == 2 == len(selected))
-        self.diff_instrument_button.setEnabled(len(methods) == 1 == len(selected))
 
     def _open(self) -> None:
         selected = self._selected()
@@ -203,18 +187,6 @@ class LibraryDialog(QDialog):
             self._complain(str(exc))
             return
         dialog = MethodDiffDialog(method_diff(a, b), self)
-        dialog.exec()
-
-    def _diff_instrument(self) -> None:
-        selected = self._selected()
-        if len(selected) != 1:
-            return
-        try:
-            picked = open_entry(selected[0])
-        except Exception as exc:  # noqa: BLE001
-            self._complain(str(exc))
-            return
-        dialog = InstrumentDiffDialog(picked, self._readings, self)
         dialog.exec()
 
     def _complain(self, message: str) -> None:
@@ -377,49 +349,3 @@ def _added_colour() -> QColor:
 
 def _removed_colour() -> QColor:
     return QColor("#8a8a8a")
-
-
-# --- method-to-instrument --------------------------------------------------------------
-
-
-class InstrumentDiffDialog(QDialog):
-    """One method's boxes, each a `StatePanel` marked against its last reading.
-
-    Opened already expanded, unlike the panes' own collapsed-by-default panels: a
-    trainee who asked for this comparison asked to see it, and there is no editor above
-    it competing for the screen. The refresh button is hidden -- this dialog has no
-    worker of its own to send a job to, so a fresher reading is taken from the box's own
-    pane and this dialog reopened.
-    """
-
-    def __init__(
-        self, method: Method, readings: Mapping[str, Reading],
-        parent: QWidget | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(f"{method.metadata.name or '(untitled)'} against the instrument")
-        self.resize(640, 560)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        inner = QWidget()
-        column = QVBoxLayout(inner)
-        # `StatePanel` renders through `boxstate.state_table` itself, the same function
-        # `methodlib.instrument_diff` is a thin wrapper over; the two never disagree
-        # because there is only the one function.
-        for box in method.boxes:
-            panel = StatePanel(box.name)
-            panel.refresh.setVisible(False)
-            panel.show_state(readings.get(box.name, Reading()), box)
-            panel.set_open(True)
-            column.addWidget(panel)
-        column.addStretch(1)
-        scroll.setWidget(inner)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
-        buttons.button(QDialogButtonBox.StandardButton.Close).clicked.connect(self.reject)
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(scroll, 1)
-        layout.addWidget(buttons)

@@ -22,12 +22,11 @@ does to the rows is `RunQueue.randomize`, and the window applies it, asks before
 replacing passes that exist, and writes the seed and order to the run log. The `pass`
 column is shown only once a queue has passes.
 
-**The beam guard is armed here and kept by the owner** (lab record, tasks 134 and 168).
-The dialog takes a floor typed in or worked out from a run picked off disk, and how many
-repetitions in a row under it end a run; the window sends it to the owner, which every
-acquisition then watches whoever started it, and the button says what the owner holds,
-so a person leaving the rack reads it there. It is never greyed by a running job: a
-person may arm it on any client's series or queue.
+**The beam guard's dialog is here and the guard is kept by the owner** (lab record, tasks
+134 and 168). The dialog takes a floor typed in or worked out from a run picked off disk,
+and how many repetitions in a row under it end a run; the window sends it to the owner,
+which every acquisition then watches whoever started it. Its button is the run strip's
+since task 169 (`runlog.RunPanel.guard_button`), on screen under every tab.
 """
 
 from __future__ import annotations
@@ -58,7 +57,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..acq import GUARD_FRACTION, GUARD_REPETITIONS, BeamGuard, from_run
-from ..owner.hold import Guarding
+from .runlog import GUARD_OFF, GUARD_ON, GUARD_TIP  # noqa: F401 -- re-exported
 from .runqueue import (
     DONE,
     FAILED,
@@ -93,15 +92,6 @@ the table -- two stems, a stop reason, a retry count and the console's errors --
 one whose tail a trainee can afford to read in the tooltip."""
 
 
-GUARD_OFF = "Beam guard: off…"
-GUARD_ON = "Beam guard: armed…"
-GUARD_TIP = ("Hold whatever is running when the beam is lost: a file whose repetitions "
-             "read under a floor of ions, several in a row, ends after the current "
-             "repetition and says failed; a queue or series then waits, paused by the "
-             "guard, until a person resumes it, and Resume acquires that row or point "
-             "again. Kept by clockwork serve, so it watches every client's runs.")
-
-
 class QueuePanel(QWidget):
     """The rows of an unattended series, with add, remove, reorder and reset."""
 
@@ -123,8 +113,6 @@ class QueuePanel(QWidget):
     save_requested = Signal()
     open_requested = Signal()
     """Save the queue to a file, or replace it with one. The dialogs are the window's."""
-    guard_requested = Signal()
-    """Arm, change or disarm the beam guard. The window asks; the owner keeps it."""
 
     def __init__(self, queue: RunQueue, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -133,8 +121,6 @@ class QueuePanel(QWidget):
         """Whether the owner has a job in flight. A queue cannot be started on top of a
         send or an acquisition: one owner runs one job at a time, and a queue's first
         act is to arm the boxes."""
-        self.guarding: Guarding | None = None
-        """The owner's beam guard as the window last read it, for the button."""
         self._rebuilding = False
         """`itemChanged` fires while the tree is being filled, and a row written back
         from a half-built item would overwrite the model with the widget's defaults."""
@@ -180,7 +166,6 @@ class QueuePanel(QWidget):
         self.down_button = QPushButton("Down")
         self.reset_button = QPushButton("Reset")
         self.randomize_button = QPushButton("Randomize…")
-        self.guard_button = QPushButton(GUARD_OFF)
         self.open_button = QPushButton("Open queue…")
         self.save_button = QPushButton("Save queue…")
         self.start_button = QPushButton("Start the queue")
@@ -206,7 +191,6 @@ class QueuePanel(QWidget):
                                     "replicates are spread over the series. Rows ticked "
                                     "\"stays first\" open every pass. A row's own "
                                     "replicates stay together."),
-            (self.guard_button, GUARD_TIP),
             (self.open_button, "Replace the queue with one saved to a file. Every row "
                                "opens waiting: the file is a plan, not a record."),
             (self.save_button, "Save the rows, their passes and the seed to a file, to "
@@ -229,25 +213,34 @@ class QueuePanel(QWidget):
         self.down_button.clicked.connect(lambda: self._move(1))
         self.reset_button.clicked.connect(self._reset)
         self.randomize_button.clicked.connect(lambda: self.randomize_requested.emit())
-        self.guard_button.clicked.connect(lambda: self.guard_requested.emit())
         self.open_button.clicked.connect(lambda: self.open_requested.emit())
         self.save_button.clicked.connect(lambda: self.save_requested.emit())
         self.start_button.clicked.connect(lambda: self.start_requested.emit())
         self.stop_button.clicked.connect(lambda: self.stop_requested.emit())
 
+        # Two rows, the table's edits and then the queue's file and run, because one row
+        # of eleven buttons set the window's minimum width at 1482 px, all but the whole
+        # of the instrument's working area (lab record, task 169's fit).
         buttons = QWidget()
-        row = QHBoxLayout(buttons)
-        row.setContentsMargins(0, 0, 0, 0)
+        rows = QVBoxLayout(buttons)
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(4)
+        editing = QHBoxLayout()
+        editing.setContentsMargins(0, 0, 0, 0)
         for button in (self.add_button, self.add_open_button, self.remove_button,
                        self.up_button, self.down_button, self.reset_button,
                        self.randomize_button):
-            row.addWidget(button)
-        row.addStretch(1)
-        row.addWidget(self.guard_button)
-        row.addWidget(self.open_button)
-        row.addWidget(self.save_button)
-        row.addWidget(self.start_button)
-        row.addWidget(self.stop_button)
+            editing.addWidget(button)
+        editing.addStretch(1)
+        running = QHBoxLayout()
+        running.setContentsMargins(0, 0, 0, 0)
+        running.addWidget(self.open_button)
+        running.addWidget(self.save_button)
+        running.addStretch(1)
+        running.addWidget(self.start_button)
+        running.addWidget(self.stop_button)
+        rows.addLayout(editing)
+        rows.addLayout(running)
 
         column = QVBoxLayout(self)
         column.setContentsMargins(4, 4, 4, 4)
@@ -319,14 +312,6 @@ class QueuePanel(QWidget):
         muted = QColor(self.palette().windowText().color())
         muted.setAlpha(140)
         return muted
-
-    def show_guard(self, guarding: Guarding | None) -> None:
-        """The owner's beam guard, as the button says it."""
-        self.guarding = guarding
-        self.guard_button.setText(GUARD_ON if guarding is not None else GUARD_OFF)
-        self.guard_button.setToolTip(
-            f"{guarding.text[:1].upper()}{guarding.text[1:]}. {GUARD_TIP}"
-            if guarding is not None else GUARD_TIP)
 
     def _refresh_caption(self) -> None:
         if not self.queue.rows:

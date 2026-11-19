@@ -67,11 +67,13 @@ __all__ = [
     "PROJECT_KEYS",
     "SCHEMA_VERSION",
     "STANDING_KEYS",
+    "AgentRange",
     "Finding",
     "KnobLimit",
     "Limits",
     "LimitsError",
     "TemplateLimits",
+    "agent_ranges",
     "check",
     "cold_start",
     "combine",
@@ -652,6 +654,61 @@ def outside_limits(rendered: Rendered, limits: Limits) -> list[str]:
     165). The boxes, electrodes and RF drive an agent's send is also checked against are
     not knobs, and are not said here."""
     return _template_problems(rendered, limits)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRange:
+    """How far an agent may turn one knob of one template under the limits in force:
+    the template entry's range narrowed by a standing cap of the same name, or the value
+    the entry fixes it at. `limit` None is the template's own range, unnarrowed.
+
+    For the window's Template tab, which shows a person each knob against the template's
+    range and this one and holds them to neither (the window revision's R10; lab record,
+    task 169). `outside_limits` is the record's account of the same thing, in sentences.
+    """
+
+    name: str
+    limit: KnobLimit | None = None
+    fixed: Number | None = None
+    whose: str = "the standing limits"
+
+    def holds(self, value: Number) -> bool:
+        if self.fixed is not None:
+            return value == self.fixed
+        return self.limit is None or self.limit.holds(value)
+
+    def text(self, unit: str = "") -> str:
+        suffix = f" {unit}" if unit else ""
+        if self.fixed is not None:
+            return f"fixed at {self.fixed}{suffix}"
+        if self.limit is None:
+            return "the template's own range"
+        return self.limit.text(unit)
+
+
+def agent_ranges(template_hash: str, limits: Limits,
+                 knobs: Iterable[str]) -> dict[str, AgentRange] | None:
+    """Each named knob's `AgentRange` for the template of `template_hash`, or None where
+    the limits do not admit that template at all, so an agent may not run it."""
+    entry = limits.entry_for(template_hash)
+    if entry is None:
+        return None
+    bounds = {limit.name: limit for limit in entry.knobs}
+    fixed = dict(entry.fixed)
+    ranges: dict[str, AgentRange] = {}
+    for name in knobs:
+        if name in fixed:
+            ranges[name] = AgentRange(name, fixed=fixed[name], whose=entry.whose)
+            continue
+        own, cap = bounds.get(name), limits.cap_for(name)
+        mins = [limit.min for limit in (own, cap) if limit is not None
+                and limit.min is not None]
+        maxes = [limit.max for limit in (own, cap) if limit is not None
+                 and limit.max is not None]
+        limit = (KnobLimit(name, max(mins) if mins else None, min(maxes) if maxes else None)
+                 if mins or maxes else None)
+        ranges[name] = AgentRange(name, limit=limit, whose=entry.whose)
+    return ranges
 
 
 def _template_problems(rendered: Rendered, limits: Limits) -> list[str]:

@@ -392,73 +392,20 @@ def test_start_order_carries_each_commands_own_comments():
     ]
 
 
-# --- the legacy import (task 48 step 6) -----------------------------------------------
-
-
-def test_the_clock_trainee_file_splits_into_its_three_panes():
-    """The one multi-box paste file that names its boxes. Every phase equals the
-    transcription's except where the transcription declares what the trainee file
-    does not say, which is stated here rather than hidden:
-
-    - AUKLET's `STBLCLK,EXT` and `STBLTRG,SW` appear in no trainee file and were
-      added on 2026-09-15 and 2026-09-16 (lab record, tasks 41 and 42).
-    - the travelling-wave frequency and amplitude block is given once, unlabelled,
-      for two boxes, so the split leaves it unattributed rather than guessing.
-    """
-    text = golden("bradykinin-clock", TRAINEE_FILES["bradykinin-clock"])
-    loaded = golden_method("bradykinin-clock")
-    panes = pane_text.split_trainee_file(text, LABELS)
-    assert set(panes) == {None, "auklet", "bufflehead", "cormorant"}
-
-    parsed = {box.name: pane_text.parse_pane(panes[box.name], box.name)
-              for box in loaded.boxes}
-    undeclared = ["STBLCLK,EXT", "STBLTRG,SW"]
-    common = [f"SWFREQ,{channel},15000" for channel in (1, 2, 3, 4)] \
-        + [f"SWFVRNG,{channel},15" for channel in (1, 2, 3, 4)]
-    for box in loaded.boxes:
-        missing = undeclared if box.name == "auklet" else common
-        assert commands(parsed[box.name].setup) \
-            == [string for string in box.setup if string not in missing], box.name
-        assert commands(parsed[box.name].load) == list(box.load), box.name
-        assert commands(parsed[box.name].arm) == list(box.arm), box.name
-
-    assert commands(pane_text.parse_pane(panes[None], "?").setup) == common
-    assert tuple(step for step in pane_text.start_order(parsed)
-                 if not is_comment(step.command)) == loaded.start
-    assert tuple(step for name in parsed for step in parsed[name].reset
-                 if not is_comment(step.command)) == loaded.reset
+# --- the golden trainee files, classified (task 48 step 6) ---------------------------
+#
+# The window's import of a multi-box paste file was cut in the window's 1.2.0 revision
+# (E8; lab record, task 169) and `split_trainee_file` with it. What a paste file's lines
+# classify as is still the classifier's, and is checked here on the files themselves.
 
 
 def test_the_clock_files_falkor_settings_are_unplaced_not_sent():
     text = golden("bradykinin-clock", TRAINEE_FILES["bradykinin-clock"])
-    panes = pane_text.split_trainee_file(text, LABELS)
-    unplaced = [line.text for line in pane_text.parse_pane(panes[None], "?").unplaced]
-    assert [line.split(" #")[0] for line in unplaced] == [
-        "Ion Mobility Scans = 5000",
-        "Accumulations = 100",
-        "File name = YYMMDD_ION_xxx",
-    ]
-
-
-def test_a_commands_trailing_comment_moves_onto_its_own_line():
-    split = pane_text.split_trainee_file(
-        "#Then, the following are sent to MIPS to run the experiment.\n"
-        "TARBTRG #sent to MIPS B. Executes the compression table.\n"
-        "TBLSTRT #sent to MIPS A. Executes the pulse sequence.\n",
-        LABELS,
-    )
-    assert split["bufflehead"].splitlines()[-1] == "TARBTRG"
-    assert split["auklet"].splitlines()[-1] == "TBLSTRT"
-    assert "Executes the compression table." in split["bufflehead"]
-
-
-def test_a_file_that_names_no_box_is_left_whole_for_the_clipboard():
-    """The detection-response file attributes nothing, which is the honest answer
-    rather than a guess: it is one experiment's strings for three boxes with no
-    box named anywhere in it."""
-    text = golden("detection-response", TRAINEE_FILES["detection-response"])
-    panes = pane_text.split_trainee_file(text, LABELS)
-    assert list(panes) == [None]
+    unplaced = [line.text.split(" #")[0]
+                for line in pane_text.parse_pane(text, "?").unplaced]
+    for prose in ("Ion Mobility Scans = 5000", "Accumulations = 100",
+                  "File name = YYMMDD_ION_xxx"):
+        assert prose in unplaced, unplaced
 
 
 def test_the_detection_response_lines_classify_as_the_transcription_files_them():
@@ -481,9 +428,3 @@ def test_the_detection_response_lines_classify_as_the_transcription_files_them()
         assert line.tag == declared[line.text], line.text
         seen += 1
     assert seen == 11
-
-
-def test_splitting_without_a_map_keeps_the_labels_the_file_used():
-    split = pane_text.split_trainee_file(
-        "#Pulse sequence. Send to MIPS A.\nSTBLDAT;0:A:1[A:1,10:];\n")
-    assert list(split) == ["MIPS A"]

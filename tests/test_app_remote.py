@@ -368,13 +368,13 @@ def test_a_window_joining_a_busy_daemon_can_send_setup_once_it_is_idle(
         # The status can arrive before the `connected` that sets the flag: wait for both.
         qtbot.waitUntil(lambda: made._scan_when_idle, timeout=20_000)
         assert made.worker.status.running == handle
-        assert not made.setup_button.isEnabled()
+        assert not made.send_button.isEnabled()
     finally:
         claude.stop("the test is over")
     qtbot.waitUntil(lambda: made._job is None and made.worker.status is not None
                     and made.worker.status.running is None
                     and made.worker.status.issued > handle.id, timeout=120_000)
-    qtbot.waitUntil(lambda: made.setup_button.isEnabled(), timeout=20_000)
+    qtbot.waitUntil(lambda: made.send_button.isEnabled(), timeout=20_000)
     assert not made._scan_when_idle
     assert made.ports == {entry.name: entry.port for entry in method.boxes}
 

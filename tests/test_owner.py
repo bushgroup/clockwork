@@ -641,8 +641,7 @@ def test_a_window_refused_the_lock_says_who_holds_it_and_greys_the_hardware(
         assert window.lock_label.isVisibleTo(window)
         assert "bench script" in window.lock_label.text()
         assert window.find_button.isEnabled()
-        for button in (window.setup_button, window.arm_button, window.acquire_button,
-                       window.replicate_button):
+        for button in (window.send_button, window.acquire_button):
             assert not button.isEnabled()
         assert not window.action_console.isEnabled()
         assert window.worker.boxes == ()

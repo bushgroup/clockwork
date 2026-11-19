@@ -1,24 +1,19 @@
-"""A library of saved methods on disk, and the two diffs a trainee reads them by.
+"""A library of saved methods on disk, and the diff a person reads two of them by.
 
 The Qt-free half of the method library (lab record, task 54, window design decision 10):
-a directory scanned for documents, each named, hashed, dated and described; a comparison
-of two methods against each other; and a comparison of one method against what the boxes
-are holding now. `clockwork.app.librarypanel` draws what this module computes -- nothing
-here imports Qt, so a clone with no display exercises the whole of it
-(`tools/check_public.py`).
+a directory scanned for documents, each named, hashed, dated and described, and a
+comparison of two methods against each other. `clockwork.app.librarypanel` draws what this
+module computes -- nothing here imports Qt, so a clone with no display exercises the whole
+of it (`tools/check_public.py`).
 
-**Both diffs are rendered from `to_dict`, never from the TOML text.** A method saved with
+**The diff is rendered from `to_dict`, never from the TOML text.** A method saved with
 different line wrapping or key order is the same method, and a diff built off the text
 would report a difference that changes nothing a box is sent. `stamp()`'s hash is the
 same rule already applied to provenance; this module applies it to comparison.
 
-**The method-to-instrument diff adds no new comparison.** Task 51 built the mapping from
-a `setup` string to the getter that reads it back -- `declared_commands` for the declared
-DC bias and RF tables, `declared_settings` for the ARB module getters and every other
-indexed setter the wire format names -- and `clockwork.app.boxstate.state_table` already
-marks a box's reading against a method's declarations with it. `instrument_diff` below is
-the whole of what this module adds: the same comparison, run against a method picked from
-the library rather than the one open in the panes.
+The comparison of a method against what the boxes hold was cut with the window's 1.2.0
+revision (E8; lab record, task 169): the state panels under the panes make it, against
+what the boxes were last sent (E2).
 """
 
 from __future__ import annotations
@@ -37,7 +32,6 @@ from .. import library_dirs
 from .. import method as method_module
 from ..method import Method
 from ..method import template as templates
-from .boxstate import Reading, StateTable, state_table
 
 __all__ = [
     "HASH_DIGITS",
@@ -50,7 +44,6 @@ __all__ = [
     "LibraryEntry",
     "LineDiff",
     "MethodDiff",
-    "instrument_diff",
     "library_files",
     "method_diff",
     "open_entry",
@@ -72,13 +65,12 @@ TEMPLATE = "template"
 
 TEMPLATE_REFUSAL = (
     "This is a method template, not a method: it has holes that knob values fill, and the "
-    "window opens methods only. Render it to a method file with File > Build a method from "
-    "a template, with clockwork render-template --template PATH --to FILE, or ask Claude "
-    "for the method you want; then open that file here or add it to the run queue.")
-"""What File > Open says of a template (lab record, task 94): no knob panel in the
-acquisition window, by decision, so the sentence names the three ways a method is made
-from one, the builder first (task 164). The library's Open on a template goes to the
-builder instead."""
+    "Method tab opens methods only. Open it in the Template tab to set its knobs, run it "
+    "or save it as a method file; or render it with clockwork render-template --template "
+    "PATH --to FILE, or ask Claude for the method you want.")
+"""What File > Open says of a template (lab record, task 94): the sentence names the three
+ways a method is made from one, the Template tab first (task 169). The library's Open on a
+template goes to the Template tab instead."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -441,16 +433,3 @@ def _line_diff(a: Sequence[str], b: Sequence[str]) -> tuple[LineDiff, ...]:
 
 
 # --- method-to-instrument -------------------------------------------------------------
-
-
-def instrument_diff(picked: Method, readings: Mapping[str, Reading]) -> dict[str, StateTable]:
-    """Every box `picked` names, marked against its last reading in `readings`.
-
-    Thin glue over `clockwork.app.boxstate.state_table`, task 51's declared-versus-read
-    comparison: nothing here decides which setter a getter reads back, `state_table`
-    already does, and this only points it at a method picked from the library instead of
-    the one built from the open panes. A box the picked method names that nothing has
-    read yet still gets an entry, `state_table`'s own "not read yet".
-    """
-    return {box.name: state_table(readings.get(box.name, Reading()), box)
-            for box in picked.boxes}

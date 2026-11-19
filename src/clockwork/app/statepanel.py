@@ -212,7 +212,7 @@ class StatePanel(QWidget):
         self.summary.setText(
             "" if not differing else
             f"{differing} setting{'s' if differing != 1 else ''} "
-            f"{'disagree' if differing != 1 else 'disagrees'} with the method")
+            f"{'disagree' if differing != 1 else 'disagrees'} with what was last sent")
         _colour(self.summary, self._warn_colour())
         self.caption.setText(table.caption)
 

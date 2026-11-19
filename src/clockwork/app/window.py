@@ -1,10 +1,15 @@
-"""The window a trainee runs an acquisition day on SLIMPHONY from.
+"""The window a person runs an acquisition day on SLIMPHONY from.
 
-One pane per box holding the strings that used to be pasted into MIPS_QT6's terminal,
-the `[acquisition]` settings as a form, and six buttons: find the boxes, send the setup,
-load and arm, acquire N replicates, one more replicate, stop. No FALKOR, no MIPS_QT6, no
-terminal. The lab record's task 50 is the design and its twelve decisions; this module
-is the part of it that has widgets.
+Five tabs, one for each way of using it (the window revision's E1; lab record, task 169):
+**Template** renders a template at knob values and runs it; **Queue** runs a row queue or
+an agent's series plan and follows any client's series; **Method** holds one pane per box
+with the strings that used to be pasted into MIPS_QT6's terminal, the `[acquisition]`
+settings as a form, Acquire and Send; **Day** lists the day's requests as their records
+word them; **Setup** holds where the files go, the sitting, the boxes and the console.
+Under all five, the run strip (the job in flight, whose, where, minutes left; the pauses,
+Resume, Stop, the note, the "at the window" initials, the beam guard) and the run log.
+No FALKOR, no MIPS_QT6, no terminal. The lab record's task 50 is the first design and
+its decisions; task 169 is the revision this layout is.
 
 **It holds no copy of the acquisition sequence and no interpretation of a string.**
 `send_phases` and `run_acquisition` are the whole of what an acquisition is, and
@@ -41,7 +46,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
-    QDockWidget,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -88,7 +92,7 @@ from ..method import (
 )
 from ..method import template as templates
 from ..method.template import Rendered
-from ..method.text import PaneResult, render_pane, split_trainee_file, start_order
+from ..method.text import PaneResult, render_pane, start_order
 from ..owner import (
     POINT,
     REPETITION,
@@ -108,8 +112,8 @@ from ..owner.hold import refusal as pause_refusal
 from ..sitting import instrument_and_limits
 from . import errors, runqueue
 from .boxstate import Reading
-from .builder import BuildDialog
 from .console_panel import ConsoleBar, ConsoleSettings
+from .daypanel import DayPanel
 from .launch import (
     open_data_file,
     open_data_file_with_options,
@@ -126,6 +130,7 @@ from .runlog import RunPanel
 from .runqueue import QueueRow, RunQueue
 from .serving import serve_command, start_serve
 from .settings import Settings
+from .templatetab import TemplateTab
 from .worker import (
     Acquire,
     ConsoleStatus,
@@ -143,7 +148,13 @@ from .worker import (
     wire_fingerprint,
 )
 
-__all__ = ["DRAIN_MS", "MainWindow"]
+__all__ = ["DAY_TAB", "DRAIN_MS", "METHOD_TAB", "QUEUE_TAB", "SETUP_TAB", "TEMPLATE_TAB",
+           "MainWindow", "TABS"]
+
+TEMPLATE_TAB, QUEUE_TAB, METHOD_TAB, DAY_TAB, SETUP_TAB = (
+    "Template", "Queue", "Method", "Day", "Setup")
+TABS = (TEMPLATE_TAB, QUEUE_TAB, METHOD_TAB, DAY_TAB, SETUP_TAB)
+"""The five tabs, in the order the window shows them (E1)."""
 
 MAINSPRING_TIP = ("Open the file in mainspring, which is the only viewer clockwork has. "
                   "The summed companion once the fold has written it, the raw file "
@@ -256,25 +267,18 @@ class MainWindow(QMainWindow):
         boxes should not lose three readings that cost fifteen seconds."""
 
         self._job: Job | None = None
-        self._armed: tuple = ()
-        """What the last successful send put on the boxes (`wire_fingerprint`).
-
-        Read with `matches_wire` and never with `==`: a Load and arm records `None` for
-        the setup phase it did not send, and a phase the wire never saw is not one the
-        panes can have changed since (task 56).
-
-        `run_acquisition` expects the boxes to be loaded and armed already, so this is
-        what lets the window say "send first" rather than let a trainee watch three
-        `TBLSTRT`s be refused for "not in table mode". It survives a run and a
-        replicate, because neither changes what a box is holding, and it goes stale the
-        moment a pane is edited."""
+        self._sent_shown: tuple | None = None
+        """The send the state panels were last marked against, so they are re-marked
+        only when it moves."""
+        self._described: dict[str, tuple[str, str, bool]] = {}
+        """What each box answered at the last scan, `(port, firmware, answered)`, kept
+        here so that a pane rebuilt by a method load keeps its header (the window
+        design's FLAG of 2026-09-22, closed by task 169): the boxes were never closed by
+        a load, only the display of them was, and the natural repair was Find boxes."""
 
         self.queue = RunQueue()
-        """The unattended series, empty until a trainee puts something in it (task 53).
-
-        The window is its sequencer: it submits the same `Send` and `Acquire` jobs the
-        buttons do, one row at a time, so a queued acquisition and a pressed one are the
-        same path onto the wire and leave the same files and logs behind."""
+        """The run queue's rows, empty until a person puts something in it (task 53).
+        Start hands a snapshot of them to the owner as one series job (task 168)."""
 
         self._queue_job: SeriesJob | None = None
         """The queue job this window started, while it runs: the owner's series job
@@ -361,7 +365,74 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"clockwork {clockwork.__version__}"
                             + ("  — simulated instrument" if self.fake else ""))
 
+        # Five tabs, one for each way of using the window, over the run strip and the run
+        # log, which stay on screen under all of them (the window revision's E1; lab
+        # record, task 169). Reverses the window design's decision 7, one method at a
+        # time with the queue as a dock: since then the daemon, templates and series
+        # give the window three ways of starting a run and a fourth use, following one
+        # it did not start.
+        self.template_tab = TemplateTab()
+        self.queue_panel = QueuePanel(self.queue)
+        self.plan_panel = PlanPanel()
+        self.follow = SeriesFollow()
+        self.queue_tabs = QTabWidget()
+        self.queue_tabs.addTab(self.queue_panel, "Rows")
+        self.queue_tabs.addTab(self.plan_panel, "Series plan")
+        self.queue_tab = QSplitter(Qt.Orientation.Vertical)
+        """The Queue tab: the row queue and a series plan, one surface (R9), over the
+        followed table, which follows any client's series (R5)."""
+        self.queue_tab.addWidget(self.queue_tabs)
+        self.queue_tab.addWidget(self.follow)
+        self.method_tab = self._method_tab()
+        self.day_panel = DayPanel()
+        self.setup_tab = self._setup_tab()
+
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        for widget, name in ((self.template_tab, TEMPLATE_TAB), (self.queue_tab, QUEUE_TAB),
+                             (self.method_tab, METHOD_TAB), (self.day_panel, DAY_TAB),
+                             (self.setup_tab, SETUP_TAB)):
+            self.tabs.addTab(widget, name)
+
+        self.run_panel = RunPanel()
+        whole = QSplitter(Qt.Orientation.Vertical)
+        whole.addWidget(self.tabs)
+        whole.addWidget(self.run_panel)
+        whole.setStretchFactor(0, 3)
+        whole.setStretchFactor(1, 2)
+        whole.setChildrenCollapsible(False)
+        self.setCentralWidget(whole)
+
+        self.lock_label = QLabel()
+        """The one sentence a window refused the instrument lock shows: who holds it."""
+        self.lock_label.setVisible(False)
+        self.statusBar().addPermanentWidget(self.lock_label)
+        self.boxes_label = QLabel("no boxes yet")
+        """Which boxes answered, on which ports: the status bar's boxes."""
+        self.daemon_label = QLabel("in process, --fake" if self.fake else "no daemon yet")
+        """Which owner holds the instrument: the status bar's daemon."""
+        self.statusBar().addPermanentWidget(self.boxes_label)
+        self.statusBar().addPermanentWidget(self.daemon_label)
+        self.console_bar = ConsoleBar()
+        self.statusBar().addPermanentWidget(self.console_bar)
+        self.statusBar().showMessage("ready")
+        self._build_menus()
+
+    def _method_tab(self) -> QWidget:
+        """The Method tab: the panes and their state panels, the acquisition form,
+        Acquire and Send, and the line saying whether the panes are what the boxes hold."""
         self.pane_box = QSplitter(Qt.Orientation.Horizontal)
+        self.pane_box.setChildrenCollapsible(False)
+        # The panes no longer set the window's minimum width (the window design's FLAG
+        # of 2026-09-19, closed by task 169): three of them side by side wanted some
+        # 400 px more than the instrument's monitor gave, so they scroll sideways
+        # inside the tab rather than widen the window.
+        pane_scroll = QScrollArea()
+        pane_scroll.setWidget(self.pane_box)
+        pane_scroll.setWidgetResizable(True)
+        pane_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        pane_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.pane_scroll = pane_scroll
         self.start_order = QLabel("")
         self.start_order.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -384,76 +455,36 @@ class MainWindow(QMainWindow):
             "changes what is sent makes it a hand-written method.")
         self.provenance.setVisible(False)
 
+        self.held_line = QLabel("")
+        """Whether the panes are what the boxes hold (E2): one line over the panes."""
+        self.held_line.setWordWrap(True)
+        self.held_line.setToolTip(
+            "Compared with what clockwork serve remembers sending the boxes last, "
+            "whichever window, agent or command line sent it. The state panels under "
+            "the panes mark each box's reading against that same send.")
+
         panes_and_order = QWidget()
         column = QVBoxLayout(panes_and_order)
         column.setContentsMargins(0, 0, 0, 0)
         column.addWidget(self.provenance)
-        column.addWidget(self.pane_box, 1)
-        column.addWidget(QLabel("Start order"))
-        column.addWidget(self.start_order)
-
-        self.run_panel = RunPanel()
-        self.problems = QLabel("")
-        self.problems.setWordWrap(True)
-        self.problems.setTextFormat(Qt.TextFormat.PlainText)
+        column.addWidget(self.held_line)
+        column.addWidget(pane_scroll, 1)
+        order_row = QHBoxLayout()
+        order_row.setContentsMargins(0, 0, 0, 0)
+        order_row.addWidget(QLabel("Start order"))
+        order_row.addWidget(self.start_order, 1)
+        column.addLayout(order_row)
 
         middle = QSplitter(Qt.Orientation.Horizontal)
         middle.addWidget(panes_and_order)
-        middle.addWidget(self._side_panel())
+        middle.addWidget(self._method_column())
         middle.setStretchFactor(0, 3)
-        middle.setStretchFactor(1, 2)
+        middle.setStretchFactor(1, 1)
+        middle.setChildrenCollapsible(False)
+        return middle
 
-        whole = QSplitter(Qt.Orientation.Vertical)
-        whole.addWidget(middle)
-        bottom = QWidget()
-        bottom_column = QVBoxLayout(bottom)
-        bottom_column.setContentsMargins(0, 0, 0, 0)
-        bottom_column.addWidget(self.problems)
-        bottom_column.addWidget(self.run_panel, 1)
-        whole.addWidget(bottom)
-        whole.setStretchFactor(0, 2)
-        whole.setStretchFactor(1, 1)
-        self.setCentralWidget(whole)
-
-        # The queue is a dock rather than a fourth splitter pane: one method at a time
-        # is the first release and stays the ordinary way to work (the window design's
-        # decision 7), so a trainee who never runs a series should not pay screen for
-        # one. Shut by default, remembered per machine, and it opens to the full
-        # width of the window under the run log, where an overnight series is read
-        # beside the warnings it produced.
-        self.queue_panel = QueuePanel(self.queue)
-        # A series plan is the dock's second kind of entry (lab record, task 166), and the
-        # followed table sits under both, since it follows any client's series; three
-        # widgets task 169 moves into its Queue tab as they are.
-        self.plan_panel = PlanPanel()
-        self.follow = SeriesFollow()
-        self.queue_tabs = QTabWidget()
-        self.queue_tabs.addTab(self.queue_panel, "Rows")
-        self.queue_tabs.addTab(self.plan_panel, "Series plan")
-        queue_box = QWidget()
-        queue_column = QVBoxLayout(queue_box)
-        queue_column.setContentsMargins(0, 0, 0, 0)
-        queue_column.addWidget(self.queue_tabs, 1)
-        queue_column.addWidget(self.follow, 1)
-        self.queue_dock = QDockWidget("Run queue", self)
-        self.queue_dock.setObjectName("run_queue")
-        self.queue_dock.setWidget(queue_box)
-        self.queue_dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea
-                                        | Qt.DockWidgetArea.TopDockWidgetArea)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.queue_dock)
-        self.queue_dock.setVisible(False)
-
-        self.lock_label = QLabel()
-        """The one sentence a window refused the instrument lock shows: who holds it."""
-        self.lock_label.setVisible(False)
-        self.statusBar().addPermanentWidget(self.lock_label)
-        self.console_bar = ConsoleBar()
-        self.statusBar().addPermanentWidget(self.console_bar)
-        self.statusBar().showMessage("ready")
-        self._build_menus()
-
-    def _side_panel(self) -> QWidget:
-        """The form half: what is acquired, where it goes, and the six buttons."""
+    def _method_column(self) -> QWidget:
+        """The Method tab's form half: what is acquired, the file, Acquire and Send."""
         # Ranged to the loader's own ceilings, so a box can never show a number other
         # than the one the document says: a document past a ceiling is refused at
         # open rather than clamped into the box (`clockwork.method.MAX_SCANS`).
@@ -490,12 +521,6 @@ class MainWindow(QMainWindow):
         self.enable_channel.setPlaceholderText("DIOA")
         self.enable_channel.setMaximumWidth(80)
 
-        enable_row = QWidget()
-        enable_layout = QHBoxLayout(enable_row)
-        enable_layout.setContentsMargins(0, 0, 0, 0)
-        enable_layout.addWidget(self.enable_box, 1)
-        enable_layout.addWidget(self.enable_channel)
-
         acquisition = QGroupBox("Acquisition")
         form = QFormLayout(acquisition)
         _tighten(form)
@@ -503,39 +528,26 @@ class MainWindow(QMainWindow):
         form.addRow("Scans", self.scans)
         form.addRow("Accumulations", self.accumulations)
         form.addRow("Repetition mode", self.repetition_mode)
-        form.addRow("Enable", enable_row)
+        form.addRow("Enable", _row(self.enable_box, self.enable_channel))
         form.addRow("", self.keep_raw)
 
-        # -- the file ---------------------------------------------------
-        self.output_dir = QLineEdit()
-        self.output_dir.setPlaceholderText("where the files go")
-        browse_out = QPushButton("…")
-        browse_out.setMaximumWidth(32)
-        browse_out.clicked.connect(self._pick_output_dir)
-        out_row = _row(self.output_dir, browse_out)
-
-        self.initials = QLineEdit()
-        self.initials.setMaximumWidth(80)
-        self.initials.setToolTip(
-            "The middle field of every file name, remembered per machine. The lab's "
-            "files use the ion's code here; the window takes no view.")
         self.stem = QLineEdit()
         self.stem.setToolTip(
             "What this acquisition's files will be called. Filled from the output "
-            "directory each time -- one past the highest number these initials already "
-            "use there -- and editable before Acquire. A replicate takes the next "
-            "number without asking.")
+            "directory each time -- one past the highest number the file initials "
+            "already use there -- and editable before Acquire. Each replicate takes the "
+            "next number without asking.")
         rename = QPushButton("Next")
         rename.setMaximumWidth(56)
         rename.setToolTip("Re-read the output directory and take the next free number.")
         rename.clicked.connect(self._refresh_stem)
-
         self.replicates = QSpinBox()
         self.replicates.setRange(1, 999)
+        self.replicates.setPrefix("replicates: ")
         self.replicates.setToolTip(
-            "Technical replicates, run unattended after the first acquisition: the "
-            "method's reset list, then the same again into a file of its own. Stop "
-            "ends the series after the current repetition.")
+            "Files acquired from one press, the first and its technical replicates, "
+            "run unattended: the method's reset list, then the same again into a file "
+            "of its own. Stop ends them after the current repetition.")
         self.conditions = QPlainTextEdit()
         self.conditions.setPlaceholderText(
             "sample, MCP voltage, pusher period, collision energy…")
@@ -545,135 +557,176 @@ class MainWindow(QMainWindow):
             "method writes and into the header of its send log. Everything else in "
             "that record came off a wire; this exists only if somebody types it.")
 
-        files = QGroupBox("Files")
-        files_form = QFormLayout(files)
-        _tighten(files_form)
-        files_form.addRow("Output directory", out_row)
-        files_form.addRow("Initials", self.initials)
-        files_form.addRow("Name", _row(self.stem, rename))
-        # Not a row of its own: the spinner itself lives beside Acquire, where the button
-        # that consumes it is, and the label left behind here sat in the Files group with
-        # nothing next to it for the whole of the 2026-09-17 sitting (task 56).
-        files_form.addRow("Conditions", self.conditions)
-
-        # -- the instrument document ------------------------------------
-        self.instrument_field = QLineEdit()
-        self.instrument_field.setReadOnly(True)
-        self.instrument_field.setPlaceholderText("no instrument document")
-        browse_instrument = QPushButton("…")
-        browse_instrument.setMaximumWidth(32)
-        browse_instrument.clicked.connect(self._pick_instrument)
-        self.instrument_status = QLabel("")
-        self.instrument_status.setWordWrap(True)
-
-        document = QGroupBox("Instrument")
-        document_form = QFormLayout(document)
-        _tighten(document_form)
-        document_form.addRow("Document", _row(self.instrument_field, browse_instrument))
-        document_form.addRow("", self.instrument_status)
-
-        # -- the buttons -------------------------------------------------
-        self.find_button = QPushButton("Find boxes")
-        self.setup_button = QPushButton("Send setup")
-        self.arm_button = QPushButton("Load and arm")
         self.acquire_button = QPushButton("Acquire")
-        self.replicate_button = QPushButton("Replicate")
-        self.stop_button = QPushButton("Stop")
+        self.send_button = QPushButton("Send")
+        self.setup_again = QCheckBox("send setup again")
         self.mainspring_button = QPushButton("Open in mainspring")
         self.log_button = QPushButton("Open the log")
-        self.open_on_acquire = QCheckBox("Open mainspring on Acquire")
-        self.open_on_acquire.setToolTip(
-            "On, the first acquisition of this session opens mainspring on the file "
-            "being written, following, in the Show mode the repetition mode asks for. "
-            "One viewer a session and not one a run: a viewer opened this way ends "
-            "with Live ticked and moves to each later acquisition by itself, so a "
-            "replicate series and a run queue open one window between them. Close it "
-            "and the next Acquire brings one back; the button above opens another "
-            "whenever you want a second.")
         for button, tip in (
-            (self.find_button, "Ask every MIPS-class port what box is behind it. A "
-                               "port that does not answer has its box off or absent; "
-                               "port presence says nothing."),
-            (self.setup_button, "send_phases(setup=True): every phase, plus the state "
-                                "readback that records what the boxes were holding and "
-                                "what setup left them at."),
-            (self.arm_button, "send_phases(setup=False): the table and the mode change "
-                              "only, for boxes that have had their setup since "
-                              "power-up."),
-            (self.acquire_button, "The first acquisition, then a replicate for each "
-                                  "further count, one file each. Every one of them "
-                                  "re-arms the boxes and puts the digitizer's enable "
-                                  "down first, so a second press is as good as the "
-                                  "first."),
-            (self.replicate_button, "One more acquisition off the last one's readback: "
-                                    "the reset list, then the same again."),
-            (self.stop_button, "End the series after the current repetition and its "
-                               "fold. What it leaves on disk is a short experiment, "
-                               "not a broken one."),
+            (self.acquire_button, "Send the boxes what they do not already hold of the "
+                                  "panes, then acquire the first file and its "
+                                  "replicates. On boxes that hold this method nothing "
+                                  "is sent, and the first file is a replicate."),
+            (self.send_button, "Send the boxes what they do not already hold of the "
+                               "panes, and acquire nothing: every phase where they "
+                               "hold something else, setup only where it differs from "
+                               "what they were last sent."),
+            (self.setup_again, "Send every box its setup phase with the next Acquire or "
+                               "Send, even where it is what they were last sent: for a "
+                               "box switched off and on since. Clears itself once sent."),
             (self.mainspring_button, MAINSPRING_TIP),
             (self.log_button, "Open both files a run leaves beside the data: the wire "
                               "transcript and the send log."),
         ):
             button.setToolTip(tip)
 
-        # Eight rows of one button became five rows, which is 75 px of the column's
-        # minimum height and the difference between a scroll bar that appears on the
-        # instrument's monitor and one that does not (task 61). The order is still the
-        # order the day is worked in, read left to right and then down, and **Acquire
-        # keeps a row to itself** with its spinner: it is the button the window is for,
-        # and the three above it are the three that prepare it.
-        buttons = QWidget()
-        grid = QVBoxLayout(buttons)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(4)
-        grid.addWidget(_row(self.find_button, self.setup_button, self.arm_button))
-        # The label goes with the widget. It used to sit in the Files group, a form row
-        # whose field was over here beside the button that consumes it, and the sitting
-        # of 2026-09-17 spent a day looking at the word "Replicates" with nothing next to
-        # it (task 56). A prefix rather than a `QLabel`, so the number and the word are
-        # one thing and cannot be separated again.
-        self.replicates.setPrefix("replicates: ")
-        grid.addWidget(_row(self.acquire_button, self.replicates))
-        grid.addWidget(_row(self.replicate_button, self.stop_button))
-        grid.addWidget(_row(self.mainspring_button, self.log_button))
-        grid.addWidget(self.open_on_acquire)
+        files = QGroupBox("This run")
+        files_form = QFormLayout(files)
+        _tighten(files_form)
+        files_form.addRow("Name", _row(self.stem, rename))
+        files_form.addRow("Conditions", self.conditions)
+        files_form.addRow(_row(self.acquire_button, self.replicates))
+        files_form.addRow(_row(self.send_button, self.setup_again))
+        files_form.addRow(_row(self.mainspring_button, self.log_button))
+
+        self.problems = QLabel("")
+        self.problems.setWordWrap(True)
+        self.problems.setTextFormat(Qt.TextFormat.PlainText)
 
         panel = QWidget()
         column = QVBoxLayout(panel)
         column.setSpacing(6)
         column.addWidget(acquisition)
         column.addWidget(files)
-        column.addWidget(document)
-        column.addWidget(buttons)
+        column.addWidget(self.problems)
         column.addStretch(1)
 
-        # **This column does not get to decide how tall the window is** (task 61). A
-        # `QSplitter` cannot shrink a child below its minimum, so while the column's
-        # minimum was the sum of its four groups -- 711 px offscreen, more under
-        # Windows' own fonts -- a window maximized on the instrument's 1536 x 912
-        # working area was taller than the screen, and a maximized window that
-        # overflows is clipped rather than scrolled: the run-log pane and the status
-        # bar were below the bottom edge, and a trainee on MASSIMO read "nothing in the
-        # run log" off a pane that was there and off-screen.
-        #
-        # The scroll area is the structural half and the row above is the cosmetic
-        # one, and both are wanted. Trimming the column makes it fit on the monitors
-        # the lab has, so nothing scrolls in practice; the scroll area makes the fit
-        # unconditional, so the next group box added here costs a scroll bar on a small
-        # screen instead of a clipped status bar. Its own minimum is one group's worth
-        # of height, which is enough to see that there is more and reach it.
+        # The column does not get to decide how tall the window is (task 61): it
+        # scrolls inside the tab rather than push the run strip off a short screen.
         frame = QScrollArea()
         frame.setWidget(panel)
         frame.setWidgetResizable(True)
         frame.setFrameShape(QScrollArea.Shape.NoFrame)
         frame.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         frame.setMinimumHeight(acquisition.minimumSizeHint().height())
-        # Height is the only dimension being given away. With no horizontal bar a
-        # viewport narrower than the column would clip it sideways instead, so the
-        # column's own minimum width is kept as the scroll area's -- the window is as
-        # hard to squeeze horizontally as it was before this change.
         frame.setMinimumWidth(panel.minimumSizeHint().width())
         frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        return frame
+
+    def _setup_tab(self) -> QWidget:
+        """The Setup tab: where the files go, the sitting, the boxes, the console, the
+        kept files and the viewer (E1, E6, E8)."""
+        self.output_dir = QLineEdit()
+        self.output_dir.setPlaceholderText("where the files go")
+        browse_out = QPushButton("…")
+        browse_out.setMaximumWidth(32)
+        browse_out.clicked.connect(self._pick_output_dir)
+        self.initials = QLineEdit()
+        self.initials.setMaximumWidth(80)
+        self.initials.setToolTip(
+            "The middle field of every file name, remembered per machine. The lab's "
+            "files use the ion's code here; the window takes no view.")
+        files = QGroupBox("Files")
+        files_form = QFormLayout(files)
+        _tighten(files_form)
+        files_form.addRow("Output directory", _row(self.output_dir, browse_out))
+        files_form.addRow("File initials", self.initials)
+
+        self.instrument_field = QLineEdit()
+        self.instrument_field.setReadOnly(True)
+        self.instrument_field.setPlaceholderText("no instrument document")
+        self.browse_instrument = QPushButton("…")
+        self.browse_instrument.setMaximumWidth(32)
+        self.browse_instrument.clicked.connect(self._pick_instrument)
+        self.instrument_status = QLabel("")
+        self.instrument_status.setWordWrap(True)
+        self.limits_field = QLineEdit()
+        self.limits_field.setReadOnly(True)
+        self.limits_field.setPlaceholderText("beside the instrument document, if any")
+        self.browse_limits = QPushButton("…")
+        self.browse_limits.setMaximumWidth(32)
+        self.browse_limits.clicked.connect(lambda: self._pick_limits(project=False))
+        self.project_limits_field = QLineEdit()
+        self.project_limits_field.setReadOnly(True)
+        self.project_limits_field.setPlaceholderText("none")
+        self.browse_project_limits = QPushButton("…")
+        self.browse_project_limits.setMaximumWidth(32)
+        self.browse_project_limits.clicked.connect(lambda: self._pick_limits(project=True))
+        self.sitting_status = QLabel("")
+        """Whose sitting this is: the daemon this window started, or one it joined."""
+        self.sitting_status.setWordWrap(True)
+        sitting = QGroupBox("The sitting")
+        sitting_form = QFormLayout(sitting)
+        _tighten(sitting_form)
+        sitting_form.addRow("Instrument document",
+                            _row(self.instrument_field, self.browse_instrument))
+        sitting_form.addRow("", self.instrument_status)
+        sitting_form.addRow("Standing limits", _row(self.limits_field, self.browse_limits))
+        sitting_form.addRow("Project limits",
+                            _row(self.project_limits_field, self.browse_project_limits))
+        sitting_form.addRow("", self.sitting_status)
+
+        self.find_button = QPushButton("Find boxes")
+        self.find_button.setToolTip(
+            "Ask every MIPS-class port what box is behind it. A port that does not "
+            "answer has its box off or absent; port presence says nothing. The boxes "
+            "held open are asked again over their own ports and nothing is reset.")
+        self.read_button = QPushButton("Read the boxes' state")
+        self.read_button.setToolTip("A whole-state reading of every box, for the state "
+                                    "panels under the panes.")
+        boxes = QGroupBox("Boxes")
+        boxes_row = QHBoxLayout(boxes)
+        boxes_row.addWidget(self.find_button)
+        boxes_row.addWidget(self.read_button)
+        boxes_row.addStretch(1)
+
+        self.console_button = QPushButton("Start the console")
+        self.console_restart = QPushButton("Restart the console")
+        self.console_settings_button = QPushButton("Console settings…")
+        self.console_settings_button.setToolTip(
+            "The six config.txt keys that decide what the card records, and the "
+            "timeout: written only where changed, and the console restarted in the "
+            "same click, since it reads the file at startup only.")
+        console = QGroupBox("Acquisition console")
+        console_row = QHBoxLayout(console)
+        console_row.addWidget(self.console_button)
+        console_row.addWidget(self.console_restart)
+        console_row.addWidget(self.console_settings_button)
+        console_row.addStretch(1)
+
+        self.kept_field = QLineEdit()
+        self.kept_field.setReadOnly(True)
+        self.kept_field.setToolTip(
+            "Where a failed run's files, and a reported one's, are copied with a "
+            "manifest, so tidying the output directory never loses what a report "
+            "points at.")
+        kept_button = QPushButton("…")
+        kept_button.setMaximumWidth(32)
+        kept_button.clicked.connect(self.choose_kept_root)
+        self.open_on_acquire = QCheckBox("Open mainspring when a run starts")
+        self.open_on_acquire.setToolTip(
+            "On, the first run that starts this session, whichever client started it, "
+            "opens mainspring on the file being written, following, in the Show mode "
+            "its repetition mode asks for. One viewer a session and not one a run: a "
+            "viewer opened this way ends with Live ticked and moves to each later run "
+            "by itself. Close it and the next run brings one back. It keeps the first "
+            "run's Show mode, which is mainspring's to change.")
+        other = QGroupBox("Kept files and the viewer")
+        other_form = QFormLayout(other)
+        _tighten(other_form)
+        other_form.addRow("Kept files folder", _row(self.kept_field, kept_button))
+        other_form.addRow("", self.open_on_acquire)
+
+        panel = QWidget()
+        column = QVBoxLayout(panel)
+        column.setSpacing(6)
+        for group in (files, sitting, boxes, console, other):
+            column.addWidget(group)
+        column.addStretch(1)
+        frame = QScrollArea()
+        frame.setWidget(panel)
+        frame.setWidgetResizable(True)
+        frame.setFrameShape(QScrollArea.Shape.NoFrame)
         return frame
 
     def _build_menus(self) -> None:
@@ -681,37 +734,22 @@ class MainWindow(QMainWindow):
         self.action_open = QAction("&Open method…", self)
         self.action_save = QAction("&Save method", self)
         self.action_save_as = QAction("Save method &as…", self)
-        self.action_import = QAction("Open a &trainee paste file…", self)
-        self.action_import.setToolTip(
-            "Split one of the lab's old multi-box paste files into panes, off the "
-            "`MIPS A`/`MIPS B` comments it names its boxes in. Anything the file does "
-            "not attribute comes back whole, for the clipboard.")
         self.action_library = QAction("Method &library…", self)
         self.action_library.setToolTip(
-            "Every method a directory holds, named, hashed, dated and described. Open "
-            "one into the panes, or compare two -- or compare one against what the "
-            "boxes are holding now.")
-        self.action_build = QAction("&Build a method from a template…", self)
-        self.action_build.setToolTip(
-            "Pick a template, set its knobs within their ranges and its labels, and save "
-            "the method it renders. The method opens here, and its runs stamp the "
-            "template and the knob values until a pane is edited.")
+            "Every method and template a directory holds, named, hashed, dated and "
+            "described. Open a method in the Method tab, a template in the Template "
+            "tab, or compare two methods.")
+        self.action_plan = QAction("Open a series &plan…", self)
+        self.action_open_queue = QAction("Open a run &queue…", self)
         self.action_quit = QAction("&Quit", self)
-        for action in (self.action_open, self.action_build, self.action_save,
-                       self.action_save_as):
+        for action in (self.action_open, self.action_save, self.action_save_as):
             file_menu.addAction(action)
         file_menu.addSeparator()
-        file_menu.addAction(self.action_import)
-        file_menu.addAction(self.action_library)
+        for action in (self.action_library, self.action_plan, self.action_open_queue):
+            file_menu.addAction(action)
         file_menu.addSeparator()
         self.action_forget_geometry = QAction("Forget the window position", self)
         file_menu.addAction(self.action_forget_geometry)
-        self.action_kept_root = QAction("&Kept files folder…", self)
-        self.action_kept_root.setToolTip(
-            "Where a failed run's files, and a reported one's, are copied with a "
-            "manifest, so tidying the output directory never loses what a report "
-            "points at.")
-        file_menu.addAction(self.action_kept_root)
         file_menu.addAction(self.action_quit)
 
         run_menu = self.menuBar().addMenu("&Run")
@@ -720,14 +758,6 @@ class MainWindow(QMainWindow):
         self.action_console = QAction("Start the &console", self)
         for action in (self.action_find, self.action_read_state, self.action_console):
             run_menu.addAction(action)
-        run_menu.addSeparator()
-        self.action_queue = self.queue_dock.toggleViewAction()
-        self.action_queue.setText("Run &queue")
-        self.action_queue.setToolTip(
-            "A list of methods with their samples and replicate counts, run in order "
-            "on the one worker: a series of conditions overnight or over lunch, from "
-            "one click.")
-        run_menu.addAction(self.action_queue)
 
         help_menu = self.menuBar().addMenu("&Help")
         self.action_report = QAction("&Report a problem...", self)
@@ -756,42 +786,44 @@ class MainWindow(QMainWindow):
         self.worker.connected.connect(self._daemon_connected)
         self.worker.status_changed.connect(self._owner_status)
 
-        self.find_button.clicked.connect(lambda: self.find_boxes())
-        self.setup_button.clicked.connect(lambda: self.send(setup=True))
-        self.arm_button.clicked.connect(lambda: self.send(setup=False))
         # `clicked` carries a `checked` flag, and every slot below takes none: bound
         # through a lambda rather than directly, or Qt passes False into the first
         # positional parameter and a keyword-only argument turns a button press into a
         # TypeError.
+        self.find_button.clicked.connect(lambda: self.find_boxes())
+        self.read_button.clicked.connect(lambda: self.read_state())
         self.acquire_button.clicked.connect(lambda: self.acquire())
-        self.replicate_button.clicked.connect(lambda: self.replicate())
-        self.stop_button.clicked.connect(lambda: self.stop())
+        self.send_button.clicked.connect(lambda: self.send())
         self.mainspring_button.clicked.connect(lambda: self.open_in_mainspring())
         self.log_button.clicked.connect(lambda: self.open_the_log())
+        self.console_button.clicked.connect(lambda: self.start_console())
+        self.console_restart.clicked.connect(lambda: self.restart_console())
+        self.console_settings_button.clicked.connect(lambda: self.console_settings())
 
         self.action_open.triggered.connect(self.open_method)
         # Not bound directly: `triggered` carries a `checked` flag, which would arrive
         # as `ask` and make Save behave as Save as on a menu that never asked for it.
         self.action_save.triggered.connect(lambda: self.save_method())
         self.action_save_as.triggered.connect(lambda: self.save_method(ask=True))
-        self.action_import.triggered.connect(self.open_trainee_file)
         self.action_library.triggered.connect(self.open_library)
-        self.action_build.triggered.connect(lambda: self.build_from_template())
+        self.action_plan.triggered.connect(lambda: self.open_plan())
+        self.action_open_queue.triggered.connect(lambda: self.open_queue())
         self.action_quit.triggered.connect(self.close)
         self.action_find.triggered.connect(self.find_boxes)
-        self.action_read_state.triggered.connect(self.read_state)
+        self.action_read_state.triggered.connect(lambda: self.read_state())
         self.action_console.triggered.connect(self.start_console)
         self.action_report.triggered.connect(self.report_problem)
         self.action_request.triggered.connect(self.request_feature)
         self.action_about.triggered.connect(self._about)
         self.action_forget_geometry.triggered.connect(self._forget_geometry)
-        self.action_kept_root.triggered.connect(self.choose_kept_root)
         self.report_ready.connect(self._report_ready)
         self.kept_pruned.connect(self.run_panel.say)
 
         self.console_bar.restart_requested.connect(self.restart_console)
         self.console_bar.settings_requested.connect(self.console_settings)
 
+        self.template_tab.acquire_requested.connect(lambda: self.acquire_template())
+        self.template_tab.open_requested.connect(self._open_rendered)
         self.queue_panel.start_requested.connect(self.start_queue)
         self.queue_panel.stop_requested.connect(lambda: self.stop())
         self.queue_panel.add_requested.connect(self.queue_add_methods)
@@ -801,15 +833,17 @@ class MainWindow(QMainWindow):
         self.queue_panel.randomize_requested.connect(self.randomize_queue)
         self.queue_panel.save_requested.connect(self.save_queue)
         self.queue_panel.open_requested.connect(self.open_queue)
-        self.queue_panel.guard_requested.connect(self.queue_guard)
         self.plan_panel.open_requested.connect(lambda: self.open_plan())
         self.plan_panel.start_requested.connect(lambda: self.start_plan())
         self.plan_panel.stop_requested.connect(lambda: self.stop())
         self.follow.filter_changed.connect(self._filter_run_log)
+        self.day_panel.refresh_requested.connect(self.refresh_day)
         self.run_panel.pause_requested.connect(self.pause)
         self.run_panel.resume_requested.connect(lambda: self.resume())
         self.run_panel.stop_requested.connect(lambda: self.stop())
         self.run_panel.note_requested.connect(self.keep_note)
+        self.run_panel.guard_requested.connect(self.queue_guard)
+        self.tabs.currentChanged.connect(self._tab_changed)
 
         self.initials.editingFinished.connect(self._initials_changed)
         self.run_panel.at_window.editingFinished.connect(lambda: self._at_window())
@@ -829,18 +863,34 @@ class MainWindow(QMainWindow):
         self.output_dir.setText(self.settings.output_dir)
         self.replicates.setValue(self.settings.replicates)
         self.conditions.setPlainText(self.settings.conditions)
-        self.queue_dock.setVisible(self.settings.queue_open)
         self.open_on_acquire.setChecked(self.settings.open_mainspring_on_acquire)
+        self.kept_field.setText(self.kept_root())
+        self._show_sitting()
+        names = [self.tabs.tabText(number) for number in range(self.tabs.count())]
+        remembered = self.settings.tab
+        self.tabs.setCurrentIndex(names.index(remembered) if remembered in names
+                                  else self.tabs.indexOf(self.method_tab))
         if self.instrument_path:
             self._load_instrument(self.instrument_path)
         if self.method_path and os.path.isfile(self.method_path):
             self._load_method(self.method_path)
         self._refresh_stem()
+        self.template_tab.set_library(self._library())
+        self._refresh_limits()
         # On launch as well as on demand (lab record, task 50): a trainee arriving at the
         # instrument should find the panes already named for the boxes that are on, not
         # have to press a button to be told. Under `--fake` the rack comes from the
         # method, so `_load_method` above has already done it; otherwise the daemon
         # scans as it starts, and `_daemon_connected` scans one that was already up.
+
+    @property
+    def _armed(self) -> tuple:
+        """What the boxes were last sent, whoever sent it, as `wire_fingerprint` reads
+        it, or () where nothing is remembered: the owner's memory (`Armed`), not this
+        window's, since a series, an agent's `arm` or another window may have sent since
+        (the window revision's E2 and E7; lab record, task 169)."""
+        armed = self.worker.armed
+        return tuple(armed.fingerprint) if armed is not None else ()
 
     # -- assembling the method -----------------------------------------------
 
@@ -896,14 +946,11 @@ class MainWindow(QMainWindow):
         )
 
     def _pane_changed(self, *_: object) -> None:
+        # The state panels are not re-marked here: they compare a reading with what the
+        # boxes were last sent, which an edit to the panes does not change (E2), and the
+        # line over the panes says whether the two agree.
         self._refresh_start_order()
         self._refresh_actions()
-        # A trainee who types the `SWFDIR` line a panel said was missing should watch
-        # the row stop saying "left as found" as they type it, rather than wait five
-        # seconds for a readback to confirm what the pane in front of them decides.
-        method = self.build_method()
-        for name, pane in self.panes.items():
-            pane.show_method(self._box_method(name, method))
 
     def _refresh_start_order(self) -> None:
         method = self.build_method()
@@ -915,9 +962,8 @@ class MainWindow(QMainWindow):
 
     def _refresh_actions(self) -> None:
         """Which buttons may be pressed, and why the greyed-out one is greyed out."""
-        # A running queue is busy even in the instant between two of its jobs: the next
-        # one is submitted from the signal that ended the last, and a trainee who got a
-        # button back in that gap would be sending to boxes the queue is about to arm.
+        # A running queue is busy even in the instant between its submission and the
+        # job's start being seen here: a second Start in that gap would be a second job.
         busy = self._job is not None or self.queue.running
         method = self.build_method()
         self._check_attached(method)
@@ -927,25 +973,14 @@ class MainWindow(QMainWindow):
         # as one number, so a run without one cannot be prepared at all: `prepare_console`
         # refuses it by name. Said here, before the button, rather than by a job that
         # fails a second after it is pressed. Sending is not affected -- the boxes do not
-        # need a document -- which is why it greys only the two acquisition buttons.
+        # need a document -- which is why it greys only the acquisitions.
         no_offset = ([] if self.instrument.vertical.offset_v is not None else [
             "the instrument document states no channel offset, and the offset is sent "
             "to the console and stamped into the file as one number. Pick a document "
-            "with an `offset_v` in its [vertical] table."])
-        # An acquisition starts boxes that are expected to be loaded and armed already,
-        # so a method that has not been sent, or one edited since it was, would spend
-        # its frames having `TBLSTRT` refused for "not in table mode". Said here rather
-        # than discovered three frames in.
-        if not self._armed:
-            not_armed = ["the boxes have not been loaded and armed with this method. "
-                         "Send setup, or Load and arm for boxes that have had their "
-                         "setup since power-up."]
-        elif method is None or not matches_wire(self._armed, method):
-            not_armed = ["the panes have changed since the boxes were armed, so the "
-                         "table in the box is not the one on screen. Load and arm "
-                         "again."]
-        else:
-            not_armed = []
+            "with an `offset_v` in its [vertical] table, in Setup."])
+        # Acquire is no longer greyed for "not armed" (E7): it sends what the boxes do
+        # not hold first, by the owner's memory of what they were last sent, and on
+        # boxes that hold the method its first file is the replicate.
 
         have_console = self.worker.console_alive
         # Another program owns the instrument (lab record, task 67): every hardware job
@@ -958,13 +993,9 @@ class MainWindow(QMainWindow):
             "boxes." if locked else "")
         self.lock_label.setVisible(locked)
         self.find_button.setEnabled(not busy)
-        self.setup_button.setEnabled(not busy and not problems and not locked)
-        self.arm_button.setEnabled(not busy and not problems and not locked)
-        blocking = (problems if method is not None else []) + no_offset + not_armed
+        self.send_button.setEnabled(not busy and not problems and not locked)
+        blocking = problems + no_offset
         self.acquire_button.setEnabled(not busy and not blocking and not locked)
-        self.replicate_button.setEnabled(
-            not busy and not blocking and not locked and self.worker.has_snapshot)
-        self.stop_button.setEnabled(busy and not self.worker.stopping)
         # Enabled from the moment a run's raw file exists and not from the moment the
         # run ends (task 55), which is why `_live_run` is taken off `RunBegun`. The
         # tooltip is part of the same answer: the two cases open different files, and a
@@ -973,15 +1004,26 @@ class MainWindow(QMainWindow):
         self.mainspring_button.setToolTip(
             MAINSPRING_LIVE_TIP if self._live_run_path() else MAINSPRING_TIP)
         self.log_button.setEnabled(bool(self._last_run_paths[2]))
-        self.action_read_state.setEnabled(not busy and bool(self.worker.boxes))
+        can_read = not busy and bool(self.worker.boxes)
+        self.action_read_state.setEnabled(can_read)
+        self.read_button.setEnabled(can_read)
         for pane in self.panes.values():
             pane.state.set_busy(busy or not self.worker.boxes)
-        self.action_console.setEnabled(not busy and not have_console and not locked)
+        can_start = not busy and not have_console and not locked
+        self.action_console.setEnabled(can_start)
+        self.console_button.setEnabled(can_start)
+        self.console_restart.setEnabled(not busy and not locked)
         self.queue_panel.set_busy(busy or locked)
         self.plan_panel.set_busy(busy or locked or self._plan_job is not None,
                                  running=isinstance(self._job, SeriesJob)
                                  and not self.worker.stopping)
+        self.template_tab.set_blocking(
+            no_offset + ([self.worker.refused] if locked else []), busy=busy)
+        self.template_tab.set_stem(self.stem.text().strip())
+        self._show_held_line(method)
+        self._show_sent()
         self._refresh_hold()
+        self._refresh_strip()
 
         text: list[str] = []
         if blocking:
@@ -991,6 +1033,47 @@ class MainWindow(QMainWindow):
             text.append("Worth knowing:")
             text += [f"  • {line}" for line in notes]
         self.problems.setText("\n".join(text))
+
+    def _show_held_line(self, method: Method | None) -> None:
+        """The one line over the panes: whether they are what the boxes hold (E2)."""
+        armed = self.worker.armed
+        if armed is None:
+            text = ("Nothing is known to be on the boxes since clockwork serve started: "
+                    "Acquire and Send send every phase first.")
+        elif method is not None and matches_wire(armed.fingerprint, method):
+            text = (f"The panes are what the boxes hold, as last sent ({armed.method}): "
+                    "Acquire sends nothing first, and its first file is a replicate.")
+        else:
+            text = (f"The boxes hold {armed.method or 'another method'}, not the panes: "
+                    "Acquire and Send send the panes first, setup only where it differs.")
+        if text != self.held_line.text():
+            self.held_line.setText(text)
+
+    def _sent_box(self, name: str) -> BoxMethod | None:
+        """What the boxes were last sent for box `name`, whoever sent it, as a
+        `BoxMethod` the state panel marks a reading against (E2), or None where nothing
+        sent to it is remembered. A setup phase the send left out is empty here."""
+        armed = self.worker.armed
+        if armed is None:
+            return None
+        for entry in armed.fingerprint:
+            if entry[0] != name:
+                continue
+            return BoxMethod(
+                name=name, port=self.ports.get(name, ""),
+                setup=tuple(entry[1] or ()), load=tuple(entry[2]), arm=tuple(entry[3]),
+                dc_bias=tuple(tuple(pair) for pair in entry[4]), rf=tuple(entry[5]))
+        return None
+
+    def _show_sent(self) -> None:
+        """Re-mark the state panels where what the boxes were last sent has moved."""
+        armed = self.worker.armed
+        fingerprint = tuple(armed.fingerprint) if armed is not None else ()
+        if fingerprint == self._sent_shown:
+            return
+        self._sent_shown = fingerprint
+        for name, pane in self.panes.items():
+            pane.show_method(self._sent_box(name))
 
     def _refresh_hold(self) -> None:
         """The person's controls over the job in flight: the two pauses while a series
@@ -1143,45 +1226,9 @@ class MainWindow(QMainWindow):
         self.settings.method_path = path
         self.statusBar().showMessage(f"saved {os.path.basename(path)}")
 
-    def open_trainee_file(self) -> None:
-        """Split one of the lab's old paste files into panes, once.
-
-        The map from a file's `MIPS A` to a box's `GNAME` is asked for rather than
-        built in: which letter is which box is a fact about a rack and not about a
-        document. Anything the file does not attribute lands in its own pane for the
-        trainee to move by hand, which is the honest answer -- one golden file gives a
-        block once, unlabelled, for two boxes.
-        """
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open a trainee paste file", "", "Text files (*.txt);;All files (*)")
-        if not path:
-            return
-        try:
-            with open(path, encoding="utf-8") as handle:
-                text = handle.read()
-        except OSError as exc:
-            self._complain("That file could not be read", str(exc))
-            return
-        names = list(self.panes) or [entry for entry in self.ports]
-        letters = ["MIPS A", "MIPS B", "MIPS C", "MIPS D"]
-        mapping = {letter: name for letter, name in zip(letters, names, strict=False)}
-        panes = split_trainee_file(text, mapping)
-        unattributed = panes.pop(None, "")
-        for name, pane_text in panes.items():
-            if name in self.panes:
-                self.panes[name].set_text(pane_text)
-        if unattributed.strip():
-            self.run_panel.say(
-                f"{os.path.basename(path)}: {len(unattributed.splitlines())} line(s) "
-                "name no box and were not placed in a pane. They are in the log below; "
-                "move them by hand.", warn=True)
-            for line in unattributed.splitlines():
-                if line.strip():
-                    self.run_panel.say(f"    {line}")
-        self._pane_changed()
-
     def open_library(self) -> None:
-        """The method browser: open a document into the panes, or run either diff.
+        """The method browser: open a method in the Method tab or a template in the
+        Template tab, or compare two methods.
 
         The directory offered the first time is the instrument's library,
         `instrument_dir("golden")`, where it resolves and nothing has been picked yet --
@@ -1189,26 +1236,27 @@ class MainWindow(QMainWindow):
         public clone has no instrument beside it and the instrument's library is lab
         material this module never names by path.
         """
-        directory = self.settings.library_dir or clockwork.instrument_dir("golden") or ""
-        dialog = LibraryDialog(directory, self.readings, self)
+        directory = self._library()
+        dialog = LibraryDialog(directory, self)
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
-        self.settings.library_dir = dialog.directory()
+        if dialog.directory() != self.settings.library_dir:
+            self.settings.library_dir = dialog.directory()
+            self.template_tab.set_library(self._library())
         if accepted and dialog.chosen_path:
             self._load_method(dialog.chosen_path)
+            self.tabs.setCurrentWidget(self.method_tab)
         elif accepted and dialog.chosen_template:
-            self.build_from_template(dialog.chosen_template)
+            self.template_tab.choose(dialog.chosen_template)
+            self.tabs.setCurrentWidget(self.template_tab)
 
-    def build_from_template(self, template_path: str = "") -> BuildDialog:
-        """The method builder (`builder.BuildDialog`): a template rendered at knob values
-        a person sets, saved as a method file and opened here attached, as any file
-        `render-template --to` writes is (lab record, task 164). Answers the dialog, after
-        it has closed, for a test."""
-        library = self.settings.library_dir or clockwork.instrument_dir("golden") or ""
-        dialog = BuildDialog(library, os.path.dirname(self.method_path),
-                             template_path, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.saved_path:
-            self._load_method(dialog.saved_path)
-        return dialog
+    def _library(self) -> str:
+        """The method library: the window's setting, else the instrument's own."""
+        return self.settings.library_dir or clockwork.instrument_dir("golden") or ""
+
+    def _open_rendered(self, path: str) -> None:
+        """The Template tab wrote `path`: open it in the Method tab, attached (E4)."""
+        if self._load_method(path):
+            self.tabs.setCurrentWidget(self.method_tab)
 
     # -- the instrument document ---------------------------------------------
 
@@ -1220,7 +1268,11 @@ class MainWindow(QMainWindow):
         if path:
             self._load_instrument(path)
 
-    def _load_instrument(self, path: str) -> None:
+    def _refresh_actions_if_built(self) -> None:
+        if hasattr(self, "run_panel"):
+            self._refresh_actions()
+
+    def _load_instrument(self, path: str, *, remember: bool = True) -> None:
         try:
             document = instrument_module.load(path)
         except (OSError, instrument_module.InstrumentError) as exc:
@@ -1228,7 +1280,8 @@ class MainWindow(QMainWindow):
             return
         self.instrument = document
         self.instrument_path = path
-        self.settings.instrument_path = path
+        if remember:
+            self.settings.instrument_path = path
         self.instrument_field.setText(os.path.basename(path))
         self.instrument_field.setToolTip(path)
         vertical = document.vertical
@@ -1246,8 +1299,138 @@ class MainWindow(QMainWindow):
         if window:
             parts.append(window)
         self.instrument_status.setText("\n".join(parts))
+        self._refresh_actions_if_built()
         # The console holds what it was last configured with, so a changed document
         # has to reach it before the next run rather than at the next restart.
+
+    # -- the sitting (Setup) ---------------------------------------------------
+
+    def _joined(self) -> bool:
+        """Whether this window joined a daemon it did not start, whose sitting is then
+        shown read-only (E6)."""
+        worker = self.worker
+        return (isinstance(worker, RemoteWorker) and worker.hello is not None
+                and worker.spawned is None)
+
+    def _show_sitting(self) -> None:
+        """The sitting's documents in Setup: the daemon's, read-only, where this window
+        joined one it did not start; otherwise the ones this window starts it with, which
+        take effect at its next start (the window revision's E6)."""
+        joined = self._joined()
+        hello = getattr(self.worker, "hello", None)
+        if joined:
+            limits = str(getattr(hello, "limits", "") or "")
+            project = str(getattr(hello, "project_limits", "") or "")
+            self.limits_field.setText(limits or "none")
+            self.project_limits_field.setText(project or "none")
+            self.sitting_status.setText(
+                f"The sitting of clockwork serve (pid {getattr(hello, 'pid', '?')}), which "
+                "this window joined and did not start: shown here, not changed here. Every "
+                "client is shown and held to it; it changes when clockwork serve is "
+                "started again.")
+        else:
+            self.limits_field.setText(self.settings.limits_path)
+            self.project_limits_field.setText(self.settings.project_limits_path)
+            self.sitting_status.setText(
+                "The simulated instrument's sitting, in this window's own process."
+                if self.fake else
+                "Given to clockwork serve when this window starts it; a change takes "
+                "effect at its next start.")
+        for button in (self.browse_instrument, self.browse_limits,
+                       self.browse_project_limits):
+            button.setEnabled(not joined)
+        self.limits_field.setToolTip(self.limits_field.text())
+        self.project_limits_field.setToolTip(self.project_limits_field.text())
+
+    def _pick_limits(self, *, project: bool) -> None:
+        what = "project limits" if project else "standing limits"
+        current = (self.settings.project_limits_path if project
+                   else self.settings.limits_path)
+        path, _ = QFileDialog.getOpenFileName(
+            self, f"The {what}", os.path.dirname(current or self.instrument_path) or "",
+            "Limits documents (*.toml);;All files (*)")
+        if not path:
+            return
+        if project:
+            self.settings.project_limits_path = path
+        else:
+            self.settings.limits_path = path
+        self._show_sitting()
+        self.run_panel.say(f"the {what} are {path}, from the next start of clockwork serve")
+
+    def _refresh_limits(self) -> None:
+        """Hand the Template tab the limits the sitting carries, the agent's range each
+        knob is shown against (R10), or why there are none."""
+        try:
+            limits = self._sitting_limits()
+        except (OSError, ValueError) as exc:
+            self.template_tab.set_limits(None, f"the sitting's limits did not load ({exc})")
+            return
+        self.template_tab.set_limits(
+            limits, "" if limits is not None else "clockwork serve carries no limits")
+
+    def _show_boxes(self) -> None:
+        """The status bar's boxes: which answered, on which port."""
+        answered = [f"{name} {port}" for name, (port, _, ok) in self._described.items()
+                    if ok]
+        silent = [name for name, (_, _, ok) in self._described.items() if not ok]
+        text = (", ".join(answered) if answered else "no boxes answered") + (
+            f"; {', '.join(silent)} off or absent" if silent else "")
+        self.boxes_label.setText(text)
+
+    def _show_daemon(self) -> None:
+        """The status bar's daemon: which owner holds the instrument."""
+        if self.fake:
+            self.daemon_label.setText("in process, --fake")
+            return
+        hello = getattr(self.worker, "hello", None)
+        if hello is None:
+            self.daemon_label.setText("no clockwork serve yet")
+            return
+        whose = "started by this window" if not self._joined() else "joined"
+        self.daemon_label.setText(f"clockwork serve pid {getattr(hello, 'pid', '?')}, "
+                                  f"{whose}")
+
+    # -- the run strip and the Day tab -------------------------------------------
+
+    def _refresh_strip(self) -> None:
+        """The run strip's line: the job in flight, whose, where, minutes left (E1)."""
+        job = self._job
+        if job is None:
+            text = "Nothing is running."
+        else:
+            origin = self.worker.origin(job)
+            person = getattr(job, "at_window", "")
+            whose = (f"from {origin}" if origin
+                     else "this window" + (f", {person} at the window" if person else ""))
+            parts = [job.label, whose]
+            where = getattr(job, "directory", "")
+            if where:
+                parts.append(f"into {where}")
+            followed = self.followed
+            if isinstance(job, SeriesJob) and followed is not None and not followed.ended:
+                left = followed.minutes_left
+                parts.append(f"about {left:.0f} minutes left" if left is not None
+                             else "minutes left not known")
+            text = "; ".join(parts)
+        if text != self.run_panel.job_line.text():
+            self.run_panel.job_line.setText(text)
+
+    def refresh_day(self) -> None:
+        """Read the day folder again for the Day tab, with the daemon's live jobs."""
+        live: list[tuple[str, str, str]] = []
+        job = self._job
+        if job is not None:
+            live.append(("running", job.label, self.worker.origin(job) or "this window"))
+        worker = self.worker
+        if isinstance(worker, RemoteWorker):
+            live += [(state, handle.label, handle.origin or "clockwork serve")
+                     for state, handle in worker.others() if state != "running"]
+        self.day_panel.show_day(self._directory(), live)
+
+    def _tab_changed(self, index: int) -> None:
+        if self.tabs.widget(index) is self.day_panel:
+            self.refresh_day()
 
     # -- the console ---------------------------------------------------------
 
@@ -1301,24 +1484,29 @@ class MainWindow(QMainWindow):
             label=f"reading {box}" if box else "reading the boxes",
             names=(box,) if box else ()))
 
-    def send(self, *, setup: bool) -> Send | None:
-        """Queue a send, and hand the job back so the queue can wait on its own work."""
+    def send(self, *, setup: bool = False) -> Send | None:
+        """Send the panes: what the boxes do not hold, `setup` only where it differs
+        from what they were last sent, and nothing acquired (E7). `setup`, or the "send
+        setup again" tick, sends it regardless. The job is handed back for a test."""
         method = self.build_method()
         if method is None:
             return None
+        again = setup or self.setup_again.isChecked()
         job = Send(
-            label="sending setup, load and arm" if setup else "loading and arming",
-            method=method, setup=setup,
+            label="sending the panes", method=method, setup=again, as_needed=True,
             conditions=self.conditions.toPlainText(),
             directory=self._directory(), stem=self.stem.text().strip(),
             method_path=self.method_path,
             instrument=self.instrument, instrument_path=self.instrument_path,
         )
+        self.setup_again.setChecked(False)
         self.worker.submit(job)
         return job
 
-    def acquire(self, *, replicate_only: bool = False) -> Acquire | None:
-        """Queue an acquisition of the panes, and hand the job back.
+    def acquire(self, *, setup: bool = False) -> Acquire | None:
+        """Send what the boxes do not hold of the panes, then acquire (E7), and hand the
+        job back. On boxes that hold the method nothing is sent and the first file is
+        the replicate; the owner decides which, by its memory of the last send.
 
         Every one is a request of its own with a run record, begun by the owner when the
         job starts (`source="window"`, lab record, task 165): the purpose line is its
@@ -1327,6 +1515,41 @@ class MainWindow(QMainWindow):
         method = self.build_method()
         if method is None:
             return None
+        # Judged on the method this job carries, not on the last refresh: the owner renders
+        # the template again and refuses a render that is not of this method, so a stale
+        # attachment would cost a trainee a run rather than a stamp.
+        self._check_attached(method)
+        return self._submit_acquire(
+            method, label="acquiring", method_path=self.method_path,
+            replicates=self.replicates.value(), conditions=self.conditions.toPlainText(),
+            rendered=self.rendered, setup=setup)
+
+    def acquire_template(self) -> Acquire | None:
+        """The Template tab's Acquire: its render, with no file on disk (E4). The job
+        carries the template text, knob values and labels; the owner renders it again,
+        stamps it, and its record keeps the template's hash, the values, the rendered
+        method's hash and where a value lies outside the agent's limits (R10)."""
+        tab = self.template_tab
+        rendered = tab.rendered
+        if rendered is None:
+            return None
+        method = replace(rendered.method, boxes=tuple(
+            replace(entry, port=self.ports.get(entry.name) or entry.port)
+            for entry in rendered.method.boxes))
+        outside = tab.outside()
+        if outside:
+            self.run_panel.say(
+                f"{', '.join(outside)} outside the agent's limits: run as set, and the "
+                "run record says so", warn=True)
+        name = rendered.template.name if rendered.template is not None else ""
+        return self._submit_acquire(
+            method, label=f"acquiring {name or 'the template'} as set in the Template tab",
+            method_path="", replicates=tab.replicates.value(),
+            conditions=tab.conditions.toPlainText(), rendered=rendered)
+
+    def _submit_acquire(self, method: Method, *, label: str, method_path: str,
+                        replicates: int, conditions: str, rendered: Rendered | None,
+                        setup: bool = False) -> Acquire | None:
         person = self._at_window()
         if not person:
             self.run_panel.say("type your initials in \"At the window\" first: every run "
@@ -1338,27 +1561,22 @@ class MainWindow(QMainWindow):
             self.start_console()
         self.settings.conditions = self.conditions.toPlainText()
         self.settings.replicates = self.replicates.value()
-        # Judged on the method this job carries, not on the last refresh: the owner renders
-        # the template again and refuses a render that is not of this method, so a stale
-        # attachment would cost a trainee a run rather than a stamp.
-        self._check_attached(method)
-        rendered = self.rendered
+        stem = self.stem.text().strip()
+        if stem:
+            method = replace(method, acquisition=replace(method.acquisition,
+                                                         file_stem=stem))
         job = Acquire(
-            label="acquiring" if not replicate_only else "acquiring a replicate",
-            method=method, instrument=self.instrument,
-            instrument_path=self.instrument_path, method_path=self.method_path,
-            directory=self._directory(), stem=self.stem.text().strip(),
-            initials=self.initials.text(),
-            replicates=1 if replicate_only else self.replicates.value(),
-            conditions=self.conditions.toPlainText(),
-            replicate_only=replicate_only,
+            label=label, method=method, instrument=self.instrument,
+            instrument_path=self.instrument_path, method_path=method_path,
+            directory=self._directory(), stem=stem, initials=self.initials.text(),
+            replicates=replicates, conditions=conditions,
             template=rendered.template_text if rendered is not None else "",
             knobs=dict(rendered.knobs) if rendered is not None else {},
             labels=dict(rendered.labels) if rendered is not None else {},
-            request=self.run_panel.purpose.text().strip(),
-            source="window",
-            at_window=person,
+            request=self.run_panel.purpose.text().strip(), source="window",
+            at_window=person, send=True, setup=setup or self.setup_again.isChecked(),
         )
+        self.setup_again.setChecked(False)
         self.worker.submit(job)
         return job
 
@@ -1369,10 +1587,6 @@ class MainWindow(QMainWindow):
         if person:
             self.settings.at_window = person
         return person
-
-    def replicate(self) -> None:
-        self._refresh_stem()
-        self.acquire(replicate_only=True)
 
     def _signed(self, what: str) -> str:
         """The person at the window, for an act on a running job, or empty with the
@@ -1440,7 +1654,7 @@ class MainWindow(QMainWindow):
         for path in paths:
             self.queue.add(self._queue_row(path))
         if paths:
-            self.queue_dock.setVisible(True)
+            self.tabs.setCurrentWidget(self.queue_tab)
             self.queue_panel.refresh()
             self._refresh_actions()
 
@@ -1470,7 +1684,7 @@ class MainWindow(QMainWindow):
                 "changed since it was saved: the row will run what the file says, not "
                 "what is on screen. Save the method again to queue the edit.", warn=True)
         self.queue.add(self._queue_row(self.method_path))
-        self.queue_dock.setVisible(True)
+        self.tabs.setCurrentWidget(self.queue_tab)
         self.queue_panel.refresh()
         self._refresh_actions()
 
@@ -1534,7 +1748,7 @@ class MainWindow(QMainWindow):
 
     def _show_guard(self) -> None:
         """The guard button says what the owner holds, whoever armed it."""
-        self.queue_panel.show_guard(self.worker.guarding)
+        self.run_panel.show_guard(self.worker.guarding)
 
     def _ask_guard(self, guard: BeamGuard | None) -> tuple[BeamGuard | None] | None:
         """The guard dialog, a method of its own so that a test can answer it: the
@@ -1614,7 +1828,8 @@ class MainWindow(QMainWindow):
             + (f", seed {opened.seed}" if opened.seed is not None else "")
             + (f"; {missing} method(s) not found, which fail when they start"
                if missing else ""), warn=bool(missing))
-        self.queue_dock.setVisible(True)
+        self.tabs.setCurrentWidget(self.queue_tab)
+        self.queue_tabs.setCurrentWidget(self.queue_panel)
         self.queue_panel.tree.clearSelection()
         self.queue_panel.refresh()
         self._refresh_actions()
@@ -1777,7 +1992,7 @@ class MainWindow(QMainWindow):
                 "Series plans (*.toml);;All files (*)")
             if not path:
                 return None
-        self.queue_dock.setVisible(True)
+        self.tabs.setCurrentWidget(self.queue_tab)
         self.queue_tabs.setCurrentWidget(self.plan_panel)
         checked = self._check_plan(path)
         if checked is None:
@@ -1906,7 +2121,6 @@ class MainWindow(QMainWindow):
         self.follow.follow(self.followed)
         if self.follow.only.isChecked():
             self._filter_run_log(True)
-        self.queue_dock.setVisible(True)
 
     # -- opening what a run left ---------------------------------------------
 
@@ -1943,17 +2157,15 @@ class MainWindow(QMainWindow):
         since it is the one that knows whether the raw file was kept.
 
         The checkbox is answered here and not in `acquire`, for the same reason and one
-        more: a queued row submits the same `Acquire` job a button does, so a run queue
-        gets the behaviour without a third route to it.
+        more: every run reports `RunBegun`, whichever client started it, so "Open
+        mainspring when a run starts" opens one on an agent's series or another window's
+        queue as readily as on this window's Acquire (the window revision's D4; lab
+        record, task 169). One viewer a session, default off.
         """
         stem = os.path.splitext(os.path.basename(event.raw_path))[0]
         self._live_run = (event.raw_path, event.summed_path, stem)
         self._last_run_paths = self._live_run
-        # Not for another client's run: a viewer opening on the trainee's screen over
-        # a campaign Claude is running is not what the checkbox was ticked for.
-        foreign = self._job is not None and bool(self.worker.origin(self._job))
-        if (self.open_on_acquire.isChecked() and not foreign
-                and not self._viewer_is_up()):
+        if self.open_on_acquire.isChecked() and not self._viewer_is_up():
             self._launch_viewer()
         self._refresh_actions()
 
@@ -2124,17 +2336,14 @@ class MainWindow(QMainWindow):
         # after the run it describes has ended.
         self._live_run = ("", "", "")
         if isinstance(result, SeriesResult):
-            # A series sends each point itself, so the boxes hold its last send and not
-            # whatever this window last sent (lab record, task 91).
-            self._armed = result.armed
             if self.followed is not None and isinstance(job, SeriesJob):
                 self.followed.finished(result.points_done, result.stopped)
                 self.follow.refresh()
         if job is self._plan_job:
             self._plan_job = None
         elif isinstance(result, SendResult):
-            self._armed = result.armed
             self.run_panel.say(
+                "nothing sent: the boxes hold the panes already" if not result.sent else
                 f"{'setup, load and arm' if result.setup else 'load and arm'} sent in "
                 f"{result.seconds:.1f} s; {os.path.basename(result.send_log)} beside "
                 "the file")
@@ -2147,6 +2356,8 @@ class MainWindow(QMainWindow):
         # would offer a button that the very next statement takes away again.
         if job is self._queue_job:
             self._queue_ended(result)
+        if self.tabs.currentWidget() is self.day_panel:
+            self.refresh_day()
         self._scan_if_put_off()
         self._refresh_actions()
         self._close_if_asked()
@@ -2164,9 +2375,6 @@ class MainWindow(QMainWindow):
         if isinstance(job, (Send, Acquire, SeriesJob)):
             self._refresh_stem()
         if isinstance(job, SeriesJob):
-            # Part way through, it may have sent any of its points: what the boxes hold
-            # is no longer known here.
-            self._armed = ()
             if self.followed is not None:
                 self.followed.failed()
                 self.follow.refresh()
@@ -2211,9 +2419,23 @@ class MainWindow(QMainWindow):
         if simulated:
             self.run_panel.say("that clockwork serve is --fake: nothing it reports is "
                                "evidence about a MIPS box or a digitizer", warn=True)
+        self._show_daemon()
+        self._show_sitting()
+        instrument = str(getattr(hello, "instrument", "") or "")
+        if self._joined() and instrument and os.path.normcase(instrument) != \
+                os.path.normcase(self.instrument_path or ""):
+            # One sitting for every client (E6): a joined daemon's instrument document is
+            # the one this window's runs carry, not the one it last remembered.
+            self._load_instrument(instrument, remember=False)
+            self.run_panel.say(f"the instrument document is clockwork serve's, {instrument}")
+        self._refresh_limits()
         status = getattr(self.worker, "status", None)
         if started or status is None:
             return
+        if getattr(status.running, "kind", "") == "SeriesJob":
+            # A routine choice: a window opened onto a series or a queue in flight opens
+            # on the tab that follows it.
+            self.tabs.setCurrentWidget(self.queue_tab)
         if status.running is None and not status.queued:
             self.find_boxes()
         else:
@@ -2270,17 +2492,7 @@ class MainWindow(QMainWindow):
         self.readings[name] = reading
         pane = self.panes.get(name)
         if pane is not None:
-            pane.show_state(reading, self._box_method(name))
-
-    def _box_method(self, name: str, method: Method | None = None) -> BoxMethod | None:
-        """This box's entry in the method the panes currently make, if it has one."""
-        method = method if method is not None else self.build_method()
-        if method is None:
-            return None
-        try:
-            return method.box(name)
-        except KeyError:
-            return None
+            pane.show_state(reading, self._sent_box(name))
 
     def _discovered(self, found: object) -> None:
         entries = list(getattr(found, "found", ()))
@@ -2292,9 +2504,11 @@ class MainWindow(QMainWindow):
             entry = answered.get(name)
             if entry is not None:
                 self.ports[name] = entry.port
-                pane.describe(entry.port, entry.version, answered=True)
+                self._described[name] = (entry.port, entry.version, True)
             else:
-                pane.describe(answered=False)
+                self._described[name] = ("", "", False)
+            pane.describe(*self._described[name][:2], answered=self._described[name][2])
+        self._show_boxes()
         # Through `_set_enable`, not by clearing and refilling the combo: `clear()` drops
         # the current index to the first item, and `_pane_changed()` below then reads the
         # widget back into the method, so a scan would silently rewrite `acquisition.enable`
@@ -2359,10 +2573,14 @@ class MainWindow(QMainWindow):
             pane.state.toggled.connect(self._state_panel_toggled)
             pane.state.set_open(name in opened)
             pane.state.set_busy(self._job is not None or not self.worker.boxes)
+            if name in self._described:
+                port, version, answered = self._described[name]
+                pane.describe(port, version, answered=answered)
+            pane.show_method(self._sent_box(name))
             if name in kept:
                 pane.set_text(kept[name])
             if name in self.readings:
-                pane.show_state(self.readings[name], self._box_method(name))
+                pane.show_state(self.readings[name], self._sent_box(name))
             self.panes[name] = pane
             self.pane_box.addWidget(pane)
 
@@ -2425,6 +2643,7 @@ class MainWindow(QMainWindow):
         if not chosen:
             return
         self.settings.kept_root = chosen
+        self.kept_field.setText(self.kept_root())
         line = f"failed and reported runs' files are kept in {self.kept_root()}"
         if not self.fake and not self.worker.set_kept_root(self.kept_root()):
             line += (" from the next start of clockwork serve; the one running keeps "
@@ -2591,7 +2810,7 @@ class MainWindow(QMainWindow):
         self.settings.output_dir = self.output_dir.text().strip()
         self.settings.conditions = self.conditions.toPlainText()
         self.settings.replicates = self.replicates.value()
-        self.settings.queue_open = self.queue_dock.isVisible()
+        self.settings.tab = self.tabs.tabText(self.tabs.currentIndex())
         self.settings.open_mainspring_on_acquire = self.open_on_acquire.isChecked()
         self.settings.sync()
         if isinstance(self.worker, RemoteWorker) and not self._close_as_client():

@@ -222,7 +222,7 @@ def test_the_panel_has_no_setup_or_go_on_column_and_locks_a_running_queue(qtbot)
     panel.refresh()
     assert not panel.tree.topLevelItem(1).flags() & Qt.ItemFlag.ItemIsEditable
     assert not panel.add_button.isEnabled() and not panel.start_button.isEnabled()
-    assert panel.stop_button.isEnabled() and panel.guard_button.isEnabled()
+    assert panel.stop_button.isEnabled()
     queue.ended([], [], stopped="stopped at the window")
     panel.refresh()
     assert panel.start_button.isEnabled() and "2 to run" in panel.caption.text()
@@ -394,7 +394,7 @@ def test_the_guard_is_armed_at_the_window_holds_the_queue_and_resume_retakes_the
     until(qtbot, lambda: window.worker.guarding is not None)
     window._show_guard()
     assert window.worker.guarding.guard == guard and window.worker.guarding.by == "ZZ"
-    assert window.queue_panel.guard_button.text() == GUARD_ON
+    assert window.run_panel.guard_button.text() == GUARD_ON
     # Dark for exactly the three repetitions that trip it; the retake has its beam back.
     window.worker.console.fake.beam = [1.0, 0.0, 0.0, 0.0]
 
@@ -424,4 +424,4 @@ def test_the_guard_is_armed_at_the_window_holds_the_queue_and_resume_retakes_the
     window.queue_guard()
     until(qtbot, lambda: window.worker.guarding is None)
     window._show_guard()
-    assert window.queue_panel.guard_button.text() == GUARD_OFF
+    assert window.run_panel.guard_button.text() == GUARD_OFF

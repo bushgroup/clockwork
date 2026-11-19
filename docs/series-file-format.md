@@ -9,7 +9,7 @@ across the knob values rather than confounded with them, and a shuffled series c
 back if every file says where it sat in the plan and what shuffled it. Clockwork stores a plan as a
 small [TOML](https://toml.io) document, reads it with `clockwork.series`, and acquires it with the
 `series` tool of the [MCP server](mcp-server.md), `clockwork series PLAN` at the
-[command line](command-line.md), or Start in the window's queue dock, where a person opens the
+[command line](command-line.md), or Start in the window's Queue tab, where a person opens the
 plan, reads its check and starts it ([at the window](#at-the-window)). All three routes check the
 plan with one function and submit the same job.
 
@@ -159,7 +159,7 @@ The window's run queue is acquired by the same job: its points are saved method 
 than a template at knob values, read and hashed when the person presses Start, and its files stamp
 a series identifier, index, position and seed as a plan's do ([user guide](user-guide.md#the-run-queue)).
 
-To run a plan an agent wrote, or one written by hand, a person opens it in the window's queue dock
+To run a plan an agent wrote, or one written by hand, a person opens it in the window's Queue tab
 with Open plan… and starts it there. The window checks the plan as the `series` tool does with
 `check` true and shows the answer as a table: each point in planned order with its knob values,
 repetitions, files and minutes, and the totals beneath. It then reads the output directory's

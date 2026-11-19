@@ -69,7 +69,6 @@ from clockwork.app.boxstate import (  # noqa: E402
     Reading,
     state_table,
 )
-from clockwork.app.builder import BuildDialog, default_name  # noqa: E402
 from clockwork.app.launch import (  # noqa: E402
     SHOW_FOR_MODE,
     association_command,
@@ -80,7 +79,6 @@ from clockwork.app.launch import (  # noqa: E402
     viewer_options,
 )
 from clockwork.app.librarypanel import (  # noqa: E402
-    InstrumentDiffDialog,
     LibraryDialog,
     MethodDiffDialog,
 )
@@ -94,7 +92,7 @@ from clockwork.app.runlog import (  # noqa: E402
     names_it_elsewhere,
 )
 from clockwork.app.settings import Settings  # noqa: E402
-from clockwork.app.statepanel import StatePanel  # noqa: E402
+from clockwork.app.templatetab import TemplateTab, default_name  # noqa: E402
 from clockwork.app.window import MainWindow  # noqa: E402
 from clockwork.app.worker import matches_wire  # noqa: E402
 from clockwork.method import template as templates  # noqa: E402
@@ -226,12 +224,11 @@ def idle(window) -> bool:
 
 
 def ready_to_acquire(window, qtbot, tmp_path, method=None) -> None:
-    """A window taken through the trainee's own order: open, find, send, start.
+    """A window taken through a trainee's order: open, find, send, start the console.
 
-    Acquire expects the boxes to be loaded and armed already, so `send_phases` comes
-    first here exactly as it does on the instrument; the window greys Acquire out until
-    it has, which is the assertion in `test_acquire_is_greyed_out_until_the_boxes_are
-    _armed`.
+    Acquire sends what the boxes do not hold by itself since task 169 (E7); the Send
+    first here makes each test's Acquire start from boxes that hold the method, which is
+    the ordinary case at the instrument and what these tests were written against.
     """
     load_into(window, tmp_path, method if method is not None else make_method())
     until(qtbot, lambda: window.worker.boxes and idle(window))
@@ -629,52 +626,117 @@ give: put the new control where it belongs and let the scroll area do its job.
 """
 
 
-def test_the_window_is_shorter_than_the_screen_it_runs_on(qtbot, scratch_settings):
-    """The requirement, pinned (lab record, task 61, and the window note's screen
-    bullet).
+WIDEST = 1200
+"""What `minimumSizeHint().width()` may be with three panes loaded, with margin against the
+1536 above, for the same reason as `TALLEST`: offscreen at 9 pt the tabbed window measures
+888, and Windows' own fonts make every label wider (lab record, task 169). Before the
+revision the panes set the minimum width, some 400 px past the instrument's monitor; then
+the queue's single row of eleven buttons, at 1482, and the note's unwrapped sentence."""
 
-    A `QSplitter` cannot shrink a child below its minimum, so while the side column's
-    minimum was the sum of its four group boxes the window had a floor taller than the
-    instrument's working area -- and a maximized window that overflows is clipped, not
-    scrolled.
-    """
+
+def three_boxes() -> method_module.Method:
+    """Three boxes, each with a table: the rack a trainee meets, which the fit is pinned
+    against (lab record, task 169), not a window with no panes at all."""
+    names = ("auklet", "bufflehead", "cormorant")
+    return method_module.from_dict({
+        "schema_version": 2,
+        "metadata": {"name": "three boxes", "created": dt.date(2026, 11, 18)},
+        "acquisition": {"frames": 1, "scans": SCANS, "accumulations": ACCUMULATIONS,
+                        "file_stem": "261118_ZZ_001", "repetition_mode": "per_repetition",
+                        "keep_raw": True, "enable": {"box": names[0], "channel": "A"}},
+        "boxes": [{"name": name, "port": f"COM{3 + index}",
+                   "setup": ["STBLCLK,EXT", "STBLTRG,POS"],
+                   "load": [per_repetition_table(SCANS)], "arm": ["SMOD,TBL"]}
+                  for index, name in enumerate(names)],
+        "start": [[name, "TBLSTRT"] for name in names],
+        "reset": [[names[0], "SMOD,LOC"], [names[0], "SMOD,TBL"]],
+    })
+
+
+def test_the_window_fits_the_working_area_with_three_panes_loaded(
+        qtbot, scratch_settings, tmp_path):
+    """The requirement, restated for the tabbed window (lab record, task 169): its
+    minimum fits 1536 x 912 with a method of three boxes loaded, which the test before
+    it never measured -- the panes, not the side column, set the old window's minimum
+    width, some 400 px more than the screen. They scroll sideways inside the Method tab
+    now, and the tabs share one height."""
     made = MainWindow(fake=True)
     qtbot.addWidget(made)
     try:
-        assert made.minimumSizeHint().height() < TALLEST
+        load_into(made, tmp_path, three_boxes())
+        until(qtbot, lambda: len(made.panes) == 3 and idle(made))
+        hint = made.minimumSizeHint()
+        assert hint.height() < TALLEST, hint
+        assert hint.width() < WIDEST, hint
     finally:
         made.worker.shutdown()
         made.worker.wait(10_000)
 
 
-def test_the_run_log_and_the_status_bar_are_on_screen_when_maximized(qtbot,
-                                                                     scratch_settings):
-    """The thing the height is a proxy for, asserted directly.
-
-    Not `minimumSizeHint` this time but the laid-out window at the instrument's own
-    size: the run log has real height and the status bar's bottom edge is inside the
-    window rather than under it.
-    """
+def test_the_run_log_and_the_status_bar_are_on_screen_when_maximized(
+        qtbot, scratch_settings, tmp_path):
+    """The thing the minimum is a proxy for, asserted directly, with three panes loaded:
+    at the working area's own size the run log has real height under every tab, the
+    status bar's bottom edge is inside the window, and the Method tab's three panes are
+    reachable."""
     made = MainWindow(fake=True)
     qtbot.addWidget(made)
     try:
+        load_into(made, tmp_path, three_boxes())
+        until(qtbot, lambda: len(made.panes) == 3 and idle(made))
         made.resize(*WORKING_AREA)
         made.show()
         qtbot.waitExposed(made)
-        run_panel = made.centralWidget().widget(1)
-        assert run_panel.height() > 150
-        assert made.statusBar().geometry().bottom() <= made.height()
+        for index in range(made.tabs.count()):
+            made.tabs.setCurrentIndex(index)
+            qtbot.wait(10)
+            assert made.run_panel.isVisible() and made.run_panel.height() > 150
+            assert made.statusBar().geometry().bottom() <= made.height()
         assert made.statusBar().isVisible()
+        assert made.width() <= WORKING_AREA[0]
     finally:
         made.close()
         made.worker.shutdown()
         made.worker.wait(10_000)
 
 
+def test_the_window_is_five_tabs_over_the_run_strip(window):
+    """E1: one tab for each way of using the window, the run strip and the run log
+    under all of them, and the window opened on the Method tab by default."""
+    from clockwork.app.window import TABS
+
+    assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == list(TABS)
+    assert TABS == ("Template", "Queue", "Method", "Day", "Setup")
+    assert window.tabs.currentWidget() is window.method_tab
+    assert not window.tabs.isAncestorOf(window.run_panel)
+    for control in (window.run_panel.guard_button, window.run_panel.stop_run,
+                    window.run_panel.note, window.run_panel.at_window,
+                    window.run_panel.purpose, window.run_panel.job_line):
+        assert window.run_panel.isAncestorOf(control)
+    for control in (window.find_button, window.output_dir, window.initials,
+                    window.instrument_field, window.open_on_acquire,
+                    window.console_settings_button):
+        assert window.setup_tab.isAncestorOf(control)
+    assert window.method_tab.isAncestorOf(window.acquire_button)
+    assert window.method_tab.isAncestorOf(window.send_button)
+
+
+def test_the_cuts_are_gone(window):
+    """E8: the paste-file import, the method-against-instrument diff, Send setup, Load
+    and arm, Replicate and the builder dialog."""
+    for name in ("setup_button", "arm_button", "replicate_button", "action_import",
+                 "action_build", "open_trainee_file", "build_from_template", "replicate",
+                 "queue_dock"):
+        assert not hasattr(window, name), name
+    texts = [action.text() for menu in window.menuBar().actions()
+             for action in menu.menu().actions()]
+    assert not any("paste file" in text or "Build a method" in text for text in texts)
+
+
 def test_every_control_in_the_side_column_stays_reachable(qtbot, scratch_settings):
-    """The scroll area is the structural half of task 61's step 1, and this is what it
-    buys: on a screen far too small for the column, the controls are still there to be
-    scrolled to rather than clipped away."""
+    """The scroll areas are the structural half of task 61's step 1: on a screen far
+    too small for the Method tab's column or the Setup tab, the controls are still
+    there to be scrolled to rather than clipped away."""
     from PySide6.QtWidgets import QScrollArea
 
     made = MainWindow(fake=True)
@@ -682,14 +744,11 @@ def test_every_control_in_the_side_column_stays_reachable(qtbot, scratch_setting
     try:
         made.resize(900, 420)
         made.show()
+        made.tabs.setCurrentWidget(made.setup_tab)
         qtbot.waitExposed(made)
-        column = made.centralWidget().widget(0).widget(1)
-        assert isinstance(column, QScrollArea)
-        assert column.verticalScrollBar().maximum() > 0
-        # The checkbox at the very bottom of the column, the furthest control from the
-        # top and the one run 011 turned on.
-        assert made.open_on_acquire.parent() is not None
-        assert column.widget().isAncestorOf(made.open_on_acquire)
+        assert isinstance(made.setup_tab, QScrollArea)
+        assert made.setup_tab.verticalScrollBar().maximum() > 0
+        assert made.setup_tab.widget().isAncestorOf(made.open_on_acquire)
     finally:
         made.close()
         made.worker.shutdown()
@@ -1367,29 +1426,145 @@ def test_a_method_that_contradicts_itself_greys_acquire_out_and_says_why(
     assert "Acquire is not available" in window.problems.text()
 
 
-def test_acquire_is_greyed_out_until_the_boxes_are_armed_with_this_method(
+def test_acquire_is_offered_on_cold_boxes_and_the_line_says_what_they_hold(
         window, tmp_path, qtbot):
-    """`run_acquisition` starts boxes it expects to be loaded and armed already. A
-    method never sent, and a method edited since it was sent, both leave the box holding
-    something other than what is on screen -- and both would show up as `TBLSTRT`
-    refused for "not in table mode", three frames in, rather than as a sentence."""
+    """E7 and E2 (lab record, task 169): Acquire is no longer greyed until the boxes are
+    armed, since it sends what they do not hold first; the line over the panes says
+    whether the panes are what the boxes hold, by the owner's memory of the last send."""
     load_into(window, tmp_path, make_method())
     until(qtbot, lambda: window.worker.boxes and idle(window))
-    assert not window.acquire_button.isEnabled()
-    assert "have not been loaded and armed" in window.problems.text()
-
-    window.send(setup=True)
-    until(qtbot, lambda: idle(window) and window._armed)
     assert window.acquire_button.isEnabled(), window.problems.text()
+    assert "Nothing is known to be on the boxes" in window.held_line.text()
 
-    # Into the `setup` block, which is what a send puts on the wire. A changed `reset`
-    # would not invalidate the arming and should not: it is walked by the run, ahead of
-    # its first frame, not at arm time, and `wire_fingerprint` covers the three phases a
-    # send delivers.
-    window.panes[BOX].set_text("SDCB,1,12.0\n\n" + window.panes[BOX].text())
+    window.send()
+    until(qtbot, lambda: idle(window) and window._armed)
     window._refresh_actions()
-    assert not window.acquire_button.isEnabled()
-    assert "changed since the boxes were armed" in window.problems.text()
+    assert "The panes are what the boxes hold" in window.held_line.text()
+
+    window.panes[BOX].set_text("SDCB,1,12.0\n\n" + window.panes[BOX].text())
+    window.panes[BOX].reparse()
+    window._refresh_actions()
+    assert window.acquire_button.isEnabled()
+    assert "not the panes" in window.held_line.text()
+
+
+def sent_lines(path) -> list[str]:
+    """The transcript's lines for strings sent to the box, `<box> > b'...'`, in order,
+    from the bytes on: the time in front differs between two reads of one line."""
+    text = path.read_text(encoding="utf-8")
+    return [line.split(f"{BOX} > ", 1)[1]
+            for line in text.splitlines() if f"{BOX} > b'" in line]
+
+
+def test_acquire_on_cold_boxes_sends_every_phase_then_acquires(window, tmp_path, qtbot):
+    """One press on boxes nothing is known to hold: the owner sends setup, load and arm
+    under the run's own stem, then acquires, and the first file is not a replicate."""
+    load_into(window, tmp_path, make_method())
+    until(qtbot, lambda: window.worker.boxes and idle(window))
+    window.start_console()
+    until(qtbot, lambda: window.worker.console_alive and idle(window))
+    stem = window.stem.text()
+    runs: list[object] = []
+    window.worker.run_done.connect(runs.append)
+    window.replicates.setValue(1)
+    assert window.acquire() is not None
+    until(qtbot, lambda: runs and idle(window), timeout=180_000)
+    assert runs[0].complete, runs[0].text
+    assert not runs[0].replicate
+    log = (tmp_path / f"{stem}.sent.txt").read_text(encoding="utf-8")
+    assert "STBLCLK,EXT" in log and "TBLSTRT" in log
+    assert window._armed and window._armed[0][1] == ("STBLCLK,EXT", "STBLTRG,POS")
+
+
+def test_acquire_on_boxes_that_hold_the_method_sends_nothing_and_is_the_replicate(
+        window, tmp_path, qtbot):
+    """E7: on boxes that hold the method the first file is the replicate, and the
+    owner says it sent nothing."""
+    ready_to_acquire(window, qtbot, tmp_path)
+    window._refresh_stem()
+    runs: list[object] = []
+    window.worker.run_done.connect(runs.append)
+    window.replicates.setValue(1)
+    window.acquire()
+    until(qtbot, lambda: runs and idle(window), timeout=180_000)
+    assert runs[0].complete and runs[0].replicate
+    assert any("nothing sent" in line for line in run_log(window))
+
+
+def test_send_sends_only_what_the_boxes_do_not_hold(window, tmp_path, qtbot):
+    """Send is Acquire's send with nothing acquired: nothing on boxes that hold the
+    panes, the table alone where only the table moved, and everything again with the
+    tick, which then clears itself."""
+    load_into(window, tmp_path, make_method())
+    until(qtbot, lambda: window.worker.boxes and idle(window))
+    window.send()
+    until(qtbot, lambda: idle(window) and window._armed)
+    transcript_file = next(tmp_path.glob("*.transcript.log"))
+    first = sent_lines(transcript_file)
+    assert any("STBLCLK,EXT" in line for line in first)
+
+    window.send()
+    until(qtbot, lambda: idle(window) and any(
+        "nothing sent: the boxes hold the panes" in line for line in run_log(window)))
+    assert sent_lines(transcript_file) == first
+
+    window.panes[BOX].set_text(window.panes[BOX].text().replace("500:B:0", "501:B:0"))
+    window.panes[BOX].reparse()
+    window._refresh_stem()
+    stem = window.stem.text()
+    window.send()
+    until(qtbot, lambda: idle(window) and window._armed
+          and matches_wire(window._armed, window.build_method()))
+    moved = (tmp_path / f"{stem}.sent.txt").read_text(encoding="utf-8")
+    assert "501:B:0" in moved and "STBLCLK,EXT" not in moved, moved
+    # The setup the boxes still hold is still part of what they are known to hold.
+    assert window._armed[0][1] == ("STBLCLK,EXT", "STBLTRG,POS")
+
+    window._refresh_stem()
+    stem = window.stem.text()
+    window.setup_again.setChecked(True)
+    window.send()
+    assert not window.setup_again.isChecked()
+    until(qtbot, lambda: (tmp_path / f"{stem}.sent.txt").is_file() and idle(window))
+    until(qtbot, lambda: "STBLCLK,EXT" in (tmp_path / f"{stem}.sent.txt").read_text(
+        encoding="utf-8"))
+
+
+def test_the_state_panel_compares_with_what_the_boxes_were_last_sent(
+        window, tmp_path, qtbot):
+    """E2: a reading is marked against the last send, whoever made it, and an edit to
+    the panes does not re-mark it."""
+    load_into(window, tmp_path, make_method())
+    until(qtbot, lambda: window.worker.boxes and idle(window))
+    assert window.panes[BOX].state.method is None
+    window.send()
+    until(qtbot, lambda: idle(window) and window._armed)
+    window._refresh_actions()
+    sent = window.panes[BOX].state.method
+    assert sent is not None and sent.setup == ("STBLCLK,EXT", "STBLTRG,POS")
+    window.panes[BOX].set_text("SDCB,1,12.0\n\n" + window.panes[BOX].text())
+    window.panes[BOX].reparse()
+    window._pane_changed()
+    assert window.panes[BOX].state.method == sent
+
+
+def test_a_method_load_keeps_the_boxes_connection_details(window, tmp_path, qtbot):
+    """The FLAG of 2026-09-22 (closed by task 169): loading a method rebuilt the panes
+    and their headers lost the port and firmware the scan had found."""
+    load_into(window, tmp_path, make_method())
+    until(qtbot, lambda: window.worker.boxes and idle(window))
+    header = window.panes[BOX].status.text()
+    assert header and header != "off or absent"
+    import dataclasses
+
+    other = make_method()
+    other = dataclasses.replace(other, boxes=(
+        dataclasses.replace(other.boxes[0], name="box2"), other.boxes[0]))
+    path = str(tmp_path / "other.toml")
+    method_module.save(other, path)
+    window._load_method(path)
+    assert window.panes[BOX].status.text() == header
+    assert BOX in window.boxes_label.text()
 
 
 def test_a_send_fills_the_state_panels_without_a_second_readback(
@@ -1442,7 +1617,11 @@ def test_the_panel_button_reads_only_its_own_box(window, tmp_path, qtbot):
 
 def test_a_whole_run_with_a_replicate_names_two_files_and_folds_both(
         window, tmp_path, qtbot):
-    ready_to_acquire(window, qtbot, tmp_path)
+    # From cold boxes, so the first file is the one its own send armed (E7).
+    load_into(window, tmp_path, make_method())
+    until(qtbot, lambda: window.worker.boxes and idle(window))
+    window.start_console()
+    until(qtbot, lambda: window.worker.console_alive and idle(window))
     assert window.acquire_button.isEnabled(), window.problems.text()
 
     runs: list[object] = []
@@ -1568,7 +1747,7 @@ def test_a_failed_job_moves_the_name_on_past_the_files_it_left(window, tmp_path)
 
 def test_a_second_send_continues_the_send_log_instead_of_emptying_it(
         window, tmp_path, qtbot):
-    """A Load and arm used to destroy the Send setup log that preceded it under the
+    """A second send used to destroy the Send setup log that preceded it under the
     same stem, and the 2026-09-17 sitting then read the emptied file and reported that
     the CLOCK `setup` had never been sent -- on the strength of which it was sent again.
     It had gone out before every CLOCK series that afternoon (task 56).
@@ -1585,7 +1764,7 @@ def test_a_second_send_continues_the_send_log_instead_of_emptying_it(
     after_setup = log.read_text(encoding="utf-8")
     assert "STBLCLK,EXT" in after_setup
 
-    window.send(setup=False)
+    window.send(setup=True)
     # On the file rather than on `_armed`, which the first send already set: the job is
     # queued to another thread and the window is briefly idle with it still waiting.
     until(qtbot, lambda: log.read_text(encoding="utf-8").count("SMOD,TBL") >= 2)
@@ -1595,20 +1774,21 @@ def test_a_second_send_continues_the_send_log_instead_of_emptying_it(
     assert whole.startswith(after_setup[:200])
 
 
-def test_a_queue_row_that_does_not_send_setup_keeps_its_own_send_log(
+def test_an_acquire_after_a_send_continues_that_stem_s_send_log(
         window, tmp_path, qtbot):
-    """The same defect down the run queue's path (task 53), which reaches it on a row
-    with `setup` unchecked: the row sends load and arm under the stem and then acquires
-    under it, and an acquisition that matched only on the last *setup* log truncated the
-    load-and-arm log it had just written."""
+    """Task 56's defect down a new path (task 169): a Send under a stem, then an Acquire
+    under the same stem that found nothing to send, whose first file is a replicate on
+    the wire -- and a replicate's log was opened afresh, over the send's."""
     ready_to_acquire(window, qtbot, tmp_path, make_method())
+    window.panes[BOX].set_text(window.panes[BOX].text().replace("500:B:0", "501:B:0"))
+    window.panes[BOX].reparse()
     window._refresh_stem()
     stem = window.stem.text()
     log = tmp_path / f"{stem}.sent.txt"
-    window.send(setup=False)
+    window.send()
     until(qtbot, lambda: log.is_file() and "SMOD,TBL" in log.read_text(encoding="utf-8"))
     until(qtbot, lambda: idle(window))
-    after_arm = log.read_text(encoding="utf-8")
+    after_send = log.read_text(encoding="utf-8")
 
     runs: list[object] = []
     window.worker.run_done.connect(runs.append)
@@ -1616,42 +1796,8 @@ def test_a_queue_row_that_does_not_send_setup_keeps_its_own_send_log(
     window.acquire()
     until(qtbot, lambda: runs and idle(window), timeout=180_000)
     whole = log.read_text(encoding="utf-8")
-    assert whole.startswith(after_arm[:200]), "the acquisition emptied the send's log"
+    assert whole.startswith(after_send[:200]), "the acquisition emptied the send's log"
     assert "TBLSTRT" in whole
-
-
-def test_a_load_and_arm_does_not_arm_setup_strings_the_wire_never_saw(
-        window, tmp_path, qtbot):
-    """`wire_fingerprint` always carried the panes' setup strings, whatever the send
-    delivered, so a `setup=False` send recorded as armed a set of strings the box may
-    never have had. Latent on the day; found reading the code afterwards (task 56)."""
-    load_into(window, tmp_path, make_method())
-    until(qtbot, lambda: window.worker.boxes and idle(window))
-    window.send(setup=False)
-    until(qtbot, lambda: idle(window) and window._armed)
-
-    method = window.build_method()
-    assert window._armed[0][1] is None, "the setup phase was recorded as sent"
-    assert matches_wire(window._armed, method)
-
-    # The table is compared exactly: it is what an acquisition starts against, and a
-    # pane edited after the send is a table the box is not holding.
-    window.panes[BOX].set_text(window.panes[BOX].text().replace("500:B:0", "501:B:0"))
-    window.panes[BOX].reparse()
-    assert not matches_wire(window._armed, window.build_method())
-
-
-def test_a_full_send_arms_every_phase_including_setup(window, tmp_path, qtbot):
-    """The other half of the same rule: what a `Send setup` put on the wire is compared
-    in full, so an edited setup line still greys Acquire out."""
-    load_into(window, tmp_path, make_method())
-    until(qtbot, lambda: window.worker.boxes and idle(window))
-    window.send(setup=True)
-    until(qtbot, lambda: idle(window) and window._armed)
-    assert window._armed[0][1] == ("STBLCLK,EXT", "STBLTRG,POS")
-    window.panes[BOX].set_text("SDCB,1,12.0\n\n" + window.panes[BOX].text())
-    window.panes[BOX].reparse()
-    assert not matches_wire(window._armed, window.build_method())
 
 
 def test_a_box_with_an_empty_pane_is_not_a_box_the_method_names(
@@ -1823,7 +1969,7 @@ def test_no_instrument_document_greys_acquire_out_but_not_send(
         until(qtbot, lambda: BOX in made.panes and idle(made))
         assert not made.acquire_button.isEnabled()
         assert "no channel offset" in made.problems.text()
-        assert made.setup_button.isEnabled()
+        assert made.send_button.isEnabled()
         made._load_instrument(make_instrument(tmp_path))
         made._refresh_actions()
         assert "no channel offset" not in made.problems.text()
@@ -2103,7 +2249,7 @@ def test_the_buttons_a_trainee_presses_are_greyed_out_while_the_queue_runs(
     window.start_queue()
     qtbot.waitUntil(lambda: window.run_panel.progress.repetition >= 1, timeout=120_000)
     assert not window.acquire_button.isEnabled()
-    assert not window.setup_button.isEnabled()
+    assert not window.send_button.isEnabled()
     assert not window.queue_panel.start_button.isEnabled()
     assert window.queue_panel.stop_button.isEnabled()
     window.stop()
@@ -2210,7 +2356,7 @@ def library(tmp_path) -> str:
 
 
 def test_the_dialog_lists_every_document_the_directory_holds(library, qtbot):
-    dialog = LibraryDialog(library, {})
+    dialog = LibraryDialog(library)
     qtbot.addWidget(dialog)
     assert dialog.table.rowCount() == 3
     assert len(dialog.entries) == 3
@@ -2218,7 +2364,7 @@ def test_the_dialog_lists_every_document_the_directory_holds(library, qtbot):
 
 
 def test_open_is_only_enabled_for_a_single_good_selection(library, qtbot):
-    dialog = LibraryDialog(library, {})
+    dialog = LibraryDialog(library)
     qtbot.addWidget(dialog)
     dialog.table.selectRow(next(i for i, e in enumerate(dialog.entries) if e.ok))
     assert dialog.open_button.isEnabled()
@@ -2228,7 +2374,7 @@ def test_open_is_only_enabled_for_a_single_good_selection(library, qtbot):
 
 
 def test_diff_two_methods_needs_exactly_two_selected(library, qtbot):
-    dialog = LibraryDialog(library, {})
+    dialog = LibraryDialog(library)
     qtbot.addWidget(dialog)
     good = [i for i, e in enumerate(dialog.entries) if e.ok]
     dialog.table.selectRow(good[0])
@@ -2241,7 +2387,7 @@ def test_diff_two_methods_needs_exactly_two_selected(library, qtbot):
 
 
 def test_open_into_panes_names_the_chosen_path_and_accepts(library, qtbot):
-    dialog = LibraryDialog(library, {})
+    dialog = LibraryDialog(library)
     qtbot.addWidget(dialog)
     row = next(i for i, e in enumerate(dialog.entries) if e.ok)
     dialog.table.selectRow(row)
@@ -2259,8 +2405,9 @@ def test_open_library_loads_the_dialogs_chosen_method_and_remembers_the_director
     method_module.save(make_method(stem="picked"), path)
 
     class _Stub:
-        def __init__(self, directory, readings, parent):
+        def __init__(self, directory, parent):
             self.chosen_path = path
+            self.chosen_template = ""
         def directory(self):
             return "chosen-directory"
         def exec(self):
@@ -2288,15 +2435,6 @@ def test_method_diff_dialog_marks_a_changed_line_and_an_added_box(qtbot):
     assert any(title.startswith("box2") and "only in B" in title for title in titles)
     assert method_diff(a, a).identical
     assert not method_diff(a, b).identical
-
-
-def test_instrument_diff_dialog_builds_one_state_panel_per_box(window, tmp_path, qtbot):
-    method = make_method()
-    dialog = InstrumentDiffDialog(method, window.readings)
-    qtbot.addWidget(dialog)
-    panels = dialog.findChildren(StatePanel)
-    assert len(panels) == len(method.boxes)
-    assert all(panel.opened for panel in panels)
 
 
 def test_report_a_problem_sits_above_about_and_names_the_last_run(window, tmp_path,
@@ -2589,7 +2727,7 @@ def test_editing_a_pane_detaches_once_and_the_run_stamps_as_hand_written(
     assert len(said) == 1, run_log(window)[before:]
     assert window.rendered is None and not window.provenance.isVisibleTo(window)
 
-    window.send(setup=True)
+    window.send()
     until(qtbot, lambda: idle(window)
           and matches_wire(window._armed, window.build_method()))
     values = stamped(one_run(window, qtbot).raw_path)
@@ -2647,14 +2785,14 @@ def test_the_library_lists_a_template_and_open_on_it_goes_to_the_builder(
         qtbot, tmp_path):
     (tmp_path / "template.toml").write_text(WINDOW_TEMPLATE, encoding="utf-8")
     render_to(tmp_path)
-    dialog = LibraryDialog(str(tmp_path), {})
+    dialog = LibraryDialog(str(tmp_path))
     qtbot.addWidget(dialog)
     rows = {dialog.table.item(row, 3).text(): row for row in range(dialog.table.rowCount())}
     template_row = next(row for text, row in rows.items() if text.startswith("template;"))
     rendered_row = next(row for text, row in rows.items() if text.startswith("rendered from"))
     dialog.table.selectRow(template_row)
     assert dialog.open_button.isEnabled()
-    assert not dialog.diff_instrument_button.isEnabled()
+    assert not dialog.diff_methods_button.isEnabled()
     dialog._open()
     assert dialog.chosen_template.endswith("template.toml") and dialog.chosen_path == ""
     dialog.chosen_template = ""
@@ -2664,38 +2802,62 @@ def test_the_library_lists_a_template_and_open_on_it_goes_to_the_builder(
     assert dialog.chosen_path.endswith("cell.toml") and dialog.chosen_template == ""
 
 
-# --- the method builder (lab record, task 164) -----------------------------------------
+# --- the Template tab (lab record, task 169; E4, R10) ------------------------------------
 
 
-def test_the_builder_renders_in_range_and_saves_what_render_to_writes(
-        qtbot, tmp_path):
+def window_limits(**knob: object) -> object:
+    """Standing limits admitting `WINDOW_TEMPLATE`, with `b_ticks` bounded as given."""
+    from clockwork import envelope
+
+    bounds = ", ".join(f"{key} = {value}" for key, value in knob.items()) or "min = 100"
+    template = templates.loads_template(WINDOW_TEMPLATE)
+    return envelope.loads(f"""\
+schema_version = 2
+
+[allow]
+boxes = ["{BOX}"]
+
+[templates.window]
+hash = "{template.hash[:12]}"
+
+[templates.window.knobs]
+b_ticks = {{ {bounds} }}
+""")
+
+
+def library_with_template(tmp_path) -> str:
     library = tmp_path / "library"
-    library.mkdir()
+    library.mkdir(exist_ok=True)
     (library / "template.toml").write_text(WINDOW_TEMPLATE, encoding="utf-8")
-    dialog = BuildDialog(str(library), str(tmp_path))
-    qtbot.addWidget(dialog)
-    assert dialog.picker.count() == 1 and dialog.template is not None
-    field = dialog.knob_fields["b_ticks"]
+    return str(library)
+
+
+def test_the_template_tab_renders_in_range_and_saves_what_render_to_writes(
+        qtbot, tmp_path):
+    tab = TemplateTab()
+    qtbot.addWidget(tab)
+    tab.set_library(library_with_template(tmp_path))
+    assert tab.picker.count() == 1 and tab.template is not None
+    field = tab.knob_fields["b_ticks"]
     assert (field.minimum(), field.maximum(), field.value()) == (100, 520, 500)
-    # The sample is required: nothing to save until it is given.
-    assert not dialog.save_button.isEnabled()
-    assert "sample" in dialog.problems.text()
-    dialog.label_fields["sample"].setText("test mixture")
-    assert dialog.save_button.isEnabled()
-    assert dialog.diff_text.toPlainText() == "every knob at its default: no difference"
-    field.setValue(9999)  # clamped to the range: the box offers nothing outside it
+    # The sample is required: nothing renders, and nothing is saved, until it is given.
+    assert not tab.save_button.isEnabled() and not tab.acquire_button.isEnabled()
+    assert "sample" in tab.problems.text()
+    tab.label_fields["sample"].setText("test mixture")
+    assert tab.save_button.isEnabled() and tab.open_button.isEnabled()
+    assert tab.diff_text.toPlainText() == "every knob at its default: no difference"
+    field.setValue(9999)  # clamped to the template's range: the box offers nothing outside
     assert field.value() == 520
     field.setValue(400)
-    assert ",400:B:0," in dialog.method_text.toPlainText()
-    assert "-" in dialog.diff_text.toPlainText() and ",500:B:0," in dialog.diff_text.toPlainText()
-    assert dialog.problems.text() == (
+    assert ",400:B:0," in tab.method_text.toPlainText()
+    assert ",500:B:0," in tab.diff_text.toPlainText()
+    assert tab.problems.text() == (
         "rendered from window-template at b_ticks 400 ticks, sample 'test mixture'")
-    assert default_name(dialog.template, dialog.template_path, dialog.knobs()) == (
+    assert default_name(tab.template, tab.template_path, tab.knobs()) == (
         "template_b_ticks-400.toml")
 
     saved = str(tmp_path / "built.toml")
-    assert dialog.write(saved) and dialog.saved_path == saved
-    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert tab.write(saved)
     with open(saved, encoding="utf-8") as built:
         text = built.read()
     with open(render_to(tmp_path, b_ticks=400), encoding="utf-8") as written:
@@ -2705,25 +2867,154 @@ def test_the_builder_renders_in_range_and_saves_what_render_to_writes(
     assert rendered.knobs == {"b_ticks": 400}
 
 
-def test_the_window_opens_what_the_builder_saved_attached(window, tmp_path, monkeypatch):
-    library = tmp_path / "library"
-    library.mkdir()
-    (library / "template.toml").write_text(WINDOW_TEMPLATE, encoding="utf-8")
-    window.settings.library_dir = str(library)
+def test_each_knob_is_shown_against_the_template_s_range_and_the_agent_s(qtbot, tmp_path):
+    """R10: both ranges beside the field, a value outside the agent's marked and never
+    refused; with no limits in the sitting, the template's range alone, said."""
+    tab = TemplateTab()
+    qtbot.addWidget(tab)
+    tab.set_library(library_with_template(tmp_path))
+    tab.label_fields["sample"].setText("test mixture")
+    tab.knob_fields["b_ticks"].setValue(300)
+    note = tab.knob_notes["b_ticks"]
+    assert note.text() == "template 100 to 520 ticks"
+    assert "template's own range alone" in tab.limits_line.text()
+
+    tab.set_limits(window_limits(min=200, max=450), "")
+    assert note.text() == "template 100 to 520 ticks; the agent 200 to 450 ticks"
+    assert tab.outside() == []
+    tab.knob_fields["b_ticks"].setValue(500)
+    assert tab.outside() == ["b_ticks"]
+    assert "outside the agent's, run anyway and recorded" in note.text()
+    assert tab.rendered is not None and tab.save_button.isEnabled()
+
+    from clockwork import envelope
+
+    tab.set_limits(envelope.loads(f'schema_version = 2\n[allow]\nboxes = ["{BOX}"]\n'), "")
+    assert "do not admit this template" in tab.limits_line.text()
+    assert note.text().endswith("the agent: not admitted")
+
+
+def test_a_template_run_is_file_less_and_its_record_says_what_lies_outside(
+        window, tmp_path, qtbot):
+    """E4 and R10 end to end over the stand-ins: Acquire in the Template tab writes no
+    method file, the files stamp the template and its knobs, and the run record keeps
+    the knob outside the agent's range."""
+    import json
+
+    window.settings.library_dir = library_with_template(tmp_path)
+    window.template_tab.set_library(window._library())
+    window.worker.owner.limits = window_limits(min=200, max=450)
+    window._refresh_limits()
+    tab = window.template_tab
+    tab.label_fields["sample"].setText("test mixture")
+    tab.knob_fields["b_ticks"].setValue(480)
+    tab.replicates.setValue(1)
+    assert tab.outside() == ["b_ticks"]
+    # Under --fake the rack comes from a method; a scan with the template's boxes gives
+    # the stand-ins their boxes, as opening a method would.
+    window.worker.submit(window_discover(tab.rendered.method))
+    until(qtbot, lambda: window.worker.boxes and idle(window))
+    window.start_console()
+    until(qtbot, lambda: window.worker.console_alive and idle(window))
+    before = set(os.listdir(tmp_path))
+    window._refresh_actions()
+    assert tab.acquire_button.isEnabled(), tab.acquire_button.toolTip()
+    runs: list[object] = []
+    window.worker.run_done.connect(runs.append)
+    tab.acquire_button.click()
+    until(qtbot, lambda: runs and idle(window), timeout=180_000)
+    assert runs[0].complete, runs[0].text
+    values = stamped(runs[0].raw_path)
+    assert float(values["ClockworkKnobBTicks"]) == 480.0
+    assert values["ClockworkLabelSample"] == "test mixture"
+    new = set(os.listdir(tmp_path)) - before
+    assert not any(name.endswith(".toml") for name in new), new
+    record = next(name for name in new if name.endswith(".request.json"))
+    data = json.loads((tmp_path / record).read_text(encoding="utf-8"))
+    entry = data["acquisitions"][0]
+    assert entry["template"]["knobs"] == {"b_ticks": 480}
+    assert len(entry["outside_limits"]) == 1 and "b_ticks = 480" in entry["outside_limits"][0]
+    assert data["request"]["source"] == "window"
+
+
+def window_discover(method):
+    from clockwork.owner import Discover
+
+    return Discover(method=method)
+
+
+def test_open_in_the_method_tab_writes_the_file_and_opens_it_attached(
+        window, tmp_path, monkeypatch):
+    window.settings.library_dir = library_with_template(tmp_path)
+    window.template_tab.set_library(window._library())
+    tab = window.template_tab
+    tab.label_fields["sample"].setText("test mixture")
+    tab.knob_fields["b_ticks"].setValue(300)
     saved = str(tmp_path / "built.toml")
-
-    def exec_(dialog) -> int:
-        dialog.label_fields["sample"].setText("test mixture")
-        dialog.knob_fields["b_ticks"].setValue(300)
-        assert dialog.write(saved)
-        return QDialog.DialogCode.Accepted
-
-    monkeypatch.setattr(BuildDialog, "exec", exec_)
-    window.build_from_template()
+    monkeypatch.setattr(tab, "_ask_path", lambda suggested: saved)
+    window.tabs.setCurrentWidget(tab)
+    tab.open_button.click()
     assert window.method_path == saved and window.rendered is not None
+    assert window.tabs.currentWidget() is window.method_tab
     assert window.provenance.text() == (
         "Rendered from window-template at b_ticks 300 ticks, sample 'test mixture'")
     assert window.rendered.knobs == {"b_ticks": 300}
+
+
+def test_the_library_opens_a_template_in_the_template_tab(window, tmp_path, monkeypatch):
+    library = library_with_template(tmp_path)
+    window.settings.library_dir = library
+
+    def exec_(dialog) -> int:
+        dialog.chosen_template = os.path.join(library, "template.toml")
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(LibraryDialog, "exec", exec_)
+    window.open_library()
+    assert window.tabs.currentWidget() is window.template_tab
+    assert window.template_tab.template_path.endswith("template.toml")
+
+
+# --- the Day tab (D2, D3) --------------------------------------------------------------
+
+
+def test_the_day_tab_lists_a_window_run_as_its_record_words_it(window, tmp_path, qtbot):
+    ready_to_acquire(window, qtbot, tmp_path)
+    window.run_panel.purpose.setText("a day-tab check")
+    window.run_panel.at_window.setText("MB")
+    runs: list[object] = []
+    window.worker.run_done.connect(runs.append)
+    window.replicates.setValue(1)
+    window.acquire()
+    until(qtbot, lambda: runs and idle(window), timeout=180_000)
+    window.tabs.setCurrentWidget(window.day_panel)
+    lines = [line for line in window.day_panel.lines if line.route == "window"]
+    assert len(lines) == 1, window.day_panel.lines
+    line = lines[0]
+    assert line.person == "MB" and line.purpose == "a day-tab check"
+    assert line.files == (os.path.splitext(os.path.basename(runs[0].raw_path))[0],)
+    assert line.ended.startswith("1 file: 1 complete")
+    assert window.day_panel.tree.topLevelItemCount() >= 1
+
+
+def test_the_day_list_reads_verdicts_routines_and_stops_as_recorded():
+    from clockwork.app.daylist import request_line
+
+    line = request_line({
+        "request": {"id": "x", "text": "why", "source": "mcp", "initials": "BK",
+                    "opened": "2026-11-18T14:02:11"},
+        "files": [{"stem": "261118_BK_001", "complete": True},
+                  {"stem": "261118_BK_002", "stopped_early": True}],
+        "interventions": [{"kind": "stop", "by": "MB", "reason": "beam drifted"}],
+        "routines": [{"routine": "gate", "verdict": "pass", "reason": "within 2%"}],
+        "verdicts": [{"stem": "261118_BK_001", "verdict": "no_signal", "by": "AD"},
+                     {"stem": "261118_BK_001", "verdict": "worked", "by": "MB"}],
+    })
+    assert line.time == "14:02:11" and line.route == "mcp" and line.person == "BK"
+    assert line.ended.startswith("2 files: 1 complete, 1 stopped early; stopped by MB")
+    assert line.result == "gate: pass (within 2%)"
+    assert line.verdict == "261118_BK_001: worked (MB)"
+    assert line.state == "stopped"
 
 
 def test_the_three_boxes_range_to_the_loader_s_ceilings(window):

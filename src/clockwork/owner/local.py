@@ -1126,7 +1126,31 @@ class LocalOwner:
 
     # -- sending -------------------------------------------------------------
 
-    def _send(self, job: Send) -> SendResult:
+    def _send_as_needed(self, job: Send) -> SendResult:
+        """The window's Send, and the send an `Acquire` with `send` makes first (E7; lab
+        record, task 169): only what the boxes do not hold, by what they were last sent.
+
+        Nothing where they hold this method (`matches_wire` on `Armed`), unless `setup`
+        asks for it again; otherwise every phase, with `setup` only where the stack
+        differs from the last send's, or no send is remembered, or the last one did not
+        carry it. A send that leaves `setup` out because the boxes hold it records it as
+        held, so what the boxes hold is still whole for the next comparison."""
+        method = _needs_method(job.method)
+        armed = self._armed
+        holds = armed is not None and matches_wire(armed.fingerprint, method)
+        if holds and not job.setup and self._snapshot is not None:
+            assert armed is not None
+            self._say(f"the boxes hold {method.metadata.name or 'this method'} already, "
+                      "as they were last sent it: nothing sent")
+            return SendResult(snapshot=self._snapshot, setup=False,
+                              armed=armed.fingerprint, sent=False)
+        setup = (job.setup or armed is None
+                 or _setup_differs_wire(armed.fingerprint, method))
+        return self._send(replace(job, setup=setup, as_needed=False), setup_held=not setup)
+
+    def _send(self, job: Send, *, setup_held: bool = False) -> SendResult:
+        if job.as_needed:
+            return self._send_as_needed(job)
         method = _needs_method(job.method)
         self._require_boxes(method)
         problems = refusals(method)
@@ -1152,7 +1176,7 @@ class LocalOwner:
         self._snapshot = snapshot
         if job.setup:
             self._setup_log = (directory, stem)
-        fingerprint = wire_fingerprint(method, setup=job.setup)
+        fingerprint = wire_fingerprint(method, setup=job.setup or setup_held)
         self._armed = Armed(method=method.metadata.name, fingerprint=fingerprint,
                             directory=directory, stem=stem, setup=job.setup)
         return SendResult(snapshot=snapshot, setup=job.setup, send_log=paths[1],
@@ -1302,6 +1326,22 @@ class LocalOwner:
         os.makedirs(directory, exist_ok=True)
         if clear_stop:
             self._stop.clear()
+        first_replicate = job.replicate_only
+        if job.send:
+            # The window's Acquire (E7): what the boxes do not hold goes first, under the
+            # run's own stem, and where nothing went the first run is a replicate on the
+            # wire, as a series point the boxes held is.
+            if not job.stem:
+                job = replace(job, stem=next_stem(directory, job.initials))
+            sent = self._send(Send(
+                label=f"sending {method.metadata.name or 'the method'}", method=method,
+                setup=job.setup, conditions=job.conditions, directory=directory,
+                stem=job.stem, method_path=job.method_path, instrument=job.instrument,
+                instrument_path=job.instrument_path, as_needed=True))
+            first_replicate = first_replicate or not sent.sent
+            if self._stop.is_set():
+                self._say(f"stopped before acquiring: {self._stop_reason}")
+                return []
 
         runs: list[Run] = []
         # Subscribed before anything is configured, because the console binds the data
@@ -1345,7 +1385,7 @@ class LocalOwner:
                     stem = job.stem if index == 0 and job.stem else next_stem(
                         directory, job.initials, taken=taken)
                     taken.append(stem)
-                    replicate = job.replicate_only or index > 0
+                    replicate = first_replicate or index > 0
                     series = None
                     if job.series:
                         if job.series_position > 0:
@@ -1363,7 +1403,11 @@ class LocalOwner:
                     run = self._one_run(
                         method, job, console, stream, width, directory, stem,
                         replicate=replicate,
-                        first_log=self._send_log if not replicate else None,
+                        # The first file continues a send log under its own stem even
+                        # where it is a replicate on the wire: a Send and then an
+                        # Acquire that found nothing to send share one stem, and its
+                        # log must not be opened afresh over the send (task 56's rule).
+                        first_log=self._send_log if index == 0 else None,
                         prologue=prologue if index == 0 else None,
                         provenance=provenance,
                     )
@@ -1886,6 +1930,21 @@ def _identities(
         except (MipsError, ValueError):
             rows.append((name, (port, "", "")))
     return rows, lost
+
+
+def _setup_differs_wire(fingerprint: tuple, after: Method) -> bool:
+    """`_setup_differs` against what a send left the boxes holding (`Armed.fingerprint`)
+    rather than a method: true too where a box's setup was not recorded, a send that
+    left it out on a person's word that the box already had it."""
+    def stack(entries: object) -> tuple:
+        return tuple((entry[0], None if entry[1] is None else tuple(entry[1]),
+                      tuple(tuple(pair) if isinstance(pair, list) else pair
+                            for pair in entry[4]), tuple(entry[5]))
+                     for entry in entries)  # type: ignore[union-attr]
+    before = stack(fingerprint)
+    if any(entry[1] is None for entry in before):
+        return True
+    return before != stack(wire_fingerprint(after))
 
 
 def _setup_differs(before: Method, after: Method) -> bool:

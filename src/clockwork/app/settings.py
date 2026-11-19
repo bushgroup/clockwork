@@ -176,24 +176,19 @@ class Settings:
         self._settings.setValue("open_state_panels", ",".join(sorted(value)))
 
     @property
-    def queue_open(self) -> bool:
-        """Whether the run queue's dock was left showing (task 53).
+    def tab(self) -> str:
+        """The tab the window was left on, by its name (lab record, task 169); empty for
+        the Method tab, the ordinary way to work."""
+        return str(self._settings.value("tab", "") or "")
 
-        Shut by default. One method at a time with a replicate count is the ordinary
-        way to work and the queue is the thing a trainee reaches for on the days they
-        leave a series running, so it is remembered rather than opened: a window that
-        offered a queue every morning would be offering it mostly to people not using
-        one.
-        """
-        return str(self._settings.value("queue_open", "")).lower() in ("true", "1")
-
-    @queue_open.setter
-    def queue_open(self, value: bool) -> None:
-        self._settings.setValue("queue_open", bool(value))
+    @tab.setter
+    def tab(self, value: str) -> None:
+        self._settings.setValue("tab", str(value))
 
     @property
     def open_mainspring_on_acquire(self) -> bool:
-        """Whether Acquire opens a viewer on the file it is writing (task 55).
+        """Whether a run starting opens a viewer on the file it is writing (task 55;
+        any client's run since task 169, the window revision's D4).
 
         Off by default, which is the decision and not caution: a window that started
         another program every time a button was pressed would be taking the screen at

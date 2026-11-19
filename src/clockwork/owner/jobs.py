@@ -94,9 +94,17 @@ class RestartConsole(Job):
 class Send(Job):
     """`send_phases`, in one of its two shapes.
 
-    `setup=True` is "Send setup": every phase, plus the state readback that is the
-    half of the record the strings do not carry. `setup=False` is "Load and arm": the
-    table and the mode change only, for a box that has had its setup since power-up.
+    `setup=True` sends every phase, plus the state readback that is the half of the
+    record the strings do not carry. `setup=False` sends the table and the mode change
+    only, for a box that has had its setup since power-up (the MCP `arm`'s `setup`).
+
+    **`as_needed` is the window's Send** (the window revision's E7; lab record, task 169):
+    the owner sends only what the boxes do not hold, by its own memory of what they were
+    last sent, whoever sent it (`Armed`): nothing at all where they hold this method, and
+    otherwise every phase, `setup` with them only where it differs from the last send's
+    or no earlier send is remembered. `setup` true then sends it regardless, which is
+    the window's "send setup again" for a box switched off and on since. An `Acquire`
+    with `send` sends by the same rule, and a series by its own (`SeriesJob`).
     """
 
     label: str = "sending"
@@ -108,6 +116,7 @@ class Send(Job):
     method_path: str = ""
     instrument: Instrument = UNCALIBRATED
     instrument_path: str = ""
+    as_needed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +191,15 @@ class Acquire(Job):
     began its record (an MCP server, a command line) or that has none (a bench script)."""
     at_window: str = ""
     """The initials of the person at the window who pressed Start, for its record."""
+    send: bool = False
+    """Send first, as a `Send` with `as_needed` does: nothing where the boxes hold this
+    method, and otherwise every phase, `setup` only where it differs from what they were
+    last sent (the window revision's E7; lab record, task 169). Where nothing was sent
+    the first run is a replicate on the wire, as a series point the boxes held is. The
+    window's Acquire sets it; an MCP `acquire`, which refuses a method the boxes do not
+    hold, does not."""
+    setup: bool = False
+    """With `send`: send `setup` regardless, the window's "send setup again"."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,7 +413,7 @@ class SendResult:
     transcript_path: str = ""
     seconds: float = 0.0
     armed: tuple = ()
-    """What was put on the wire, as `wire_fingerprint` reads it.
+    """What the boxes hold after this send, as `wire_fingerprint` reads it.
 
     The window compares this with the panes as they stand: `run_acquisition` expects
     the boxes to be loaded and armed already, so a method edited after a send is a
@@ -403,6 +421,9 @@ class SendResult:
     cold boxes is three refused `TBLSTRT`s and a run that stopped after three frames,
     which is a true report of a mistake nobody was warned about.
     """
+    sent: bool = True
+    """False for a `Send` with `as_needed` that found the boxes holding the method and
+    sent nothing; `snapshot` is then the last send's."""
 
 
 @dataclass(frozen=True, slots=True)

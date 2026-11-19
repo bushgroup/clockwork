@@ -96,10 +96,11 @@ from ..acq import (
     Warned,
 )
 from ..owner import POINT, REPETITION, Held, Hold, Noted, PauseAsked, Resumed, StopAsked
+from ..owner.hold import Guarding
 from ..transcript import UNPROMPTED
 
-__all__ = ["LEFT_AS_FOUND", "NEVER_GROUPED", "NOTE_SAYS", "RunPanel", "is_left_as_found",
-           "names_it_elsewhere"]
+__all__ = ["GUARD_OFF", "GUARD_ON", "GUARD_TIP", "LEFT_AS_FOUND", "NEVER_GROUPED",
+           "NOTE_SAYS", "RunPanel", "is_left_as_found", "names_it_elsewhere"]
 
 NOTE_SAYS = ("A note is kept with the data and commands nothing; the buttons are the "
              "commands.")
@@ -221,6 +222,16 @@ class Progress:
         return f"{frames}repetition {self.repetition} of {self.of}"
 
 
+GUARD_OFF = "Beam guard: off…"
+GUARD_ON = "Beam guard: armed…"
+GUARD_TIP = ("Hold whatever is running when the beam is lost: a file whose repetitions "
+             "read under a floor of ions, several in a row, ends after the current "
+             "repetition and says failed; a queue or series then waits, paused by the "
+             "guard, until a person resumes it, and Resume acquires that row or point "
+             "again. Kept by clockwork serve, so it watches every client's runs, and "
+             "armed, changed or turned off under your initials.")
+
+
 class RunPanel(QWidget):
     """The bar, its caption, and the log of everything worth reading.
 
@@ -242,6 +253,8 @@ class RunPanel(QWidget):
     stop_requested = Signal()
     note_requested = Signal(str)
     """The note's text, as typed and not yet kept."""
+    guard_requested = Signal()
+    """Arm, change or disarm the beam guard. The window asks; the owner keeps it."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -285,8 +298,7 @@ class RunPanel(QWidget):
         self.log.setColumnWidth(0, 64)
 
         # The two fields a person's Start writes into its run record (lab record, task
-        # 165; the window revision's A1 and A2). Here, beside the bar, because the run
-        # strip task 169 builds over the tabs keeps them where they are now.
+        # 165; the window revision's A1 and A2), on the run strip under every tab (169).
         self.purpose = QLineEdit()
         self.purpose.setPlaceholderText("what this run is for (optional)")
         self.purpose.setToolTip(
@@ -297,14 +309,14 @@ class RunPanel(QWidget):
         self.at_window.setMaximumWidth(80)
         self.at_window.setToolTip(
             "Your initials, as the person at the window: written into the run record of "
-            "every run you start. Required to start one. Not the initials in the file "
-            "name, which say whatever the lab's naming puts there.")
-        fields = QHBoxLayout()
-        fields.setContentsMargins(0, 0, 0, 0)
-        fields.addWidget(QLabel("Purpose"))
-        fields.addWidget(self.purpose, 1)
-        fields.addWidget(QLabel("At the window"))
-        fields.addWidget(self.at_window)
+            "every run you start and beside every pause, stop, note and beam-guard "
+            "change. Required for each. Not the initials in the file name, which say "
+            "whatever the lab's naming puts there.")
+
+        self.job_line = QLabel("")
+        """The job in flight, whose it is, where its files go and the minutes left (E1)."""
+        self.job_line.setWordWrap(True)
+        self.job_line.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
         self.pause_point = QPushButton("Pause after this point")
         self.pause_repetition = QPushButton("Pause after this repetition")
@@ -318,6 +330,10 @@ class RunPanel(QWidget):
             "End the run in flight after its current repetition and its fold, whichever "
             "client started it, under your initials. A paused series ends where it "
             "rests, as stopped while paused.")
+        self.guard_button = QPushButton(GUARD_OFF)
+        self.guard_button.setToolTip(GUARD_TIP)
+        self.guarding: Guarding | None = None
+        """The owner's beam guard as the window last read it, for the button."""
         self.held = QLabel("")
         self.held.setWordWrap(True)
         self.held.setVisible(False)
@@ -326,13 +342,7 @@ class RunPanel(QWidget):
             lambda: self.pause_requested.emit(REPETITION))
         self.resume_button.clicked.connect(lambda: self.resume_requested.emit())
         self.stop_run.clicked.connect(lambda: self.stop_requested.emit())
-        controls = QHBoxLayout()
-        controls.setContentsMargins(0, 0, 0, 0)
-        controls.addWidget(self.pause_point)
-        controls.addWidget(self.pause_repetition)
-        controls.addWidget(self.resume_button)
-        controls.addWidget(self.stop_run)
-        controls.addStretch(1)
+        self.guard_button.clicked.connect(lambda: self.guard_requested.emit())
 
         self.note = QLineEdit()
         self.note.setPlaceholderText(
@@ -344,13 +354,37 @@ class RunPanel(QWidget):
             + NOTE_SAYS)
         self.note_button = QPushButton("Keep note")
         self.note_says = QLabel(NOTE_SAYS)
+        # Wrapped, so the sentence that must stay beside the field (C1) does not set the
+        # window's minimum width: unwrapped it asked for 960 px of the strip.
+        self.note_says.setWordWrap(True)
         self.note.returnPressed.connect(self._ask_note)
         self.note_button.clicked.connect(self._ask_note)
+
+        # Three rows of controls over the bar and the log, because the strip is on screen
+        # under every tab and every row it takes is a row the tabs lose (lab record,
+        # task 169's fit): who and why; what may be done to the job in flight; the note.
+        fields = QHBoxLayout()
+        fields.setContentsMargins(0, 0, 0, 0)
+        fields.addWidget(QLabel("Purpose"))
+        fields.addWidget(self.purpose, 1)
+        fields.addWidget(QLabel("At the window"))
+        fields.addWidget(self.at_window)
+        fields.addWidget(self.guard_button)
+
+        controls = QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.addWidget(self.job_line, 1)
+        controls.addWidget(self.pause_point)
+        controls.addWidget(self.pause_repetition)
+        controls.addWidget(self.resume_button)
+        controls.addWidget(self.stop_run)
+
         noting = QHBoxLayout()
         noting.setContentsMargins(0, 0, 0, 0)
         noting.addWidget(QLabel("Note"))
-        noting.addWidget(self.note, 1)
+        noting.addWidget(self.note, 3)
         noting.addWidget(self.note_button)
+        noting.addWidget(self.note_says, 2)
         self.show_hold(None)
 
         top = QHBoxLayout()
@@ -366,10 +400,17 @@ class RunPanel(QWidget):
         layout.addLayout(controls)
         layout.addWidget(self.held)
         layout.addLayout(noting)
-        layout.addWidget(self.note_says)
         layout.addWidget(self.bar)
         layout.addLayout(top)
         layout.addWidget(self.log, 1)
+
+    def show_guard(self, guarding: Guarding | None) -> None:
+        """The owner's beam guard, as the button says it, whoever armed it."""
+        self.guarding = guarding
+        self.guard_button.setText(GUARD_ON if guarding is not None else GUARD_OFF)
+        self.guard_button.setToolTip(
+            f"{guarding.text[:1].upper()}{guarding.text[1:]}. {GUARD_TIP}"
+            if guarding is not None else GUARD_TIP)
 
     # -- the person's controls -------------------------------------------------
 

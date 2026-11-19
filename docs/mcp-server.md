@@ -203,13 +203,15 @@ outside its declared range is refused by the render before anything else happens
 ### Arming and acquiring
 
 To acquire, first `arm`, then `acquire` with the same method or template and the same knob values.
-`arm` sends every box its `setup`, `load` and `arm` strings, as the window's Send setup does, and
-waits for the send to finish; `setup: false` sends only the table and the mode change, as Load and
-arm does. `acquire` refuses a method the boxes are not holding, i.e., one that differs in any
+`arm` sends every box its `setup`, `load` and `arm` strings and waits for the send to finish;
+`setup: false` sends only the table and the mode change. The window's **Send** and **Acquire**
+decide this for themselves, sending only what the boxes do not hold, whereas `arm` sends what it
+is told. `acquire` refuses a method the boxes are not holding, i.e., one that differs in any
 string from what the last send put on the wire. The daemon, not the server, remembers that send,
 so an `acquire` may follow an `arm` made by another client of the same daemon, such as a command
 line in another process. The two are separate so that one request arms
-once and acquires as often as it needs to, as the window's Replicate button does, and so that a
+once and acquires as often as it needs to, as a press of the window's Acquire on boxes that hold
+the method does, and so that a
 failed send is reported before any acquisition begins. The `conditions` given to `arm`, free text
 about the sample and source, are stamped into every file acquired from that arming, which is why
 `acquire` takes none of its own.

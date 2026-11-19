@@ -58,6 +58,7 @@ from ..mips import Box, discover
 from ..owner import (
     FAKE_FRAME_HOLD_S,
     Acquire,
+    Armed,
     BoxStateRead,
     ConsoleChanged,
     ConsoleStatus,
@@ -96,6 +97,7 @@ from .serving import why_serve_stopped, window_origin
 __all__ = [
     "FAKE_FRAME_HOLD_S",
     "Acquire",
+    "Armed",
     "ConsoleStatus",
     "Discover",
     "Job",
@@ -326,6 +328,11 @@ class Worker(_Signals):
         return self.owner.status().guard
 
     @property
+    def armed(self) -> Armed | None:
+        """What the boxes were last sent, whoever sent it (`OwnerStatus.armed`)."""
+        return self.owner.status().armed
+
+    @property
     def stopping(self) -> bool:
         return self.owner.stopping
 
@@ -548,6 +555,12 @@ class RemoteWorker(_Signals):
         """The daemon's beam guard and who armed it, or None for none."""
         status = self.status
         return getattr(status, "guard", None) if status is not None else None
+
+    @property
+    def armed(self) -> Armed | None:
+        """What the boxes were last sent, whoever sent it: the daemon's memory."""
+        status = self.status
+        return status.armed if status is not None else None
 
     @property
     def console_alive(self) -> bool:

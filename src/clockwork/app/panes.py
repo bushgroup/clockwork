@@ -214,7 +214,8 @@ class BoxPane(QWidget):
     should not need the instrument switched on.
 
     Under the editor is the state panel (task 51): what the box last answered, marked
-    against what this pane's strings declare. Shut by default, so a pane is an editor
+    against what the box was last sent, whoever sent it (the window revision's E2, lab
+    record, task 169), not against the pane above it. Shut by default, so a pane is an editor
     until a trainee asks it to be more.
     """
 
