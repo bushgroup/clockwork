@@ -76,6 +76,11 @@ POSITIONAL = {"run-routine": "name", "manifest": "paths", "series": "plan"}
 """A verb's argument that may also be given bare, after the verb: any number of them
 where the argument is a list (`clockwork manifest 260926 260927`)."""
 
+SHORT = 3
+"""The exit status of a verb that waited on or followed a series a stop ended short: its
+files are valid, so it is not 1, and some planned points were never acquired, so it is
+not 0 (`docs/command-line.md`; lab record, task 171)."""
+
 WAITS = ("acquire", "series")
 """The tools that start a run and answer at once, whose verbs wait for it to end unless
 given `--no-wait`, printing its events for a person watching. The run record gains its
@@ -616,10 +621,20 @@ def _follow(toolbox: Toolbox, arguments: Mapping[str, object], out: TextIO, err:
         _wait_out_a_pause(answer, err, program)
         if answer["done"]:
             _print(out, {key: value for key, value in answer.items() if key != "events"})
-            if answer.get("failed"):
-                _say(err, f"{program}: job {answer['job']} failed: {answer['failed']}")
-                return 1
-            return 0
+            return _ended(answer, err, program)
+
+
+def _ended(answer: Mapping[str, object], err: TextIO, program: str) -> int:
+    """The exit status for a job `progress` says is done: 1 failed, `SHORT` for a series
+    a stop ended short, 0 otherwise, the first two with their sentence on standard error."""
+    if answer.get("failed"):
+        _say(err, f"{program}: job {answer['job']} failed: {answer['failed']}")
+        return 1
+    if answer.get("complete") is False:
+        _say(err, f"{program}: series job {answer['job']} stopped short: "
+                  f"{answer.get('stopped')}")
+        return SHORT
+    return 0
 
 
 def _wait(toolbox: Toolbox, job: int, err: TextIO, program: str) -> int:
@@ -637,11 +652,7 @@ def _wait(toolbox: Toolbox, job: int, err: TextIO, program: str) -> int:
         asked["after"] = answer["last"]
         _wait_out_a_pause(answer, err, program)
         if answer["done"]:
-            break
-    if answer.get("failed"):
-        _say(err, f"{program}: job {job} failed: {answer['failed']}")
-        return 1
-    return 0
+            return _ended(answer, err, program)
 
 
 def _wait_out_a_pause(answer: Mapping[str, object], err: TextIO, program: str) -> None:

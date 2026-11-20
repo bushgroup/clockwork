@@ -145,7 +145,19 @@ which is `resumed` or `stopped`. A file that was never paused has no such key.
 
 `notes` holds free text: `{text, by}`. `by` is `session` for a note an agent added with the `note`
 tool, and `server` for one the daemon or a client wrote, such as the sentence that says a job
-failed, where in a series it failed and why, or that a series stopped after some of its points.
+failed, where in a series it failed and why, or that a series stopped short of its plan. The
+note for a series that stopped short counts points and files apart, because a retake's failed
+file and the stopped point's file are files but not complete points. It gives the complete points
+of those planned, the point that ended the series with its file and the reason, the planned
+points never acquired with an end reference named as such, the files written, and the files a
+retake replaced:
+
+```
+series job 10 stopped short, 17 of 19 points complete, point 18 of 19 (planned 12,
+261119_ZZ_027): 3 frames in a row failed, ... Never acquired: planned 19 (the end reference).
+19 files written, 1 of them failed and replaced by a retake (261119_ZZ_016).
+```
+
 A note a person typed at the window while the job ran has that person's initials as `by`, and
 also carries `client`, the window it was typed at.
 

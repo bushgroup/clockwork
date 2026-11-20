@@ -170,6 +170,10 @@ def test_the_series_job_and_its_result_cross_the_wire():
     for cls in (SeriesJob, SeriesResult):
         example = wire.example(cls)
         assert wire.loads(wire.dumps(example)) == example
+    short = SeriesResult(points=3, points_done=1, stopped="point 2 of 3 (planned 2, x): y",
+                         stopped_at=2, stopped_file="x", not_acquired=((3, "end"),))
+    crossed = wire.loads(wire.dumps(short))
+    assert crossed == short and not crossed.complete and crossed.shortfall == short.shortfall
 
 
 def test_the_series_verb_takes_its_plan_bare():
@@ -380,6 +384,8 @@ def test_every_file_of_a_shuffled_series_says_where_it_sat_and_what_shuffled_it(
 
     ended = followed(toolbox, started["job"], timeout=240)
     assert ended["result"]["points_done"] == 5 and ended["result"]["stopped"] is None
+    assert ended["complete"] is True and ended["not_acquired"] == []
+    assert "stopped" not in ended
     assert ended["series"]["order"] == expected
     assert len(ended["runs"]) == 10 and all(run["complete"] for run in ended["runs"])
 
@@ -461,5 +467,9 @@ def test_a_stop_ends_the_series_and_the_record_says_where(fake_owner, library,  
     assert positions == list(range(1, len(positions) + 1))
 
     notes = [note["text"] for note in record_of(started["record"])["notes"]]
-    assert any(note.startswith(f"series job {started['job']} stopped after "
-                               f"{result['points_done']} of 6 points") for note in notes), notes
+    assert any(note.startswith(f"series job {started['job']} stopped short, "
+                               f"{result['points_done']} of 6 points complete, ")
+               and "the test has what it needs" in note for note in notes), notes
+    assert ended["complete"] is False and result["complete"] is False
+    assert ended["not_acquired"] and ended["not_acquired"][-1] == {"index": 6,
+                                                                   "reference": "end"}

@@ -785,7 +785,10 @@ class Toolbox:
         seed, the order, the counts, about how many minutes the series will acquire for
         (every repetition's frame and the console's re-arm after it) and the run record;
         follow it with `progress` and end it with `stop`, which leaves the finished
-        files and the record saying where it stopped.
+        files and the record saying where it stopped. A point whose run stops early on
+        its own (frames failing in a row, a gate that never closed) ends the series the
+        same way, and the remaining points, an end reference among them, are not
+        acquired: the series finishes with `complete: false` in `progress`, never as done.
 
         `check` true does everything up to the read-back and sends nothing, starts no
         job and writes no record: it answers each point's knobs, repetitions, files and
@@ -879,6 +882,13 @@ class Toolbox:
         true once the job has finished or failed, whatever `after` is; a finished
         acquisition lists its files under `runs`, and a failed job says why under `failed`.
 
+        **A finished series is not necessarily a whole one: read `complete`.** A point
+        whose run stops early ends the series there, as a stop does, and the series still
+        finishes with its files valid. Its answer then has `complete: false`, `stopped`
+        (the point, its file, and why), and `not_acquired` (each planned point left
+        without a file, `reference` naming an end reference), and the last event's text
+        says "stopped short". Never report such a series as done.
+
         While a person at the window has paused the job, or asked for it to pause, the
         answer comes at once whatever `wait_s` is and carries `paused`: who, since when
         and where it rests, as `status` gives it. Only that person resumes or stops it,
@@ -945,6 +955,14 @@ class Toolbox:
         if isinstance(kept.ended, JobFinished):
             answer["done"] = True
             answer["result"] = _result(kept.ended.result)
+            ended = kept.ended.result
+            if isinstance(ended, SeriesResult):
+                # At the top, beside `done`: an agent read `done` and the end's line
+                # and wrote a series that stopped short into its record as done (lab #26).
+                answer["complete"] = ended.complete
+                answer["not_acquired"] = _not_acquired(ended)
+                if not ended.complete:
+                    answer["stopped"] = ended.stopped
         elif isinstance(kept.ended, JobFailed):
             answer["done"] = True
             answer["failed"] = kept.ended.message
@@ -2390,7 +2408,11 @@ def _result(result: object) -> Any:
     if isinstance(result, SeriesResult):
         return {"runs": [_run_summary(run) for run in result.runs],
                 "points": result.points, "points_done": result.points_done,
-                "stopped": result.stopped or None}
+                "complete": result.complete, "stopped": result.stopped or None,
+                "stopped_at": result.stopped_at or None,
+                "stopped_file": result.stopped_file or None,
+                "not_acquired": _not_acquired(result),
+                "replaced": list(result.replaced)}
     if isinstance(result, (list, tuple)) and all(isinstance(run, Run) for run in result):
         return [_run_summary(run) for run in result]
     if isinstance(result, SendResult):
@@ -2404,6 +2426,12 @@ def _result(result: object) -> Any:
         return _bare(to_wire(result))
     except TypeError:
         return repr(result)
+
+
+def _not_acquired(result: SeriesResult) -> list[dict]:
+    """The planned points a stop left without a file, as `progress` lists them."""
+    return [{"index": index, "reference": reference or None}
+            for index, reference in result.not_acquired]
 
 
 def _paused(hold: Hold | None) -> dict | None:

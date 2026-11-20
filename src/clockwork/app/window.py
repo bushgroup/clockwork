@@ -2349,8 +2349,15 @@ class MainWindow(QMainWindow):
                 "the file")
         elif isinstance(result, ConsoleStatus):
             self.console_bar.show_status(result)
-        self.run_panel.idle(f"{job.label}: done")
-        self.statusBar().showMessage(f"{job.label}: done")
+        ending = f"{job.label}: done"
+        if isinstance(result, SeriesResult) and not result.complete:
+            # Never "done" for a series a stop ended short (lab #26): which point, which
+            # file, why, and what was never acquired, as every other client reads it.
+            self.run_panel.say(f"{job.label}: {result.shortfall}", warn=True)
+            ending = (f"{job.label}: stopped short, {result.points_done} of "
+                      f"{result.points} points complete")
+        self.run_panel.idle(ending)
+        self.statusBar().showMessage(ending)
         # After the log lines and before the buttons are re-read: the next row of a
         # queue is submitted from here, and a window that had already re-enabled Acquire
         # would offer a button that the very next statement takes away again.

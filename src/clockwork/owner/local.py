@@ -847,10 +847,15 @@ class LocalOwner:
                      f"{point.points} as acquired" if point is not None else "")
             self._records.note(directory, job.series,
                                f"job {handle.id} failed{where}: {failed}")
-        elif isinstance(result, SeriesResult) and result.stopped:
+        elif isinstance(result, SeriesResult) and not result.complete:
+            # Points and files counted apart: a retake's failed files and the stopped
+            # point's file are files but not points, and one line of "19 files" beside
+            # "19 points" read as a series that had run to its end (lab #26).
+            replaced = (f", {len(result.replaced)} of them failed and replaced by a "
+                        f"retake ({', '.join(result.replaced)})" if result.replaced else "")
             self._records.note(directory, job.series, (
-                f"series job {handle.id} stopped after {result.points_done} of "
-                f"{result.points} points, {len(result.runs)} files: {result.stopped}"))
+                f"series job {handle.id} {result.shortfall} {len(result.runs)} files "
+                f"written{replaced}."))
         self._records.drain(RECORD_DRAIN_S)
 
     def _do(self, job: Job) -> object:
@@ -1501,6 +1506,7 @@ class LocalOwner:
             method_path = point.method_path or job.method_path
             conditions = point.conditions or job.conditions
             retake = 0
+            whole = False
             while not stopped:
                 if self._stop.is_set():
                     stopped = self._stop_reason
@@ -1550,7 +1556,8 @@ class LocalOwner:
                 if lost and not self._stop.is_set():
                     stems = [stem_of(run) for run in made]
                     if not self._guard_hold(job, point, number, lost, stems):
-                        stopped = self._stop_reason or "stopped while the beam guard held"
+                        stopped = (self._stop_check()
+                                   or "stopped while the beam guard held")
                         break
                     replaced += stems
                     retake += 1
@@ -1562,11 +1569,17 @@ class LocalOwner:
                               f"{point.index}) again from its start: {', '.join(stems)} "
                               "ended by the beam guard")
                     continue
-                if (len(made) == point.replicates
-                        and not any(run.stopped_early for run in made)):
-                    done += 1
-                if self._stop.is_set() or any(run.stopped_early for run in made):
-                    stopped = self._stop_reason or "a run stopped early"
+                whole = (len(made) == point.replicates
+                         and not any(run.stopped_early for run in made))
+                done += whole
+                ended = next((run for run in made if run.stopped_early), None)
+                if self._stop.is_set() or ended is not None:
+                    # A person's or an agent's reason where one was asked, else the
+                    # run's own sentence: a loop that stopped itself said why, and the
+                    # series' end has to carry that, not a stand-in (lab #26).
+                    stopped = (self._stop_check()
+                               or (ended.stopped_early if ended is not None else "")
+                               or "a run stopped early")
                 break
             if stopped:
                 break
@@ -1575,13 +1588,14 @@ class LocalOwner:
                 # stop that ends the rest is found at the top of the loop.
                 self._rest(f"after point {number} of {len(job.points)} "
                            f"(planned {point.index})")
-        if stopped and done < len(job.points):
-            self._say(f"series stopped after {done} of {len(job.points)} points "
-                      f"({len(runs)} files): {stopped}")
-        return SeriesResult(runs=tuple(runs), points=len(job.points), points_done=done,
-                            stopped=stopped if done < len(job.points) else "",
-                            armed=armed, numbers=tuple(numbers),
-                            replaced=tuple(replaced))
+        result = SeriesResult(runs=tuple(runs), points=len(job.points), points_done=done,
+                              armed=armed, numbers=tuple(numbers),
+                              replaced=tuple(replaced))
+        if not stopped or done == len(job.points):
+            return result
+        # No line of its own: `JobFinished.text` says the shortfall, and the record's
+        # note the counts (lab #26).
+        return _short(result, job.points, number, whole=whole, reason=stopped)
 
     def _guard_hold(self, job: SeriesJob, point: PlannedPoint, number: int, lost: str,
                     stems: list[str]) -> bool:
@@ -1975,6 +1989,35 @@ def _needs_method(method: Method | None) -> Method:
     if method is None:
         raise ValueError("there is no method to send; open or write one first")
     return method
+
+
+def _short(result: SeriesResult, points: tuple[PlannedPoint, ...], number: int, *,
+           whole: bool, reason: str) -> SeriesResult:
+    """`result` for a series a stop ended at the point in place `number`: where it ended
+    and why, and every point it left without a file (lab #26; lab record, task 171).
+
+    The point in place `number` is the one the stop ended part way when it has a file
+    and is not whole; with every file whole the stop came after it, and with none
+    before it, so it is not acquired either. A retake's failed files count as files:
+    a stop while the guard held ends the point those files are of.
+    """
+    point = points[number - 1]
+    mine = [run for run, place in zip(result.runs, result.numbers, strict=True)
+            if place == number]
+    at = f"{number} of {len(points)} (planned {point.index}"
+    stopped_at, stopped_file, first_missing = 0, "", number
+    if mine and whole:
+        where, first_missing = f"after point {at})", number + 1
+    elif mine:
+        run = next((run for run in mine if run.stopped_early), mine[-1])
+        stopped_at, stopped_file, first_missing = number, stem_of(run), number + 1
+        where = f"point {at}, {stopped_file})"
+    else:
+        where = f"before point {at})"
+    return replace(result, stopped=f"{where}: {reason}", stopped_at=stopped_at,
+                   stopped_file=stopped_file,
+                   not_acquired=tuple((entry.index, entry.reference)
+                                      for entry in points[first_missing - 1:]))
 
 
 def _rendered(job: Acquire) -> Rendered | None:

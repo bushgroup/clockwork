@@ -47,6 +47,7 @@ from clockwork.owner import (
     wire,
 )
 from clockwork.owner import hold as hold_module
+from clockwork.owner.keeper import stem_of
 from clockwork.summary import summarize
 from test_daemon import Daemon, ended, wait_for
 from test_mcp import followed
@@ -367,7 +368,10 @@ def test_a_stop_while_paused_ends_the_series_as_stopped_while_paused(
     asked, stopped = record["interventions"]
     assert (stopped["kind"], stopped["by"], stopped["client"]) == ("stop", "KT", WINDOW)
     assert stopped["while_paused"] is True and hold.since in stopped["reason"]
-    assert any("stopped after 0 of 2 points" in note["text"] for note in record["notes"])
+    assert any("stopped short, 0 of 2 points complete, point 1 of 2 (planned 1, "
+               in note["text"] for note in record["notes"])
+    assert result.stopped_at == 1 and result.stopped_file == stem_of(run)
+    assert [index for index, _ in result.not_acquired] == [2]
 
 
 def test_every_stop_names_its_client_and_shutdown_ends_a_paused_series(

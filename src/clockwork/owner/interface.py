@@ -33,7 +33,7 @@ from typing import Protocol
 from ..acq import BatchSeen, BeamGuard, Event, Run, Snapshot
 from ..mips import BoxState, Discovery
 from .hold import POINT, Guarding, Hold
-from .jobs import Armed, ConsoleStatus, Job
+from .jobs import Armed, ConsoleStatus, Job, SeriesResult
 from .lock import Holder
 
 __all__ = [
@@ -220,6 +220,11 @@ class JobFinished(Event):
 
     @property
     def text(self) -> str:
+        """"done", or for a series a stop ended short, what it stopped short of: the line
+        every client's run log ends on, so it must not read as done (lab record, task
+        171)."""
+        if isinstance(self.result, SeriesResult) and not self.result.complete:
+            return f"{self.job.label}: {self.result.shortfall}"
         return f"{self.job.label}: done"
 
 

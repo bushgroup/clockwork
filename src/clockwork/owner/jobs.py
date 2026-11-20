@@ -436,7 +436,11 @@ class SeriesResult:
     points_done: int = 0
     """How many were acquired to their last replicate."""
     stopped: str = ""
-    """Why a stop ended the series early, or empty for one that ran to its end."""
+    """Why a stop ended the series early, or empty for one that ran to its end: where it
+    ended -- the point, as "point 18 of 19 (planned 27, 261119_BF_027)", or "before" or
+    "after" one for a stop between two -- then the stop's own sentence, the run's
+    `stopped_early` for a loop's stop and the asker's reason for a person's or an
+    agent's (lab record, task 171)."""
     armed: tuple = ()
     """What the series' last send put on the wire, as `SendResult.armed`, so that a
     window reads the boxes as holding that and not whatever it last sent itself."""
@@ -448,6 +452,34 @@ class SeriesResult:
     """The stems of the files a retake replaced: each file of a point the beam guard
     ended, acquired again from its start after a person's Resume (B8). They stay on disk
     and in `runs`, stamped `failed`, and the record's `retakes` names them."""
+    stopped_at: int = 0
+    """The place, from 1, of the point a stop ended part way through, as `numbers`
+    counts it; 0 for a series that ran to its end or stopped between two points."""
+    stopped_file: str = ""
+    """The stem of that point's file the stop ended: the one whose run stopped early, or
+    its last for a stop that came between two of its files."""
+    not_acquired: tuple[tuple[int, str], ...] = ()
+    """Every planned point the stop left without a file, in the order they would have
+    run: its planned index and its reference (`"start"`, `"end"`) or empty."""
+
+    @property
+    def complete(self) -> bool:
+        """Whether every planned point was acquired: a series a stop ended short is not,
+        though it ends as `JobFinished` with its files valid (F3, lab record, task 171)."""
+        return not self.stopped
+
+    @property
+    def shortfall(self) -> str:
+        """One sentence for a series that ended short, empty for one that did not."""
+        if self.complete:
+            return ""
+        missing = "Every planned point was begun" if not self.not_acquired else (
+            "Never acquired: planned " + ", ".join(
+                f"{index} (the {reference} reference)" if reference else str(index)
+                for index, reference in self.not_acquired))
+        # Sentences, not semicolons: a run's own `stopped_early` has semicolons in it.
+        return (f"stopped short, {self.points_done} of {self.points} points complete, "
+                f"{self.stopped.rstrip('.')}. {missing}.")
 
 
 @dataclass(frozen=True, slots=True)

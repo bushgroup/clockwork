@@ -248,6 +248,17 @@ the job number, the seed, the planned indices in the order they will be acquired
 many minutes the series will acquire for. `progress` follows the job as it follows an `acquire`,
 and adds under `series` the point in flight and the order.
 
+A point whose run stops early on its own, for example on three frames in a row failing, ends the
+series there, as a `stop` does, and the points after it are not acquired, an end reference among
+them. To tell such a series from one that ran to its end, read `complete` rather than `done`. A
+series that ends short is still `done`, because its files are valid and are listed under `runs`,
+whereas `complete` is `false`, `stopped` names the point that ended it, its file and the reason,
+and `not_acquired` lists each planned point left without a file by its planned index, with
+`reference` naming an end reference. The job's last event says "stopped short" in place of
+"done", and the run record's note counts the complete points, the stopped point's file and the
+files a retake replaced separately. A series that ran to its end answers `complete: true` and an
+empty `not_acquired`.
+
 A template whose repetition count is a knob lets the plan set the count point by point
 ([series plan](series-file-format.md#repetitions-per-point)). With `check` true, `series` stops
 before the read-back and sends nothing: it answers each point's knob values, repetitions, files

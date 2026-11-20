@@ -3103,3 +3103,23 @@ def test_the_guard_dialog_takes_its_floor_from_a_run_or_a_number(qtbot, tmp_path
     with pytest.raises(ValueError, match="type a floor"):
         dialog.chosen()
 
+
+
+def test_a_series_that_stopped_short_does_not_end_the_run_log_on_done(window):
+    """The window's end of a series a stop ended short says so, warned, and the status
+    bar does not say done (lab #26; lab record, task 171)."""
+    from clockwork.owner import SeriesJob, SeriesResult, wire
+
+    job = wire.example(SeriesJob)
+    short = SeriesResult(points=3, points_done=1,
+                         stopped="point 2 of 3 (planned 2, 261119_ZZ_003): it stopped",
+                         stopped_at=2, stopped_file="261119_ZZ_003",
+                         not_acquired=((3, "end"),))
+    window._job_finished(job, short)
+    log = window.run_panel.log
+    lines = [log.topLevelItem(number) for number in range(log.topLevelItemCount())]
+    [said] = [line for line in lines if "stopped short" in line.text(1)]
+    assert said.data(0, _IS_WARNING)
+    assert "Never acquired: planned 3 (the end reference)." in said.text(1)
+    message = window.statusBar().currentMessage()
+    assert "stopped short, 1 of 3 points complete" in message and "done" not in message

@@ -88,6 +88,7 @@ standard error.
 | 0 | The tool answered. An answer that reports problems as data, such as `validate-method` with `ok: false`, is still 0 |
 | 1 | The tool refused, or the job it waited for failed: one sentence on standard error, nothing on standard output |
 | 2 | The command line itself was wrong: a missing flag, or a value that is not a number |
+| 3 | The series waited on or followed stopped short of its plan: its files are valid, and some planned points were never acquired. One sentence on standard error names the point that ended it |
 | 130 | Ctrl-C while waiting on a run. The run carries on, and `clockwork stop` ends it |
 
 Every call is written to the audit log in the output directory, as the MCP server's calls are,
@@ -98,7 +99,10 @@ agent's.
 
 To acquire from a shell, run `acquire` and let it finish. It prints its answer, the job number,
 the request id and the run record's path, at once, then stays until the run ends, writing each
-event's line to standard error. It exits 0 when the run is done and 1 if the job failed.
+event's line to standard error. It exits 0 when the run is done and 1 if the job failed. A
+`series` that a stop, or a point whose run stopped early on its own, ended before its last point
+exits 3, so that a script can tell a series that stopped short from one that failed and from one
+that ran to its end; `progress --follow` exits the same way.
 
 The daemon enters each file in the run record as it writes it, and finishes the record before it
 reports the job's end. The record therefore lists every file of the request whatever happens to
