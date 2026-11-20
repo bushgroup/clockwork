@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import socket
 import sys
+from dataclasses import replace
 
 import pytest
 
@@ -22,6 +23,7 @@ from PySide6.QtCore import QSettings  # noqa: E402
 
 from clockwork import instrument as instrument_module  # noqa: E402
 from clockwork import method as method_module  # noqa: E402
+from clockwork import naming  # noqa: E402
 from clockwork.app import runqueue, serving  # noqa: E402
 from clockwork.app.settings import Settings  # noqa: E402
 from clockwork.app.window import MainWindow  # noqa: E402
@@ -464,6 +466,84 @@ def test_a_plain_window_following_a_fake_daemon_says_it_is_simulated(
              for index in range(made.run_panel.log.topLevelItemCount())]
     assert any("is --fake" in line for line in lines), lines
     assert not made.fake
+
+
+# -- the serve's output folder (lab record, task 172) --------------------------------
+
+
+def log_lines(made: MainWindow) -> list[str]:
+    return [made.run_panel.log.topLevelItem(index).text(1)
+            for index in range(made.run_panel.log.topLevelItemCount())]
+
+
+def test_a_joined_window_writes_where_the_serve_writes_and_remembers_none_of_it(
+        qtbot, scratch_settings, daemon, claude, tmp_path):
+    """At a sitting a window joined the day's serve and Setup read the folder it had
+    saved on another day: the one client that ignored the serve's `output`. Its runs,
+    stem, Day tab and plan checks are the serve's folder now, shown read-only, and never
+    saved, so a window on its own later is not handed a folder it was never given."""
+    elsewhere = str(tmp_path / "another-day")
+    Settings(scratch_settings).output_dir = elsewhere
+    idle_daemon(qtbot, claude)
+    made = remote_window(qtbot, daemon.endpoint)
+    serving = os.path.normpath(str(tmp_path))
+    qtbot.waitUntil(lambda: made.output_dir.text() == serving, timeout=20_000)
+    assert made._directory() == serving
+    assert made.output_dir.isReadOnly() and not made.browse_output.isEnabled()
+    assert serving in made.sitting_status.text()
+    assert f"the output folder is clockwork serve's, {serving}" in log_lines(made)
+    # The stem is numbered from the serve's folder, not the one the window saved.
+    (tmp_path / f"{naming.stem('ZZ', 4)}.uimf").write_bytes(b"")
+    made.initials.setText("ZZ")
+    made._initials_changed()
+    assert made.stem.text() == naming.stem("ZZ", 5)
+    assert Settings(scratch_settings).output_dir == elsewhere
+    qtbot.waitUntil(lambda: made._job is None and made.worker.status is not None
+                    and made.worker.status.issued == 2
+                    and made.worker.status.running is None, timeout=30_000)
+    made.close()
+    assert not made.isVisible()
+    assert Settings(scratch_settings).output_dir == elsewhere
+
+
+def test_a_serve_that_names_no_folder_leaves_the_window_its_own(
+        qtbot, scratch_settings, daemon, tmp_path):
+    own = str(tmp_path / "own")
+    Settings(scratch_settings).output_dir = own
+    made = remote_window(qtbot, daemon.endpoint)
+    qtbot.waitUntil(lambda: made._serve_output != "", timeout=20_000)
+    older = replace(made.worker.hello, output="")
+    made.worker.hello = older
+    # As started: the connection's rescan stays out of a test about the folder.
+    made._daemon_connected(older, True)
+    assert made.output_dir.text() == own and made._directory() == own
+    assert not made.output_dir.isReadOnly() and made.browse_output.isEnabled()
+
+
+def test_a_window_that_started_the_serve_keeps_to_its_folder_until_the_next_start(
+        qtbot, scratch_settings, daemon, tmp_path, monkeypatch):
+    """D2: the window's runs go where the serve writes in a window that started it as
+    in one that joined it; a folder chosen in Setup is the next start's, as the
+    sitting's documents are."""
+    serving = os.path.normpath(str(tmp_path))
+    Settings(scratch_settings).output_dir = serving
+    made = remote_window(qtbot, daemon.endpoint)
+    made.worker.spawned = Started()
+    made.worker.shutdown_daemon = lambda reason="": None
+    made._daemon_connected(made.worker.hello, True)
+    assert made.output_dir.text() == serving and made.output_dir.isReadOnly()
+    assert made.browse_output.isEnabled()
+    later = str(tmp_path / "later")
+    monkeypatch.setattr("clockwork.app.window.QFileDialog.getExistingDirectory",
+                        lambda *args, **kwargs: later)
+    made._pick_output_dir()
+    assert Settings(scratch_settings).output_dir == later
+    assert made._directory() == serving and made.output_dir.text() == serving
+    assert later in made.sitting_status.text()
+    assert any(line.startswith(f"the output folder is {later} from the next start")
+               for line in log_lines(made))
+    made._refresh_stem()
+    assert Settings(scratch_settings).output_dir == later
 
 
 @pytest.mark.skipif(os.name != "nt", reason="the job object is Windows's")

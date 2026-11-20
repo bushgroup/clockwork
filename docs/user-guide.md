@@ -78,7 +78,7 @@ Four settings in the Setup tab matter before anything can be sent to a box, and 
 on the PC:
 
 - **Output directory**, where the UIMF files, the transcript, the send log and the run records all
-  land.
+  land. Under a running `clockwork serve` it is that service's output directory (below).
 - **File initials.** The middle field of every file name this session writes. Two letters is
   typical; clockwork takes no view of what goes here beyond cleaning it to what a file name can
   hold.
@@ -97,6 +97,14 @@ command line are shown and held to the same limits. A window that starts the ser
 sitting in the Setup tab, and a change takes effect when the service next starts. A window that
 finds the service already running shows that service's sitting instead, without the browse
 buttons, and its runs carry that service's instrument document.
+
+The output directory is the service's in the same way, for the window as for an agent and the
+command line. A window that finds the service running shows the service's output directory,
+read-only and without its browse button, and its runs, its Day tab and the check of a plan all use
+that directory; the window does not remember it, so a window opened later with no service running
+has the directory it last saved. A window that starts the service hands it the saved directory and
+shows it. Choosing another with the browse button saves it for the service's next start, and until
+then the window's runs go where the service writes.
 
 The rest of the Setup tab holds what is used less often. **Find boxes** asks every MIPS-class port
 which box is behind it, and **Read the boxes' state** reads every box for the state panels.
@@ -129,7 +137,8 @@ The stack is whichever method the instrument document names under `[standing]`
 ([instrument file](instrument-file-format.md#standing)), and the method library, instrument
 document and output directory are the ones this window last saved, so set those in the window once
 before the first morning. Where nothing is saved, the method library and instrument document are
-the [instrument directory](mcp-server.md#the-instrument-directory)'s.
+the [instrument directory](mcp-server.md#the-instrument-directory)'s. A window opened afterwards
+writes into the output directory of the service it joins, whatever directory it saved itself.
 
 **Stand down** is the last thing to run in the evening. It takes every box out of table mode, ramps
 every DC bias channel, RF drive level and traveling-wave range down to zero in the same steps,
@@ -149,8 +158,12 @@ running the same shortcut again carries on from what the boxes then read back.
 Every run started at the window records why it was started and who started it. Type what the run
 is for in **Purpose**, which is kept as the request in the run record beside the files and may be
 left empty, and your initials in **At the window**, which start out as the file initials and are
-remembered on the PC. Acquire, the queue's and a plan's Start, every pause, resume, stop and note,
-and every change to the beam guard need the initials, and each is recorded with them. They are
+remembered on the PC. Initials the window filled in itself, remembered from an earlier session or
+copied from the file initials, are shown in italics until someone confirms them: the first Acquire,
+queue Start or plan Start after the window opens asks whether they are yours and records the
+answer, and typing in the field confirms them beforehand. Acquire, the queue's and a plan's Start,
+every pause, resume, stop and note, and every change to the beam guard need the initials, and each
+is recorded with them; a pause, a stop or a note never waits for the question. They are
 separate from the file initials because the two answer separate questions: the initials in a file
 name are whatever the lab's naming puts there, often the code of the ion under study, whereas **At
 the window** names a person.

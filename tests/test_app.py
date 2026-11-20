@@ -1672,6 +1672,89 @@ def test_a_window_run_needs_its_person_and_records_its_purpose(
     assert len(data["files"]) == 1
 
 
+# --- At the window, confirmed once per launch (A2 as revised; lab record, task 172) ---
+
+
+def test_a_restored_person_at_the_window_is_asked_about_at_the_first_start(
+        qtbot, scratch_settings):
+    """At a sitting a run's record named the person from an earlier session, a value
+    the window restored and nobody saw. Restored, it is asked about at the first Start
+    of the launch, a cancel starts nothing, and once answered it is not asked again."""
+    Settings(scratch_settings).at_window = "BK"
+    made = MainWindow(fake=True)
+    qtbot.addWidget(made)
+    try:
+        field = made.run_panel.at_window
+        assert field.text() == "BK" and "italic" in field.styleSheet()
+        assert "Not yet confirmed" in field.toolTip()
+        until(qtbot, lambda: idle(made))
+        made.initials.setText("ZZ")
+        made._initials_changed()
+        assert field.text() == "BK"  # the prefill never overwrites
+        asked: list[str] = []
+        made._ask_at_window = lambda person: asked.append(person) or None
+        assert made.start_queue() is None and asked == ["BK"]
+        made._ask_at_window = lambda person: asked.append(person) or " b.f "
+        made.start_queue()  # an empty queue: asked all the same, then nothing to run
+        assert asked == ["BK", "BK"]
+        assert field.text() == "BF" and Settings(scratch_settings).at_window == "BF"
+        assert field.styleSheet() == "" and "Not yet confirmed" not in field.toolTip()
+        made.start_queue()
+        assert asked == ["BK", "BK"]
+    finally:
+        made.worker.shutdown()
+        made.worker.wait(10_000)
+
+
+def test_a_person_who_typed_their_initials_is_not_asked(window, qtbot):
+    until(qtbot, lambda: idle(window))
+    asked: list[str] = []
+    window._ask_at_window = lambda person: asked.append(person) or person
+    field = window.run_panel.at_window
+    field.clear()
+    qtbot.keyClicks(field, "mb")
+    window.start_queue()
+    assert asked == [] and field.text() == "MB"
+    # Emptied and prefilled from the file initials again, it is asked about again.
+    field.clear()
+    window._initials_changed()
+    assert field.text() == "ZZ" and "italic" in field.styleSheet()
+    window.start_queue()
+    assert asked == ["ZZ"]
+
+
+def test_a_prefilled_person_corrected_at_the_question_is_the_one_recorded(
+        window, qtbot, tmp_path):
+    """The window fixture's At the window is prefilled from the file initials, an ion's
+    code as often as a person's: the first Acquire asks, and the run carries the
+    answer."""
+    ready_to_acquire(window, qtbot, tmp_path)
+    asked: list[str] = []
+    window._ask_at_window = lambda person: asked.append(person) or "BF"
+    window.replicates.setValue(1)
+    job = window.acquire()
+    assert asked == ["ZZ"] and job is not None and job.at_window == "BF"
+    until(qtbot, lambda: idle(window), timeout=180_000)
+
+
+def test_an_unconfirmed_person_still_signs_a_stop_a_pause_and_a_note(
+        qtbot, scratch_settings):
+    """The confirmation is for starting a run. A window opened onto a running series to
+    stop it is never held up by it."""
+    Settings(scratch_settings).at_window = "BK"
+    made = MainWindow(fake=True)
+    qtbot.addWidget(made)
+    try:
+        asked: list[str] = []
+        made._ask_at_window = lambda person: asked.append(person) or None
+        for what in ("a stop", "a pause", "a resume", "a note"):
+            assert made._signed(what) == "BK"
+        assert asked == []
+    finally:
+        made.worker.shutdown()
+        made.worker.wait(10_000)
+
+
 def test_the_console_settings_a_run_sends_are_in_that_run_s_transcript(
         window, tmp_path, qtbot):
     """The prologue of an acquisition -- `init`, `horizontal`, `vertical`, `invert`,

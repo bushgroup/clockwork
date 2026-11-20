@@ -7,6 +7,7 @@ somewhere of this session's own.
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 from mainspring.interface import LIVE_POINTER_ENV, LIVE_POINTER_NAME
@@ -121,3 +122,18 @@ def no_instrument_directory(tmp_path_factory, monkeypatch):
     from clockwork import INSTRUMENT_ENV
 
     monkeypatch.setenv(INSTRUMENT_ENV, str(tmp_path_factory.mktemp("no-instrument")))
+
+
+@pytest.fixture(autouse=True)
+def person_at_the_window(monkeypatch):
+    """Answer the window's "is that you?" with yes for every test (lab record, task 172).
+
+    The first Start of a launch asks whether the initials in At the window are the
+    person's, in a modal dialog that would hold a test forever. Only where the window's
+    module is already imported, so that a test of the Qt-free layers never pulls Qt in.
+    A test that is about the question replaces the answer on its own window.
+    """
+    module = sys.modules.get("clockwork.app.window")
+    if module is not None:
+        monkeypatch.setattr(module.MainWindow, "_ask_at_window",
+                            lambda self, person: person)

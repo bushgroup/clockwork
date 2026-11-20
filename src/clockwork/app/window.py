@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -238,6 +239,17 @@ class MainWindow(QMainWindow):
         self.instrument_path = self.settings.instrument_path
         self.instrument: Instrument = UNCALIBRATED
         self.metadata = Metadata(name="untitled", created=_dt.date.today())
+        self._serve_output = ""
+        """The output folder of the `clockwork serve` this window is a client of, from its
+        `hello`, or empty in process or for a serve from before it said one. Where set it
+        is where the window's runs, Day tab and plan checks are, in the window that started
+        the serve as in one that joined it, and it is never remembered (lab record, task
+        172)."""
+        self._at_window_confirmed = False
+        """Whether the person at the window has typed or confirmed the field since this
+        window opened. A value restored from an earlier session, or prefilled from the file
+        initials, is asked about at the first Start (A2 as revised; lab record, task
+        172)."""
         self.ports: dict[str, str] = {}
         """Which port each box answered on, or the method's hint for one that did not.
         A pane's header shows what the rack said; this is what the method is built with.
@@ -618,9 +630,9 @@ class MainWindow(QMainWindow):
         kept files and the viewer (E1, E6, E8)."""
         self.output_dir = QLineEdit()
         self.output_dir.setPlaceholderText("where the files go")
-        browse_out = QPushButton("…")
-        browse_out.setMaximumWidth(32)
-        browse_out.clicked.connect(self._pick_output_dir)
+        self.browse_output = QPushButton("…")
+        self.browse_output.setMaximumWidth(32)
+        self.browse_output.clicked.connect(self._pick_output_dir)
         self.initials = QLineEdit()
         self.initials.setMaximumWidth(80)
         self.initials.setToolTip(
@@ -629,7 +641,7 @@ class MainWindow(QMainWindow):
         files = QGroupBox("Files")
         files_form = QFormLayout(files)
         _tighten(files_form)
-        files_form.addRow("Output directory", _row(self.output_dir, browse_out))
+        files_form.addRow("Output directory", _row(self.output_dir, self.browse_output))
         files_form.addRow("File initials", self.initials)
 
         self.instrument_field = QLineEdit()
@@ -847,6 +859,7 @@ class MainWindow(QMainWindow):
 
         self.initials.editingFinished.connect(self._initials_changed)
         self.run_panel.at_window.editingFinished.connect(lambda: self._at_window())
+        self.run_panel.at_window.textEdited.connect(self._at_window_typed)
         self.output_dir.editingFinished.connect(self._refresh_stem)
         self.repetition_mode.currentTextChanged.connect(lambda _: self._refresh_actions())
         for spin in (self.frames, self.scans, self.accumulations):
@@ -858,8 +871,10 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(geometry)
         self.initials.setText(self.settings.initials)
         # The person's own, remembered per machine; the file initials until one is typed.
+        # Unconfirmed until typed or confirmed at the first Start of this launch.
         self.run_panel.at_window.setText(self.settings.at_window
                                          or clean_initials(self.settings.initials))
+        self._show_at_window()
         self.output_dir.setText(self.settings.output_dir)
         self.replicates.setValue(self.settings.replicates)
         self.conditions.setPlainText(self.settings.conditions)
@@ -1339,6 +1354,28 @@ class MainWindow(QMainWindow):
         for button in (self.browse_instrument, self.browse_limits,
                        self.browse_project_limits):
             button.setEnabled(not joined)
+        # The output folder is the serve's for every client, a window included, as the
+        # MCP server and the CLI already took it (lab record, task 172): shown read-only,
+        # and in a window that started the serve, a folder chosen for its next start.
+        serving = self._serve_output
+        if serving:
+            self.output_dir.setText(serving)
+            saved = self.settings.output_dir
+            if joined:
+                self.sitting_status.setText(
+                    self.sitting_status.text() + f" Its output folder, {serving}, is "
+                    "where this window's runs go and where its Day tab and a plan's "
+                    "check are read.")
+            elif saved and not _same_folder(saved, serving):
+                self.sitting_status.setText(
+                    self.sitting_status.text() + f" This window's runs go to clockwork "
+                    f"serve's output folder, {serving}, until then; {saved} takes "
+                    "effect at its next start.")
+        self.output_dir.setReadOnly(bool(serving))
+        self.browse_output.setEnabled(not (joined and serving))
+        self.output_dir.setToolTip(
+            "clockwork serve's output folder, where every client's runs go: changed by "
+            "starting clockwork serve again" if serving else "")
         self.limits_field.setToolTip(self.limits_field.text())
         self.project_limits_field.setToolTip(self.project_limits_field.text())
 
@@ -1550,11 +1587,8 @@ class MainWindow(QMainWindow):
     def _submit_acquire(self, method: Method, *, label: str, method_path: str,
                         replicates: int, conditions: str, rendered: Rendered | None,
                         setup: bool = False) -> Acquire | None:
-        person = self._at_window()
+        person = self._starter()
         if not person:
-            self.run_panel.say("type your initials in \"At the window\" first: every run "
-                               "you start records who started it", warn=True)
-            self.run_panel.at_window.setFocus()
             return None
         if not self.worker.console_alive:
             self.run_panel.say("starting the acquisition console first")
@@ -1587,6 +1621,59 @@ class MainWindow(QMainWindow):
         if person:
             self.settings.at_window = person
         return person
+
+    def _starter(self) -> str:
+        """The person at the window, for a Start: required, and asked about once per
+        launch where the field holds a value nobody typed since the window opened, so
+        that a restored value never reaches a run record unseen (A2 as revised; lab
+        record, task 172). Empty, with the reason said, for no run."""
+        person = self._at_window()
+        if person and not self._at_window_confirmed:
+            answer = self._ask_at_window(person)
+            if answer is None:
+                self.run_panel.say("nothing was started: say who is at the window first",
+                                   warn=True)
+                self.run_panel.at_window.setFocus()
+                return ""
+            self.run_panel.at_window.setText(clean_initials(answer))
+            person = self._at_window()
+            if person:
+                self._at_window_confirmed = True
+                self._show_at_window()
+        if not person:
+            self.run_panel.say("type your initials in \"At the window\" first: every run "
+                               "you start records who started it", warn=True)
+            self.run_panel.at_window.setFocus()
+        return person
+
+    def _ask_at_window(self, person: str) -> str | None:
+        """Whether `person` is at the window: the initials to record, or None for
+        cancel. A method of its own so that a test can answer it."""
+        text, ok = QInputDialog.getText(
+            self, "At the window",
+            f"At the window: {person}. Is that you?\n\nThe initials here go into the "
+            "record of every run you start and beside every pause, stop and note. "
+            "Correct them if they are not yours.",
+            QLineEdit.EchoMode.Normal, person)
+        return text if ok else None
+
+    def _at_window_typed(self, _text: str) -> None:
+        """Typing in the field is the person saying who they are."""
+        self._at_window_confirmed = True
+        self._show_at_window()
+
+    def _show_at_window(self) -> None:
+        """The field in italics, with a tooltip saying why, while its value is one
+        nobody has typed or confirmed since the window opened."""
+        field = self.run_panel.at_window
+        if not hasattr(self, "_at_window_tip"):
+            self._at_window_tip = field.toolTip()
+        pending = bool(field.text().strip()) and not self._at_window_confirmed
+        field.setStyleSheet("font-style: italic;" if pending else "")
+        field.setToolTip(self._at_window_tip + (
+            "\n\nNot yet confirmed: a value from an earlier session or from the file "
+            "initials. The first run started from this window asks whether it is you."
+            if pending else ""))
 
     def _signed(self, what: str) -> str:
         """The person at the window, for an act on a running job, or empty with the
@@ -1864,11 +1951,8 @@ class MainWindow(QMainWindow):
         with a hole in it is not the queue the table shows."""
         if (self.queue.running or self._job is not None or self._plan_job is not None):
             return None
-        person = self._at_window()
+        person = self._starter()
         if not person:
-            self.run_panel.say("type your initials in \"At the window\" first: every run "
-                               "you start records who started it", warn=True)
-            self.run_panel.at_window.setFocus()
             return None
         if not clean_initials(self.initials.text()):
             self.run_panel.say("set the file initials first: they name the queue's files",
@@ -2064,11 +2148,8 @@ class MainWindow(QMainWindow):
         if (shown is None or self._job is not None or self.queue.running
                 or self._plan_job is not None):
             return None
-        person = self._at_window()
+        person = self._starter()
         if not person:
-            self.run_panel.say("type your initials in \"At the window\" first: every run "
-                               "you start records who started it", warn=True)
-            self.run_panel.at_window.setFocus()
             return None
         if not clean_initials(self.initials.text()):
             self.run_panel.say("set the file initials first: they name the series' files",
@@ -2427,7 +2508,21 @@ class MainWindow(QMainWindow):
             self.run_panel.say("that clockwork serve is --fake: nothing it reports is "
                                "evidence about a MIPS box or a digitizer", warn=True)
         self._show_daemon()
+        before, was = self._directory(), self._serve_output
+        output = str(getattr(hello, "output", "") or "")
+        self._serve_output = os.path.normpath(output) if output else ""
+        if was and not self._serve_output:
+            # A serve from before it said its folder: the window's own, as it was.
+            self.output_dir.setText(self.settings.output_dir)
         self._show_sitting()
+        if self._serve_output and not _same_folder(before, self._serve_output):
+            # One folder for every client, as for the sitting's documents (lab record,
+            # task 172): the Day tab, a plan's check and the runs all read it.
+            self.run_panel.say(f"the output folder is clockwork serve's, "
+                               f"{self._serve_output}")
+        self._refresh_stem()
+        if self.tabs.currentWidget() is self.day_panel:
+            self.refresh_day()
         instrument = str(getattr(hello, "instrument", "") or "")
         if self._joined() and instrument and os.path.normcase(instrument) != \
                 os.path.normcase(self.instrument_path or ""):
@@ -2613,27 +2708,44 @@ class MainWindow(QMainWindow):
         self.enable_channel.setText(enable.channel)
 
     def _directory(self) -> str:
-        return self.output_dir.text().strip() or os.getcwd()
+        """Where this window's runs go and its Day tab and plan checks are read: the
+        serve's output folder where it said one, else the field, else the cwd."""
+        return self._serve_output or self.output_dir.text().strip() or os.getcwd()
 
     def _pick_output_dir(self) -> None:
+        """The window's own folder; under a serve this window started, the one it is
+        started with next time, as the sitting's documents are (lab record, task 172)."""
         path = QFileDialog.getExistingDirectory(
-            self, "Where the files go", self._directory())
-        if path:
-            self.output_dir.setText(path)
-            self.settings.output_dir = path
-            self._refresh_stem()
+            self, "Where the files go", self.settings.output_dir or self._directory())
+        if not path:
+            return
+        self.settings.output_dir = path
+        if self._serve_output:
+            self._show_sitting()
+            self.run_panel.say(f"the output folder is {path} from the next start of "
+                               f"clockwork serve; until then this window's runs go to "
+                               f"{self._serve_output}")
+            return
+        self.output_dir.setText(path)
+        self._refresh_stem()
 
     def _initials_changed(self) -> None:
         cleaned = clean_initials(self.initials.text())
         self.initials.setText(cleaned)
         self.settings.initials = cleaned
         if not self.run_panel.at_window.text().strip():
-            # Prefilled, never overwritten: the person types their own once (A2).
+            # Prefilled, never overwritten: the person types their own once (A2), and a
+            # prefilled value is asked about at the first Start (lab record, task 172).
             self.run_panel.at_window.setText(cleaned)
+            self._at_window_confirmed = False
+            self._show_at_window()
         self._refresh_stem()
 
     def _refresh_stem(self) -> None:
-        self.settings.output_dir = self.output_dir.text().strip()
+        if not self._serve_output:
+            # Never the serve's folder: a window on its own, or Warm up's serve, would
+            # inherit a folder it was never given.
+            self.settings.output_dir = self.output_dir.text().strip()
         initials = clean_initials(self.initials.text())
         if not initials:
             self.stem.setPlaceholderText("set your initials first")
@@ -2814,7 +2926,8 @@ class MainWindow(QMainWindow):
         self._stop_reporting()
         self.settings.geometry = self.saveGeometry()
         self.settings.initials = clean_initials(self.initials.text())
-        self.settings.output_dir = self.output_dir.text().strip()
+        if not self._serve_output:
+            self.settings.output_dir = self.output_dir.text().strip()
         self.settings.conditions = self.conditions.toPlainText()
         self.settings.replicates = self.replicates.value()
         self.settings.tab = self.tabs.tabText(self.tabs.currentIndex())
@@ -2960,6 +3073,12 @@ def _names_something(entry: BoxMethod, result: PaneResult) -> bool:
         [command for command in entry.setup + entry.load + entry.arm
          if not is_comment(command)]
         or entry.dc_bias or entry.rf or result.start or result.reset)
+
+
+def _same_folder(one: str, other: str) -> bool:
+    """Whether two folder paths name the same folder, as Windows compares them."""
+    return (os.path.normcase(os.path.abspath(one))
+            == os.path.normcase(os.path.abspath(other)))
 
 
 def _tighten(form: QFormLayout) -> None:
