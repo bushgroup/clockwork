@@ -16,8 +16,10 @@ is one of the four named below.
   form of it that holds a date.
 - A `Batch` travels without `mz`. The summed spectrum is a display product of hundreds
   of kilobytes a batch, published about fifteen times a second, and nothing on the far
-  side draws it: mainspring is the only viewer. `tic` and `time_stamps` travel, so
-  `scans` reads the same on both sides; `mz` comes back empty.
+  side draws it: mainspring is the only viewer. `tic`, `time_stamps` and `scan_count`
+  travel, so `scans` reads the same on both sides; `mz` comes back empty. What an owner
+  keeps and publishes is already `Batch.kept()`, the arrays empty and `scan_count` set
+  (lab record, task 170); an older daemon's batch has no `scan_count` and counts `tic`.
 - A `Found` travels without its open `Box`, and a `Discovery` without its `_boxes`.
   A port is held by the owner that opened it and cannot be sent anywhere; the far side
   learns names and ports, which is all a front end ever did with them.
@@ -157,7 +159,7 @@ def _out(obj: object, where: str, known: set[type]) -> object:
                 "tic": obj.tic.tolist(), "tic_dtype": str(obj.tic.dtype),
                 "time_stamps": obj.time_stamps.tolist(),
                 "time_stamps_dtype": str(obj.time_stamps.dtype),
-                "received_at": obj.received_at}
+                "received_at": obj.received_at, "scan_count": obj.scan_count}
     if type(obj) in known:
         cls = type(obj)
         data: dict[str, object] = {TYPE_KEY: cls.__name__}
@@ -204,7 +206,8 @@ def _in(data: object, table: dict[str, type]) -> object:
                      tic=np.asarray(data["tic"], dtype=data["tic_dtype"]),
                      time_stamps=np.asarray(data["time_stamps"],
                                             dtype=data["time_stamps_dtype"]),
-                     received_at=data["received_at"])
+                     received_at=data["received_at"],
+                     scan_count=data.get("scan_count"))
     cls = table.get(name)
     if cls is None:
         raise TypeError(f"no wire type called {name!r}")

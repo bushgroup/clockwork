@@ -155,10 +155,13 @@ Every job, event, handle and result crosses as the JSON form `clockwork.owner.wi
 dataclass is an object whose `@type` key is its class name and whose other keys are its fields,
 and a list comes back as a tuple. Four classes cross differently. A method crosses as its
 canonical TOML text plus its load-time warnings, and an instrument document as its text. A batch
-of scans crosses without its summed spectrum, which is hundreds of kilobytes about fifteen times
-a second and which no client draws, since mainspring is the only viewer; its total ion counts and
-time stamps cross. A box found by a scan crosses as its name, port and firmware version, never as
-the open port, which stays with the daemon that opened it.
+of scans crosses as its scan count and the time it arrived. The daemon keeps and publishes it
+without its summed spectrum, which is hundreds of kilobytes about fifteen times a second and which
+no client draws, since mainspring is the only viewer, and without the total ion count and time
+stamp of each scan, which no client reads and which made a full job's history some 55 MB. A batch
+from an older daemon still carries those two arrays, and its scan count is their length. A box
+found by a scan crosses as its name, port and firmware version, never as the open port, which
+stays with the daemon that opened it.
 
 An event the codec cannot carry is replaced by a `Said` event of the same number saying so, so a
 new kind of event can never stall the stream. The event that ends a job is the exception: a

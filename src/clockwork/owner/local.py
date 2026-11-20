@@ -18,8 +18,10 @@ happens, on whichever thread reported it (the loop's, or the folding worker's fo
 Every event is also kept against its job's handle, numbered, for `events(handle,
 after)`: a front end in another process reads that instead. What is kept is bounded the
 way the window's mailbox is: consecutive `BatchSeen`s collapse into the newest, a
-`BatchSeen` is kept without its summed spectrum (a display product of hundreds of
-kilobytes a batch that no front end draws; mainspring is the only viewer), each job
+`BatchSeen` is kept with its scan count and none of its arrays (`Batch.kept`: the
+summed spectrum is hundreds of kilobytes of display product a batch that no front end
+draws, mainspring being the only viewer, and nothing past the loop reads the per-scan
+`tic` or `time_stamps`; a full-cap history with them was ~55 MB), each job
 keeps at most `limit` events, and only the last `history` jobs are kept at all. Beside
 each job's history is its `JobSummary`, kept as the events arrive, which is what a
 follower reads instead of the history (`summary`; lab record, task 170).
@@ -62,8 +64,6 @@ import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
-
-import numpy as np
 
 from .. import keep, transcript
 from ..acq import (
@@ -180,8 +180,6 @@ batches race the start list and the enable-gate guard fires correctly on a fault
 is not there. It stands in for the pushes a real frame spends waiting for its enable.
 Taken from the bench script that first needed it (lab record, task 28).
 """
-
-_NO_SPECTRUM = np.zeros(0)
 
 _CLOSING = "clockwork is shutting down, so this job was never started"
 
@@ -667,7 +665,7 @@ class LocalOwner:
         can reach it out of order. **`callback` is called with that lock held** and must
         do nothing but hand the entry on (a `queue.put`); calling back into this owner
         from it deadlocks. What it is given is what `events` would return, a `BatchSeen`
-        without its spectrum included.
+        without its arrays (`Batch.kept`) included.
         """
         with self._guard:
             self._listeners.append(callback)
@@ -889,8 +887,8 @@ class LocalOwner:
         handle = handle or self._current or Handle(id=0, kind="", label="",
                                                     owner=self.session)
         kept = event
-        if isinstance(event, BatchSeen) and event.batch.mz.size:
-            kept = replace(event, batch=replace(event.batch, mz=_NO_SPECTRUM))
+        if isinstance(event, BatchSeen):
+            kept = replace(event, batch=event.batch.kept())
         with self._guard:
             entries = self._history.setdefault(handle.id, [])
             entry = Progress(seq=next(self._seqs), event=kept)

@@ -105,6 +105,25 @@ def test_a_batch_crosses_without_its_spectrum_and_keeps_its_scan_count():
     assert back.scans_so_far == 30
 
 
+def test_a_kept_batch_crosses_with_its_count_and_no_arrays():
+    batch = Batch(mz=np.ones(1000), tic=np.arange(500, dtype=np.uint32),
+                  time_stamps=np.arange(500, dtype=np.uint64), received_at=4.0)
+    kept = batch.kept()
+    assert kept.scans == 500 and kept.received_at == 4.0
+    assert kept.mz.size == kept.tic.size == kept.time_stamps.size == 0
+    assert kept.kept() is kept
+    text = wire.dumps(BatchSeen(method_frame=1, repetition=2, batch=kept, scans_so_far=500))
+    assert len(text) < 400
+    assert wire.loads(text).batch.scans == 500
+
+
+def test_a_batch_from_an_older_daemon_counts_its_tic():
+    data = wire.to_wire(Batch(mz=np.zeros(0), tic=np.array([7, 8, 9]),
+                              time_stamps=np.array([0, 258, 516])))
+    del data["scan_count"]
+    assert wire.from_wire(data).scans == 3
+
+
 def test_an_open_box_never_crosses():
     box = Box(transport=FakeBox(), name="box1")
     try:
@@ -232,6 +251,7 @@ def test_consecutive_batches_collapse_in_the_history_and_leave_their_spectrum(tm
     assert [type(entry.event) for entry in kept] == [BatchSeen, FrameEnded, BatchSeen]
     assert kept[0].event.scans_so_far == 6
     assert kept[0].event.batch.mz.size == 0 and kept[0].event.batch.scans == 2
+    assert kept[0].event.batch.tic.size == 0 and kept[0].event.batch.time_stamps.size == 0
     assert [entry.seq for entry in kept] == sorted(entry.seq for entry in kept)
     owner.shutdown()
     owner.serve()

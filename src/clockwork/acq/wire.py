@@ -388,10 +388,27 @@ class Batch:
     The console stamps nothing, so the host clock is the only clock a client
     has for how long a batch took to arrive.
     """
+    scan_count: int | None = None
+    """The scan count of a batch kept without its per-scan arrays (`kept`); None
+    while `tic` is there to count."""
 
     @property
     def scans(self) -> int:
-        return int(self.tic.size)
+        return int(self.tic.size) if self.scan_count is None else self.scan_count
+
+    def kept(self) -> Batch:
+        """This batch as a job's history keeps it: its scan count and arrival, none of
+        its three arrays. Lab record, task 170: a full-cap history with the arrays was
+        ~55 MB to page to a joining window, and nothing past the loop reads them."""
+        if self.scan_count is not None:
+            return self
+        return Batch(mz=_EMPTY_F8, tic=_EMPTY_U4, time_stamps=_EMPTY_U8,
+                     received_at=self.received_at, scan_count=self.scans)
+
+
+_EMPTY_F8 = np.zeros(0)
+_EMPTY_U4 = np.zeros(0, dtype=np.uint32)
+_EMPTY_U8 = np.zeros(0, dtype=np.uint64)
 
 
 @dataclass(frozen=True, slots=True)

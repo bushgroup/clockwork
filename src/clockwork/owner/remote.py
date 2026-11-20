@@ -20,8 +20,9 @@ acknowledgement waited, the gate guard dropped good repetitions, and the window'
 reply is built on a thread of its own beside the loop, which goes on answering and
 publishing meanwhile, encoded one entry at a time with a rest between slices, so that
 the daemon's other threads wait about 15 ms at worst, one tick of the Windows timer,
-for a page or a whole history alike; and this client asks for a long history a page of `EVENTS_PAGE` entries
-at a time, so that no one request takes longer to answer than a client waits. A
+for a page or a whole history alike; and this client asks for a long history a page
+of `EVENTS_PAGE` entries at a time, so that no one request takes longer to answer
+than a client waits. A
 follower asks for `summary` and the events after its last number, and never has to ask
 for the whole history at all.
 
