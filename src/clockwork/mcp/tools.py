@@ -114,6 +114,7 @@ from ..owner import (
     wire_fingerprint,
 )
 from ..owner.hold import Guarding, Hold, held
+from ..owner.interface import JobSummary, summarize
 from ..owner.keeper import stem_of
 from ..owner.remote import DaemonError
 from ..owner.wire import TYPE_KEY, to_wire
@@ -904,16 +905,16 @@ class Toolbox:
                 if (not fresh or time.monotonic() >= deadline
                         or any(not isinstance(entry.event, BatchSeen) for entry in fresh)):
                     break
-            history = list(self.owner.events(handle, 0))  # type: ignore[attr-defined]
+            # The summary, not the whole history: a follower in a new process every few
+            # seconds asked the daemon for all of it each time, and a long series' reply
+            # stalled the acquisition it was following (lab #25; lab record, task 170).
+            kept = self._summary(handle)
         except StaleHandle as exc:
             raise ToolFailure(str(exc)) from exc
         shown = [entry for number, entry in enumerate(entries)
                  if not (isinstance(entry.event, BatchSeen) and number + 1 < len(entries)
                          and isinstance(entries[number + 1].event, BatchSeen))]
-        counter = next((entry.event for entry in reversed(history)
-                        if isinstance(entry.event, BatchSeen)), None)
-        started = next((entry.event.job for entry in history
-                        if isinstance(entry.event, JobStarted)), None)
+        started = kept.job
         with self._guard:
             planned = self._planned.get(job)
         if planned is None and isinstance(started, Acquire):
@@ -925,30 +926,28 @@ class Toolbox:
             "events": [_entry(entry) for entry in shown],
             "last": entries[-1].seq if entries else after,
             "position": {
-                "files_done": sum(isinstance(entry.event, RunDone) for entry in history),
+                "files_done": kept.runs_done,
                 "files_asked": planned,
-                "scans_this_frame": counter.scans_so_far if counter is not None else 0,
+                "scans_this_frame": kept.scans_so_far,
             },
             "done": False,
         }
         if isinstance(started, SeriesJob):
-            answer["series"] = _series_progress(started, history)
+            answer["series"] = _series_progress(started, kept.point)
         hold = self._hold()
         if hold is not None and hold.job == job:
             answer["paused"] = _paused(hold)
         answer["beam_guard"] = _guarded(getattr(self.owner.status(),  # type: ignore[attr-defined]
                                                 "guard", None))
-        # Off the whole history, not the events after `after`: a job asked about past
-        # its end -- `after` its last number, or any number larger -- answered `done:
-        # false` for ever, with nothing running (on the rack, 2026-09-28; lab record,
-        # task 96).
-        for entry in history:
-            if isinstance(entry.event, JobFinished):
-                answer["done"] = True
-                answer["result"] = _result(entry.event.result)
-            elif isinstance(entry.event, JobFailed):
-                answer["done"] = True
-                answer["failed"] = entry.event.message
+        # Off the summary, not the events after `after`: a job asked about past its end
+        # -- `after` its last number, or any number larger -- answered `done: false` for
+        # ever, with nothing running (on the rack, 2026-09-28; lab record, task 96).
+        if isinstance(kept.ended, JobFinished):
+            answer["done"] = True
+            answer["result"] = _result(kept.ended.result)
+        elif isinstance(kept.ended, JobFailed):
+            answer["done"] = True
+            answer["failed"] = kept.ended.message
         if isinstance(answer.get("result"), list):
             answer["runs"] = answer.pop("result")
         elif isinstance(answer.get("result"), dict) and "runs" in answer["result"]:
@@ -1832,10 +1831,10 @@ class Toolbox:
         found = next((candidate for candidate in (state.running, *state.queued)
                       if candidate is not None and candidate.id == job), None)
         if found is None:
-            bare = Handle(id=job, kind="", label="")
-            found = next((entry.event.handle for entry in self.owner.events(bare, 0)  # type: ignore[attr-defined]
-                          if isinstance(entry.event, (JobStarted, JobFinished, JobFailed))),
-                         None)
+            kept = self._summary(Handle(id=job, kind="", label=""))
+            ended = kept.ended
+            found = (ended.handle if isinstance(ended, (JobFinished, JobFailed))
+                     else kept.handle if kept.job is not None else None)
         if found is None:
             raise ToolFailure(f"job {job} is not one the owner knows: never submitted, or "
                               "finished long enough ago that its progress was let go")
@@ -1892,6 +1891,14 @@ class Toolbox:
                     return entry.event, handle
             if time.monotonic() >= deadline:
                 return None, handle
+
+    def _summary(self, handle: Handle) -> JobSummary:
+        """Where the job has got to: the owner's `summary`, or for an owner without one
+        (a stand-in in a test) the same worked out from its whole history."""
+        asking = getattr(self.owner, "summary", None)
+        if asking is not None:
+            return asking(handle)
+        return summarize(handle, self.owner.events(handle, 0))  # type: ignore[attr-defined]
 
     def _wait(self, handle: Handle, after: int, timeout: float) -> list[Progress]:
         """The owner's progress after `after`, waiting up to `timeout` for some.
@@ -2423,10 +2430,8 @@ def _guarded(guarding: Guarding | None) -> dict | None:
             "text": guarding.text}
 
 
-def _series_progress(job: SeriesJob, history: list[Progress]) -> dict:
+def _series_progress(job: SeriesJob, point: PointStarted | None) -> dict:
     """Where a series job has got to: the point in flight, and the order planned."""
-    point = next((entry.event for entry in reversed(history)
-                  if isinstance(entry.event, PointStarted)), None)
     return {
         "points": len(job.points), "seed": job.seed,
         "order": [entry.index for entry in job.points],

@@ -38,6 +38,7 @@ under the names they have always had.
 from __future__ import annotations
 
 import queue
+import socket
 import subprocess
 import threading
 import time
@@ -84,6 +85,8 @@ from ..owner import (
 from ..owner.hold import Guarding, Hold, HoldRefused
 from ..owner.interface import OwnerStatus, StaleHandle
 from ..owner.local import sentence
+from ..owner.lock import default_path as default_lock_path
+from ..owner.lock import read_holder
 from ..owner.remote import (
     DEFAULT_COMMAND,
     DaemonError,
@@ -92,7 +95,7 @@ from ..owner.remote import (
     Hello,
     RemoteOwner,
 )
-from .serving import why_serve_stopped, window_origin
+from .serving import process_running, why_serve_stopped, window_origin
 
 __all__ = [
     "FAKE_FRAME_HOLD_S",
@@ -454,6 +457,9 @@ class RemoteWorker(_Signals):
         """Over what the UI thread reads: the status, the jobs and their origins."""
         self._status: OwnerStatus | None = None
         self._unavailable = ""
+        self._busy_since: float | None = None
+        """When the daemon, still running, last stopped answering in time; None while it
+        answers."""
         self._stop_asked = False
         self._session: str | None = None
         self._cursor = 0
@@ -629,6 +635,10 @@ class RemoteWorker(_Signals):
                     continue
                 try:
                     self._follow()
+                    self._answering_again()
+                except DaemonUnavailable as exc:
+                    if not self._still_running():
+                        self._lose(exc)
                 except DaemonError as exc:
                     self._lose(exc)
                 self._done.wait(self.poll_s)
@@ -778,11 +788,42 @@ class RemoteWorker(_Signals):
             self.warned.emit(message)
             self.status_changed.emit(self.status)
 
+    def _still_running(self) -> bool:
+        """A daemon that did not answer in time but is busy rather than gone: its
+        command port still takes connections, which ZeroMQ's own thread does whatever
+        the daemon's Python is doing, its process still runs and, unless it is `--fake`,
+        the instrument lock still names it. Said once, and followed as before, with
+        nothing failed and no Find boxes: a long series' history held the daemon for
+        seconds when a follower asked for it, and the window read that as a daemon that
+        had stopped (lab #27; lab record, task 170)."""
+        hello = self.hello
+        if (hello is None or not _listening(self.owner.endpoint)
+                or not process_running(hello.pid)):
+            return False
+        if not hello.fake:
+            holder = read_holder(default_lock_path())
+            if holder is None or holder.pid != hello.pid:
+                return False
+        if self._busy_since is None:
+            self._busy_since = time.monotonic()
+            self.warned.emit(f"clockwork serve (pid {hello.pid}) is still running but has "
+                             f"not answered within {self.owner.timeout:g} s; still "
+                             "following it")
+        return True
+
+    def _answering_again(self) -> None:
+        if self._busy_since is None:
+            return
+        quiet = time.monotonic() - self._busy_since
+        self._busy_since = None
+        self.said.emit(f"clockwork serve answers again, after {quiet:.0f} s")
+
     def _lose(self, exc: DaemonError) -> None:
         """The daemon stopped answering: say so once, and fail this window's jobs that
         were in it, whose progress went with it."""
         self.hello = None
         self.spawned = None
+        self._busy_since = None
         self._fail_mine("clockwork serve stopped before this job finished")
         with self._guard:
             self._status = None
@@ -888,3 +929,13 @@ class RemoteWorker(_Signals):
             self.console_state.emit(status.console)
         if before != status:
             self.status_changed.emit(status)
+
+
+def _listening(endpoint: str) -> bool:
+    """Whether something takes TCP connections at a `tcp://host:port` endpoint."""
+    host, _, port = endpoint.removeprefix("tcp://").rpartition(":")
+    try:
+        with socket.create_connection((host or "127.0.0.1", int(port)), timeout=0.5):
+            return True
+    except (OSError, ValueError):
+        return False

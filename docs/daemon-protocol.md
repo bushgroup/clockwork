@@ -69,10 +69,17 @@ login and no token; the sockets accept connections from this machine only.
 | Events | `tcp://127.0.0.1:5571` | PUB; client uses SUB | Two frames per message: a topic, then a JSON payload |
 
 Both are bound to the loopback address, never to `*`, and both ports sit clear of the console's
-5554 and 5555. The command socket handles one request at a time and answers each within
-milliseconds: nothing a request asks for waits on the hardware, since a job is queued and its
-progress read later. A DEALER client sends an empty delimiter frame before the request, as it
-would to any ROUTER, and reads one after it.
+5554 and 5555. The command socket answers each request within milliseconds: nothing a request
+asks for waits on the hardware, since a job is queued and its progress read later. The one
+exception is `events` for a long job, whose reply grows with the job's history, up to tens of
+megabytes for a series of a thousand repetitions. The daemon builds that reply beside its command
+loop, a piece at a time and resting between pieces, so that it delays no other request and holds
+the acquisition, which runs in the same process, for no more than about 15 ms. Answered at once
+on the loop, as before clockwork 1.2.0, one such reply stalled the acquisition for most of a
+second and a `status` asked meanwhile for three. Replies therefore carry the request's `id` and
+may arrive in a different order from the requests, for a client that sends several without
+waiting. A DEALER client sends an empty delimiter frame before the request, as it would to any
+ROUTER, and reads one after it.
 
 ## Requests and replies
 
@@ -112,7 +119,8 @@ One command per call of the owner protocol, and `hello`. Four of them, `pause`, 
 |---|---|---|
 | `hello` | none | An object naming the daemon: `program`, `version` (clockwork's), `protocol` (1), `session`, `pid`, `started`, `fake`, `events` (the event socket's address), `output`, `library`, `holder`, the lock holder's own description or null under `--fake`, and the sitting, `instrument`, `limits` and `project_limits`, each an absolute path or empty for none |
 | `submit` | `job`, `origin` (optional) | A `Handle`. The job is queued and runs after every job before it, one at a time. `origin` is a few words naming the client, such as `the clockwork window (pid 5120)` or `Claude, through clockwork mcp`, and is carried unexamined in the handle's own `origin` so that every other client can say whose job it is |
-| `events` | `handle`, `after` (default 0) | That job's progress numbered after `after`, oldest first, as a list of `Progress` |
+| `events` | `handle`, `after` (default 0), `limit` (default 0, none) | That job's progress numbered after `after`, oldest first, as a list of `Progress`, and at most `limit` entries of it where `limit` is not 0. A client reading a long history asks for a page at a time, each after the last number of the page before, until a reply holds fewer than `limit`; the Python client asks for 2000 at a time, about 5 MB of a long series' history, which the daemon answers in about 0.35 s |
+| `summary` | `handle` | A `JobSummary`, where the job has got to, in a reply whose size does not grow with the job: `last`, the number of its newest event; `job`, the job as it started, or null before; `runs_done`, the runs it has finished; `scans_so_far`, what the console frame in flight has published; `point`, the newest `PointStarted` of a series, or null; and `ended`, the `JobFinished` or `JobFailed` that ended it, or null. The daemon keeps it as the events arrive, so `runs_done` counts every run of a job whose oldest events have been let go |
 | `stop` | `reason`, `by`, `client` (all optional) | null. The run in flight ends after its current repetition and its fold, and a paused series ends where it rests. `by` is the initials of a person who asked and `client` a few words naming the client, as `origin` does; both are written into the run's record with the stop |
 | `pause` | `grain` (`point` or `repetition`, default `point`), `by`, `client` (optional) | A `Hold`, at once. The series running rests after its point or its repetition in flight |
 | `resume` | `by`, `client` (optional) | null. The pause is lifted and the series goes on |
@@ -129,7 +137,11 @@ client written before it never reads and a daemon written before it never sends.
 `resume`, `note`, the `by` and `client` of `stop`, and `hold` were added in the same way, with
 `hold` null by default, and so were `guard` and the status's `guard`, null by default. A daemon
 written before any of the four commands answers it with `unknown-command`, which the window
-shows as one sentence saying that the daemon is older than the window. A daemon written before `stop` took `by` and `client` refuses them as a
+shows as one sentence saying that the daemon is older than the window. `summary` was added in the
+same way; a daemon written before it answers `unknown-command`, and the Python client then works
+the summary out from the job's whole history, as a follower did before it. So was `limit`; a
+daemon written before it refuses the argument as a `bad-request`, and the Python client then asks
+for the whole history in one request. A daemon written before `stop` took `by` and `client` refuses them as a
 `bad-request`, and the Python client then sends the reason alone.
 
 Handle ids are counted from 1 for each session with no gaps, which with `issued` lets a client
@@ -180,7 +192,17 @@ Publish-subscribe drops what it cannot deliver and says nothing, so the stream i
 and `events` is the record; a client that cannot tell whether it has seen everything asks. The
 Python client keeps a copy of each job's progress from the stream, fills it by one `events` call
 the first time a job is read or after any gap, and falls back to asking every time until its first
-heartbeat arrives.
+heartbeat arrives. It fills the copy from the number it was asked after, not from 0, and fills it
+again from further back only when asked for earlier events.
+
+To follow a job, ask `summary` for where it has got to and `events` for what is new since the last
+number read. That costs the daemon the same at the job's first repetition as at its thousandth.
+A follower that instead asks for the whole history every few seconds makes the daemon build the
+largest reply it has, again and again. On 2026-11-19, a follower that started a new process every
+two seconds and asked that way slowed AUKLET's `TBLSTRT` acknowledgements until the gate guard
+dropped repetitions in 13 of 19 files, and kept the window's `status` waiting until the window
+took the daemon for gone. A reply built beside the loop no longer stalls the
+acquisition, but it still costs the daemon a few seconds of work each time.
 
 ## A person's pause
 
@@ -334,7 +356,12 @@ The window follows every job in the daemon, whichever client submitted it. It re
 times a second and the progress of every handle up to `issued`, and shows another client's job in
 its run log and status bar exactly as it shows its own, with the job's `origin` beside it, and
 lists another client's running and queued jobs under its run queue. A daemon that is `--fake`
-is followed in the same way, and the window says so in its title and its run log. It greys out its sending and
+is followed in the same way, and the window says so in its title and its run log. A daemon that
+does not answer within the window's two seconds is gone only if its command port no longer takes
+connections, its process has ended, or the instrument lock no longer names it, which under
+`--fake` it never holds. Otherwise it is
+busy, and the window says so once in its run log, goes on following it, and offers no Find boxes
+until it answers again. It greys out its sending and
 acquiring buttons while any job runs, since the daemon runs one job at a time, and its Stop button
 stops whichever run is in flight. Its two pause buttons, Resume and the note field act on
 whichever job is running in the same way, each under the initials typed in "At the window".

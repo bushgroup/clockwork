@@ -20,7 +20,9 @@ after)`: a front end in another process reads that instead. What is kept is boun
 way the window's mailbox is: consecutive `BatchSeen`s collapse into the newest, a
 `BatchSeen` is kept without its summed spectrum (a display product of hundreds of
 kilobytes a batch that no front end draws; mainspring is the only viewer), each job
-keeps at most `limit` events, and only the last `history` jobs are kept at all.
+keeps at most `limit` events, and only the last `history` jobs are kept at all. Beside
+each job's history is its `JobSummary`, kept as the events arrive, which is what a
+follower reads instead of the history (`summary`; lab record, task 170).
 
 **The boxes are opened once and kept.** Closing a port drops DTR, which makes the
 firmware reset its own USB port and re-enumerate, so an owner that opened a box per send
@@ -123,6 +125,7 @@ from .interface import (
     JobFailed,
     JobFinished,
     JobStarted,
+    JobSummary,
     LogsOpened,
     Noted,
     OwnerStatus,
@@ -371,6 +374,7 @@ class LocalOwner:
         """Over `_history` and `_pending`, which the owner's thread, a folding worker
         and any caller of `events` or `status` all touch."""
         self._history: dict[int, list[Progress]] = {}
+        self._summaries: dict[int, JobSummary] = {}
         self._pending: list[Handle] = []
         self._running: Handle | None = None
         self._current: Handle | None = None
@@ -399,6 +403,7 @@ class LocalOwner:
                             owner=self.session, origin=origin)
             self._issued = handle.id
             self._history[handle.id] = []
+            self._summaries[handle.id] = JobSummary(handle=handle)
             if not self._closing:
                 self._pending.append(handle)
             self._forget_old_jobs()
@@ -408,15 +413,24 @@ class LocalOwner:
             self._queue.put((handle, job))
         return handle
 
-    def events(self, handle: Handle, after: int = 0) -> list[Progress]:
+    def _check_session(self, handle: Handle) -> None:
         if handle.owner and handle.owner != self.session:
             raise StaleHandle(
                 f"job {handle.id} ({handle.label}) was submitted to a different clockwork "
                 "owner, most likely one that has since stopped, and its progress went "
                 "with it")
+
+    def events(self, handle: Handle, after: int = 0) -> list[Progress]:
+        self._check_session(handle)
         with self._guard:
             return [entry for entry in self._history.get(handle.id, ())
                     if entry.seq > after]
+
+    def summary(self, handle: Handle) -> JobSummary:
+        self._check_session(handle)
+        with self._guard:
+            kept = self._summaries.get(handle.id)
+        return kept if kept is not None else JobSummary(handle=handle)
 
     def stop(self, reason: str = "stopped by the operator", *, by: str = "",
              client: str = "") -> None:
@@ -880,6 +894,8 @@ class LocalOwner:
         with self._guard:
             entries = self._history.setdefault(handle.id, [])
             entry = Progress(seq=next(self._seqs), event=kept)
+            summary = self._summaries.get(handle.id) or JobSummary(handle=handle)
+            self._summaries[handle.id] = summary.after(entry.seq, kept)
             if (isinstance(kept, BatchSeen) and entries
                     and isinstance(entries[-1].event, BatchSeen)):
                 entries[-1] = entry
@@ -906,6 +922,7 @@ class LocalOwner:
                 break
             if job_id not in keep:
                 del self._history[job_id]
+                self._summaries.pop(job_id, None)
 
     def _hold_lock(self) -> None:
         """Take the instrument lock if it is not already held, or raise its sentence."""

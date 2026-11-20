@@ -12,13 +12,30 @@ decides nothing about the protocol itself (lab record, task 68).
 read with `events`. So a request is answered in milliseconds whatever the owner is doing,
 and the daemon's command loop, which also publishes, can be one thread.
 
+**Except `events`, whose reply grows with the job.** A long series keeps tens of
+thousands of entries, and its whole history, encoded on the loop in one `json.dumps`,
+held the GIL for seconds in the process that runs the acquisition: AUKLET's `TBLSTRT`
+acknowledgement waited, the gate guard dropped good repetitions, and the window's
+`status` timed out behind it (lab #25, lab #27; lab record, task 170). So an `events`
+reply is built on a thread of its own beside the loop, which goes on answering and
+publishing meanwhile, encoded one entry at a time with a rest between slices, so that
+the daemon's other threads wait about 15 ms at worst, one tick of the Windows timer,
+for a page or a whole history alike; and this client asks for a long history a page of `EVENTS_PAGE` entries
+at a time, so that no one request takes longer to answer than a client waits. A
+follower asks for `summary` and the events after its last number, and never has to ask
+for the whole history at all.
+
 **The stream is the fast path and `events` is the record.** PUB drops what it cannot
 deliver and says nothing, so the client keeps its own copy of each job's progress from
 the stream and trusts it only while it can prove it has missed nothing: every event of
 every job is numbered by one counter and published in that order (`LocalOwner.listen`),
 so a subscriber to everything sees consecutive numbers and a gap is a loss. The copy of a
 job is filled by one `events` call the first time it is read and after any gap, and until
-the first heartbeat arrives every read is a request.
+the first heartbeat arrives every read is a request. **It is filled from the number the
+reader asked after, not from 0**: a copy holds every event after its `since`, and a read
+from further back fills it again from there. A follower in a new process that asks for
+the events after its last number then costs the daemon those events, not the job's whole
+history (lab record, task 170).
 
 Qt-free, like the rest of `clockwork.owner`. A ZeroMQ socket belongs to one thread: the
 server's two belong to whichever thread runs `serve`, the client's command socket is
@@ -31,6 +48,7 @@ import inspect
 import itertools
 import json
 import os
+import queue
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -41,7 +59,16 @@ import zmq
 from .. import __version__
 from ..acq import BatchSeen, BeamGuard, Snapshot
 from .hold import POINT, Hold, HoldRefused
-from .interface import Handle, JobFinished, OwnerStatus, Progress, Said, StaleHandle
+from .interface import (
+    Handle,
+    JobFinished,
+    JobSummary,
+    OwnerStatus,
+    Progress,
+    Said,
+    StaleHandle,
+    summarize,
+)
 from .jobs import Acquire, Job, Send, SeriesJob, StandDown, WarmUp
 from .local import sentence
 from .wire import from_wire, to_wire
@@ -51,6 +78,7 @@ __all__ = [
     "DEFAULT_COMMAND",
     "DEFAULT_EVENTS",
     "DEFAULT_TIMEOUT_S",
+    "EVENTS_PAGE",
     "EVENTS_PORT",
     "HEARTBEAT_S",
     "PROTOCOL",
@@ -78,7 +106,21 @@ DEFAULT_TIMEOUT_S = 5.0
 """How long a client waits for a reply. Every command is answered in milliseconds, so
 this is the time it takes to decide that no daemon is there, not room for work."""
 
+EVENTS_PAGE = 2000
+"""The most events this client asks for in one `events` request. A page of a long
+series' history is about 5 MB and builds in about 0.35 s, inside the window's 2 s wait;
+the whole of a 20 000-entry history took 4 s, so a window joining a daemon in the middle
+of a long series timed out on it, asked again, and never caught up (lab record,
+task 170)."""
+
 _POLL_MS = 50
+_SLICE_S = 0.002
+_REST_S = 0.0005
+"""An `events` reply is encoded in slices of `_SLICE_S` with a sleep of `_REST_S` after
+each. Python hands the GIL to a waiting thread only every switch interval, which on
+Windows lands on the 15.6 ms timer tick, so a thread that never sleeps cost every
+serial read and stream poll beside it about 20 ms a wake-up; slicing brings that to a
+few milliseconds for about a third more time spent building (lab record, task 170)."""
 _HANDLE_TOPIC = "handle/{}/"
 _HEARTBEAT_TOPIC = "heartbeat/"
 
@@ -155,6 +197,9 @@ class DaemonServer:
         """The number of the last event published, which the heartbeat carries."""
         self._shutdown_reason: str | None = None
         self._shutdown_asked = threading.Event()
+        self._to_build: queue.Queue[tuple[list[bytes], bytes] | None] = queue.Queue()
+        """`events` requests for the builder thread, None to end it."""
+        self._built_at = f"inproc://clockwork-built-{id(self):x}"
 
         self._router = self._context.socket(zmq.ROUTER)
         self._pub = self._context.socket(zmq.PUB)
@@ -181,8 +226,15 @@ class DaemonServer:
     def serve(self) -> None:
         """Answer and publish until shut down and the owner has finished, then close."""
         heartbeat_due = 0.0
+        built = self._context.socket(zmq.PULL)
+        built.setsockopt(zmq.LINGER, 0)
+        built.bind(self._built_at)
+        builder = threading.Thread(target=self._build, name="clockwork events replies",
+                                   daemon=True)
+        builder.start()
         poller = zmq.Poller()
         poller.register(self._router, zmq.POLLIN)
+        poller.register(built, zmq.POLLIN)
         try:
             while True:
                 if self._shutdown_asked.is_set() and not self.owner.closing:  # type: ignore[attr-defined]
@@ -196,9 +248,15 @@ class DaemonServer:
                     self._publish_pending()
                     self._heartbeat()
                     return
-                if dict(poller.poll(_POLL_MS)).get(self._router):
+                ready = dict(poller.poll(_POLL_MS))
+                if ready.get(built):
+                    self._send_built(built)
+                if ready.get(self._router):
                     self._answer_waiting()
         finally:
+            self._to_build.put(None)
+            builder.join(timeout=5.0)
+            built.close(linger=0)
             self._router.close(linger=0)
             self._pub.close(linger=0)
 
@@ -255,10 +313,40 @@ class DaemonServer:
             if len(frames) < 2:
                 continue
             envelope, payload = frames[:-1], frames[-1]
-            reply = self._answer(payload)
-            self._router.send_multipart(
-                [*envelope, json.dumps(reply, ensure_ascii=False,
-                                       separators=(",", ":")).encode("utf-8")])
+            if _command(payload) == "events":
+                self._to_build.put((envelope, payload))
+                continue
+            self._router.send_multipart([*envelope, _encoded(self._answer(payload))])
+
+    # -- the replies built beside the loop -------------------------------------------
+
+    def _build(self) -> None:
+        """The builder thread: answer each `events` request in turn and hand the bytes
+        to the loop, which alone touches the command socket."""
+        push = self._context.socket(zmq.PUSH)
+        push.setsockopt(zmq.LINGER, 0)
+        push.connect(self._built_at)
+        try:
+            while True:
+                asked = self._to_build.get()
+                if asked is None:
+                    return
+                envelope, payload = asked
+                # Large frames go without a copy, here and on to the client (pyzmq's
+                # `copy_threshold`): a reply of tens of megabytes copied with the GIL
+                # held is a stall of its own.
+                push.send_multipart([*envelope, _encoded(self._answer(payload))],
+                                    copy=False)
+        finally:
+            push.close(linger=0)
+
+    def _send_built(self, built: zmq.Socket) -> None:
+        while True:
+            try:
+                frames = built.recv_multipart(zmq.NOBLOCK, copy=False)
+            except zmq.Again:
+                return
+            self._router.send_multipart(frames, copy=False)
 
     def _answer(self, payload: bytes) -> dict[str, object]:
         request_id: object = None
@@ -333,16 +421,34 @@ class DaemonServer:
                    + (f" from {origin}" if origin else ""))
         return to_wire(handle)
 
-    def _events(self, handle: object = None, after: object = 0) -> object:
+    def _events(self, handle: object = None, after: object = 0, limit: object = 0) -> object:
         if not isinstance(handle, Handle):
             raise _Refusal("bad-request", "`events` takes a handle")
         if not isinstance(after, int):
             raise _Refusal("bad-request", "`after` is a whole number")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+            raise _Refusal("bad-request", "`limit` is a whole number, 0 for no limit")
         try:
             entries = self.owner.events(handle, after)  # type: ignore[attr-defined]
         except StaleHandle as exc:
             raise _Refusal("refused", str(exc)) from exc
-        return [_carried(entry) for entry in entries]
+        return _Pieces(entries[:limit] if limit else entries)
+
+    def _summary(self, handle: object = None) -> object:
+        if not isinstance(handle, Handle):
+            raise _Refusal("bad-request", "`summary` takes a handle")
+        try:
+            summary = self.owner.summary(handle)  # type: ignore[attr-defined]
+        except StaleHandle as exc:
+            raise _Refusal("refused", str(exc)) from exc
+        try:
+            return to_wire(summary)
+        except TypeError:
+            # The one field that may hold something the codec cannot carry is the
+            # result of the event that ended the job, as in `_carried`.
+            if not isinstance(summary.ended, JobFinished):
+                raise
+            return to_wire(replace(summary, ended=replace(summary.ended, result=None)))
 
     def _stop(self, reason: object = "stopped by a client", by: object = "",
               client: object = "") -> None:
@@ -408,6 +514,7 @@ _COMMANDS: dict[str, Callable[..., object]] = {
     "hello": DaemonServer._hello,
     "submit": DaemonServer._submit,
     "events": DaemonServer._events,
+    "summary": DaemonServer._summary,
     "stop": DaemonServer._stop,
     "pause": DaemonServer._pause,
     "resume": DaemonServer._resume,
@@ -423,6 +530,47 @@ def serve(owner: object, *, command: str = DEFAULT_COMMAND,
           events: str = DEFAULT_EVENTS, **options: object) -> None:
     """Put `owner` behind the two sockets and serve until it is shut down."""
     DaemonServer(owner, command=command, events=events, **options).serve()  # type: ignore[arg-type]
+
+
+class _Pieces(list):
+    """An `events` result, the `Progress` entries themselves, which `_encoded` carries
+    and encodes one at a time.
+
+    One at a time because each step that handles the whole reply at once holds the GIL
+    for as long as that takes: one `json.dumps` of a long series' history held it for a
+    second, and building the history's wire form whole and then letting it go, millions
+    of small objects freed in one cascade, held it for tens of milliseconds more."""
+
+
+def _command(payload: bytes) -> object:
+    """The `cmd` of a request, or None where it has none to read; `_answer` says why."""
+    try:
+        request = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return request.get("cmd") if isinstance(request, dict) else None
+
+
+def _encoded(reply: dict[str, object]) -> bytes:
+    """A reply as the bytes of its frame. A `_Pieces` result is encoded item by item and
+    joined, once, into the bytes one `json.dumps` of the whole reply gives: every further
+    copy of a reply of tens of megabytes is one more stall with the GIL held."""
+    result = reply.get("result")
+    if not isinstance(result, _Pieces):
+        return _dumps(reply).encode("utf-8")
+    pieces = [f'{{"id":{_dumps(reply.get("id"))},"ok":true,"result":['.encode()]
+    rest_due = time.perf_counter() + _SLICE_S
+    for number, entry in enumerate(result):
+        pieces.append((("," if number else "") + _dumps(_carried(entry))).encode("utf-8"))
+        if time.perf_counter() >= rest_due:
+            time.sleep(_REST_S)
+            rest_due = time.perf_counter() + _SLICE_S
+    pieces.append(f'],"session":{_dumps(reply.get("session"))}}}'.encode())
+    return b"".join(pieces)
+
+
+def _dumps(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 def _carried(progress: Progress) -> object:
@@ -485,6 +633,9 @@ class _Copy:
     entries: list[Progress]
     trusted: bool = False
     """Filled by an `events` call that the stream has carried on from without a gap."""
+    since: int = 0
+    """The number that call asked after: the copy holds every event numbered after it,
+    and answers only a read from there on."""
 
 
 class RemoteOwner:
@@ -517,6 +668,8 @@ class RemoteOwner:
         self.origin = origin
         self._context = context if context is not None else zmq.Context.instance()
         self._ids = itertools.count(1)
+        self._paging = True
+        """Whether the daemon takes `events`' `limit`; one from before it refuses it."""
         self._request_guard = threading.Lock()
         self._socket: zmq.Socket | None = None
         self._hello: Hello | None = None
@@ -554,24 +707,41 @@ class RemoteOwner:
         self._ensure_connected()
         with self._state:
             copy = self._copies.get(handle.id)
-            if copy is not None and copy.trusted and self._owns(handle):
+            if (copy is not None and copy.trusted and after >= copy.since
+                    and self._owns(handle)):
                 return [entry for entry in copy.entries if entry.seq > after]
             streaming = self._run_from is not None
             known = self._last_seq
         if not streaming:
             return list(self._fetch(handle, after))
-        entries = self._fetch(handle, 0)
+        entries = self._fetch(handle, after)
         with self._state:
             copy = self._copies.setdefault(handle.id, _Copy(entries=[]))
-            newest = entries[-1].seq if entries else 0
+            newest = entries[-1].seq if entries else after
             copy.entries = list(entries) + [entry for entry in copy.entries
                                             if entry.seq > newest]
+            copy.since = after
             # Everything numbered after `known` reached the subscriber unbroken, and
             # the reply holds everything up to at least `known`, so the two together
             # miss nothing -- unless the run began after `known`.
             copy.trusted = (self._run_from is not None and self._run_from <= known + 1
                             and self._owns(handle))
             return [entry for entry in copy.entries if entry.seq > after]
+
+    def summary(self, handle: Handle) -> JobSummary:
+        """Where that job has got to, in one small request. A daemon from before
+        `summary` answers `unknown-command`, and the summary is then worked out from the
+        job's history as a follower did before (`summarize`)."""
+        self._ensure_connected()
+        try:
+            return self._request("summary", handle=handle)  # type: ignore[return-value]
+        except DaemonRefused as exc:
+            if exc.kind == "unknown-command":
+                return summarize(handle, self.events(handle, 0))
+            if exc.kind == "refused" and self._session and handle.owner \
+                    and handle.owner != self._session:
+                raise StaleHandle(str(exc)) from None
+            raise
 
     def stop(self, reason: str = "stopped by the operator", *, by: str = "",
              client: str = "") -> None:
@@ -689,8 +859,35 @@ class RemoteOwner:
         return not handle.owner or handle.owner == self._session
 
     def _fetch(self, handle: Handle, after: int) -> tuple[Progress, ...]:
+        """That job's events after `after`, a page of `EVENTS_PAGE` at a time. Two
+        `BatchSeen`s that meet where one page ends and the next begins are one entry, as
+        the daemon keeps them: the second replaced the first between the two requests."""
+        found: list[Progress] = []
+        while self._paging:
+            try:
+                page = self._fetch_page(handle, after, EVENTS_PAGE)
+            except DaemonRefused as exc:
+                if exc.kind != "bad-request" or "limit" not in str(exc):
+                    raise
+                self._paging = False
+                break
+            full = len(page) >= EVENTS_PAGE
+            if (found and page and isinstance(found[-1].event, BatchSeen)
+                    and isinstance(page[0].event, BatchSeen)):
+                found[-1] = page[0]
+                page = page[1:]
+            found.extend(page)
+            if not full:
+                return tuple(found)
+            after = found[-1].seq
+        return (*found, *self._fetch_page(handle, after, None))
+
+    def _fetch_page(self, handle: Handle, after: int,
+                    limit: int | None) -> tuple[Progress, ...]:
         try:
-            return self._request("events", handle=handle, after=after)  # type: ignore[return-value]
+            if limit is None:
+                return self._request("events", handle=handle, after=after)  # type: ignore[return-value]
+            return self._request("events", handle=handle, after=after, limit=limit)  # type: ignore[return-value]
         except DaemonRefused as exc:
             if exc.kind == "refused" and self._session and handle.owner \
                     and handle.owner != self._session:

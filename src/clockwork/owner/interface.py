@@ -1,7 +1,8 @@
 """The owner protocol: what a front end may ask of whoever owns the hardware.
 
 Five calls and a shutdown. `submit` a job and get a `Handle`; read that job's progress
-with `events(handle, after)`; `stop` the run in flight; ask for the `snapshot` the next
+with `events(handle, after)`, and where it has got to with `summary(handle)`, whose size
+does not grow with the job; `stop` the run in flight; ask for the `snapshot` the next
 run will be stamped with and the `status` of the whole owner. Three more are a person's
 at the window and nobody else's: `pause` and `resume` a running series, and `note`
 (`clockwork.owner.hold`). A front end that holds an
@@ -25,11 +26,11 @@ an old line go, both of which it does for the reason the window's mailbox does.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, replace
 from typing import Protocol
 
-from ..acq import BeamGuard, Event, Run, Snapshot
+from ..acq import BatchSeen, BeamGuard, Event, Run, Snapshot
 from ..mips import BoxState, Discovery
 from .hold import POINT, Guarding, Hold
 from .jobs import Armed, ConsoleStatus, Job
@@ -45,6 +46,7 @@ __all__ = [
     "JobFailed",
     "JobFinished",
     "JobStarted",
+    "JobSummary",
     "LogsOpened",
     "Noted",
     "Owner",
@@ -58,6 +60,7 @@ __all__ = [
     "Said",
     "StaleHandle",
     "StopAsked",
+    "summarize",
 ]
 
 
@@ -142,6 +145,11 @@ class Owner(Protocol):
     def events(self, handle: Handle, after: int = 0) -> list[Progress]:
         """That job's progress numbered after `after`, oldest first; empty if none.
         `StaleHandle` for a handle another owner issued."""
+        ...
+
+    def summary(self, handle: Handle) -> JobSummary:
+        """Where that job has got to (`JobSummary`), empty for a job whose progress was
+        let go. `StaleHandle` for a handle another owner issued."""
         ...
 
     def stop(self, reason: str = "stopped by the operator", *, by: str = "",
@@ -446,3 +454,63 @@ class BoxStateRead(Event):
     @property
     def text(self) -> str:
         return f"{self.box} read back"
+
+
+# -- where a job has got to ---------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class JobSummary:
+    """Where one job has got to, in a form whose size does not grow with the job.
+
+    What a follower otherwise read off the job's whole history on every call: the job as
+    it started, the runs it has finished, the scans the frame in flight has published,
+    the point a series is on, and the event that ended it. Read that way, one `progress`
+    from a new process cost the daemon its whole history, encoded on the loop that also
+    serves the acquisition, and a follower that asked every few seconds dropped
+    repetitions for the gate guard and starved the window's `status` (lab #25, lab #27;
+    lab record, task 170). A follower now reads this and the events after its last
+    number, and never needs `events` from 0.
+
+    The owner keeps it as each event arrives, so `runs_done` counts every run even after
+    the oldest entries of a long job's history have been let go.
+    """
+
+    handle: Handle
+    last: int = 0
+    """The number of the job's newest event, 0 before its first."""
+    job: Job | None = None
+    """The job as its `JobStarted` carried it; None until it starts."""
+    runs_done: int = 0
+    """How many `RunDone` events the job has reported."""
+    scans_so_far: int = 0
+    """The newest `BatchSeen.scans_so_far`: what the console frame in flight has
+    published, 0 before the first batch."""
+    point: PointStarted | None = None
+    """The newest `PointStarted` of a series, None for any other job."""
+    ended: Event | None = None
+    """The `JobFinished` or `JobFailed` that ended the job, None while it runs."""
+
+    def after(self, seq: int, event: Event) -> JobSummary:
+        """This summary with event number `seq` taken in."""
+        if isinstance(event, BatchSeen):
+            return replace(self, last=seq, scans_so_far=event.scans_so_far)
+        if isinstance(event, JobStarted):
+            return replace(self, last=seq, job=event.job)
+        if isinstance(event, RunDone):
+            return replace(self, last=seq, runs_done=self.runs_done + 1)
+        if isinstance(event, PointStarted):
+            return replace(self, last=seq, point=event)
+        if isinstance(event, (JobFinished, JobFailed)):
+            return replace(self, last=seq, ended=event)
+        return replace(self, last=seq)
+
+
+def summarize(handle: Handle, entries: Iterable[Progress]) -> JobSummary:
+    """A `JobSummary` worked out from a job's history, for an owner that keeps none: a
+    daemon from before `summary`. Undercounts `runs_done` where the history has let its
+    oldest entries go, which a kept summary does not."""
+    summary = JobSummary(handle=handle)
+    for entry in entries:
+        summary = summary.after(entry.seq, entry.event)
+    return summary

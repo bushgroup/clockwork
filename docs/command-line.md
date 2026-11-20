@@ -109,7 +109,10 @@ session restarted while its series runs all leave the same record as a run that 
 separately. `progress --job N --follow` follows a job from any process, the one that started it or
 not: it writes one compact JSON line per event as the events arrive and a last line with the
 answer, which lists the files the run wrote under `runs`. `progress --job N` without `--follow`
-answers once, after waiting up to `--wait-s` seconds for news, exactly as the tool does.
+answers once, after waiting up to `--wait-s` seconds for news, exactly as the tool does. Either
+way, each answer costs the daemon the events after `--after` and a summary of the job, never the
+job's whole history, so a new `progress` process every few seconds disturbs the acquisition no
+more than one `--follow` does. Pass the `last` of one answer as `--after` to the next.
 
 A person at the window can pause a series that a verb started, and only a person at the window
 resumes or stops it. `acquire`, `series` and `progress --follow` keep following through a pause:
