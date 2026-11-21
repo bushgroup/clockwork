@@ -7,7 +7,8 @@ surface that made it (`mcp` or `cli`; lab record, task 73). A person
 who was away reads what was done from it, `list_files` reads the words of each request
 back from it, since a file stamps only the request's id (lab record, task 69), and
 `status` counts a daemon session's acquisitions from it: the accepted `acquire` lines,
-and each accepted `series` line's count of acquisitions (lab record, tasks 71 and 91).
+and each started `series` line's count of acquisitions, a check's never (lab record, tasks
+71 and 91; lab #31). A run started at the window writes no line here and is not counted.
 A send the limits refuse is a failed call, and its line carries the refusal verbatim as
 its error.
 
@@ -167,8 +168,9 @@ class AuditLog:
                 handle.write(text + "\n")
 
     def acquisitions(self, session: str) -> int:
-        """How many acquisitions were accepted in daemon session `session`: one per
-        `acquire` call, and a `series` call's `acquisitions`, one per point."""
+        """How many acquisitions the MCP and command-line surfaces started in daemon
+        session `session`: one per `acquire` call, and a started `series` call's
+        `acquisitions`, one per point. A `series` check sent nothing and counts none."""
         return sum(self.acquisitions_by(session).values())
 
     def acquisitions_by(self, session: str) -> dict[str, int]:
@@ -176,7 +178,10 @@ class AuditLog:
 
         The count is the daemon session's, whichever surface made them: an agent's
         session reading its own count had no way to see that one was a
-        `clockwork routine` at a terminal (lab record, task 96)."""
+        `clockwork routine` at a terminal (lab record, task 96). A `series` line made with
+        `check` true, or whose result says `sent: false`, is a check: it carries the
+        acquisitions the plan would make and made none, so it is skipped (lab #31; the
+        same test `check_for` makes). A window's runs write no line and are not here."""
         counts: dict[str, int] = {}
         if not session:
             return counts
@@ -187,7 +192,12 @@ class AuditLog:
             if line.get("tool") == "acquire":
                 counts[surface] = counts.get(surface, 0) + 1
             elif line.get("tool") == "series":
-                spent = (line.get("result") or {}).get("acquisitions")
+                arguments = line.get("arguments")
+                result = line.get("result") or {}
+                if ((isinstance(arguments, Mapping) and arguments.get("check") is True)
+                        or result.get("sent") is False):
+                    continue
+                spent = result.get("acquisitions")
                 counts[surface] = counts.get(surface, 0) + (
                     spent if isinstance(spent, int) and spent > 0 else 1)
         return counts

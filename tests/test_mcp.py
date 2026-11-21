@@ -559,6 +559,19 @@ def test_the_acquisition_count_is_the_daemon_sessions_and_says_which_surface_mad
     assert reader.acquisitions_by("") == {}
 
 
+def test_a_series_check_counts_no_acquisitions(tmp_path):
+    """Two checks and the series they cleared read 41 at the rc18 sitting, 3 + 19 + 19
+    (lab #31): a check's line carries the acquisitions the plan would make and made none."""
+    log = AuditLog(str(tmp_path / LOG_NAME), via="mcp")
+    log.session = "day"
+    for arguments, result in (({"check": True}, {"sent": False, "acquisitions": 3}),
+                              ({"check": True}, {"sent": False, "acquisitions": 19}),
+                              ({}, {"sent": False, "acquisitions": 2}),
+                              ({"check": False}, {"job": 7, "acquisitions": 19})):
+        log.write(tool="series", arguments=arguments, seconds=0.1, result=result)
+    assert log.acquisitions_by("day") == {"mcp": 19}
+
+
 def _calls(log: AuditLog, *made: tuple[str, dict | None, dict]) -> None:
     for tool, request, result in made:
         log.write(tool=tool, arguments={}, seconds=0.1, result=result, request=request)

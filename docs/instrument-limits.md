@@ -187,9 +187,12 @@ Before `arm` or `acquire` submits a job, the server refuses:
 `render_template` and `validate_method` report items 3 to 6 under `limits` rather than clamping a
 value into range, so an agent learns why a choice would be refused before it tries to send it. A
 refused `arm` or `acquire` is a failed call, and the audit log in the output directory records
-the refusal word for word as its error. `status` reports how many acquisitions the daemon session
-has made, by surface, under `session`: `mcp` for the MCP server and `cli` for the command line,
-so a `clockwork routine` typed at the instrument PC during an agent's series is told apart. The
+the refusal word for word as its error. `status` reports how many acquisitions the MCP server and
+the command line have started in the daemon session, by surface, under `session`: `mcp` for the
+MCP server and `cli` for the command line, so a `clockwork routine` typed at the instrument PC
+during an agent's series is told apart. The count is read from the audit log. A series checked
+with `check` and not started adds nothing to it, and a run started at the window is not in it,
+since the window writes no line there; that run's record names the window as its source. The
 count bounds nothing.
 
 ## The electrodes

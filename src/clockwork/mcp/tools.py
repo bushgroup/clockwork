@@ -1024,9 +1024,11 @@ class Toolbox:
         """The instrument as the server sees it: simulated or real, the console, the
         boxes, the job running and those queued, the method the boxes were last armed
         with and the stem that arming named, whether sends through this server are refused and why,
-        the limits in force, and how many acquisitions this daemon session has made.
-        The count is the daemon session's, not this server's: `acquisitions_by` says
-        how many each surface made, `cli` being the command line's. Under `limits`,
+        the limits in force, and how many acquisitions the MCP server and the command
+        line have started in this daemon session. The count is the daemon session's, not
+        this server's: `acquisitions_by` says how many each surface started, `cli` being
+        the command line's; a `series` check started nothing and is not counted, and nor
+        is a run a person started at the window, whose run record says so. Under `limits`,
         `project` is the project's limits combined into the standing ones, and
         `project_templates` the entries they added or narrowed; `hand_written` is
         whether a hand-written method may be sent, which it may where the limits bound
