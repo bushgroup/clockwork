@@ -218,10 +218,15 @@ about the sample and source, are stamped into every file acquired from that armi
 
 `acquire` answers at once with a job number, and `progress` follows it. Pass the `last` number of
 one answer as `after` in the next to read only what is new. `progress` waits up to `wait_s`
-seconds, 10 by default and never more than 30, and answers early only when something other than
-the scan counter happens, so a session following a run makes one call every several seconds
-rather than asking continuously; `wait_s: 0` answers at once. The events are the loop's own, each
-with a line of text, and the scan counter appears only at its latest value, as it does in the
+seconds, 10 by default and never more than 30. It waits through the events every repetition
+makes (a frame begun and ended, a string sent to a box and the box's reply, the gate check, the
+scan counter) and the bookkeeping around each file (its logs opened, the pusher period checked,
+its fold begun), and answers early when anything else happens: a file or point starting or
+ending, a fold finishing, the job's end, a pause, the beam guard, a note, a retry or a warning.
+A session following a run therefore makes two or three calls a file and one every `wait_s`
+between them, rather than one for every repetition; `wait_s: 0` answers at once. Every answer holds every event since `after`,
+whether it came early or at `wait_s`. The events are the loop's own, each with a line of text,
+and between other events the scan counter appears only at its latest value, as it does in the
 window's run log. Every answer carries `position`: the files done, the files asked for, and the
 scans the frame in progress has published. When the job ends, `done` is true and the answer lists
 each file the run wrote under `runs`, with any failed frame and the reason, or says why the job

@@ -118,6 +118,14 @@ way, each answer costs the daemon the events after `--after` and a summary of th
 job's whole history, so a new `progress` process every few seconds disturbs the acquisition no
 more than one `--follow` does. Pass the `last` of one answer as `--after` to the next.
 
+A follower asks at the pace of the files, not of the repetitions. `progress` waits through the
+events each repetition makes, and through the bookkeeping around each file, and answers when a
+file or point starts or ends, a fold finishes, the job ends, a person pauses it or arms the beam
+guard, a note arrives, or 30 seconds pass. `--follow`, and an `acquire` or `series` waiting to its
+end, therefore asks two or three times a file and once every 30 seconds between, with one line
+in the audit log each time. Each repetition's events still all
+arrive, in order, in the next answer.
+
 A person at the window can pause a series that a verb started, and only a person at the window
 resumes or stops it. `acquire`, `series` and `progress --follow` keep following through a pause:
 they say once on standard error who paused the job and since when, and then ask again every 30

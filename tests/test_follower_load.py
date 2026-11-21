@@ -8,19 +8,45 @@ task 170). These tests hold a daemon to three things: a job's `summary` is cheap
 right however long the job; an `events` reply of a full-cap history holds no other
 thread of the daemon's process for long, and delays no other request; and the window
 tells a daemon that is busy from one that has gone.
+
+A follower in one long-lived process then asked several times a second, once for every
+event a repetition makes (lab record, task 173). The last tests hold `progress` to a
+pace: it waits through a repetition's own events, answers at once on anything else, and
+loses none.
 """
 
 from __future__ import annotations
 
+import io
+import json
 import threading
 import time
+from dataclasses import dataclass
 
 import numpy as np
 import pytest
 import zmq
 
-from clockwork.acq import BatchSeen, FrameBegun, FrameEnded, PhaseSent
+from clockwork.acq import (
+    BatchSeen,
+    BeamLost,
+    BoxSaid,
+    Event,
+    Folded,
+    Folding,
+    FrameBegun,
+    FrameEnded,
+    GateChecked,
+    PhaseSent,
+    PusherPeriodChecked,
+    Retried,
+    RunBegun,
+    Warned,
+)
 from clockwork.acq.wire import Batch
+from clockwork.mcp.audit import AuditLog
+from clockwork.mcp.cli import _follow
+from clockwork.mcp.tools import Toolbox
 from clockwork.owner import (
     Discover,
     Handle,
@@ -28,6 +54,7 @@ from clockwork.owner import (
     JobStarted,
     JobSummary,
     LocalOwner,
+    LogsOpened,
     PointStarted,
     Progress,
     RunDone,
@@ -35,7 +62,15 @@ from clockwork.owner import (
     StaleHandle,
     wire,
 )
-from clockwork.owner.interface import summarize
+from clockwork.owner.interface import (
+    GuardChanged,
+    Held,
+    Noted,
+    PauseAsked,
+    Resumed,
+    StopAsked,
+    summarize,
+)
 from clockwork.owner.remote import (
     _COMMANDS,
     EVENTS_PAGE,
@@ -339,3 +374,142 @@ def test_a_daemon_from_before_limit_is_asked_for_the_whole_history_once(long_job
     finally:
         _COMMANDS["events"] = DaemonServer._events
     assert len(read) == LIMIT and len(again) == 9
+
+
+# -- the pace ------------------------------------------------------------------------
+#
+# A follower answered on every event of a `per_repetition` run asked the serve several
+# times a second, four round trips each, and wrote an audit line each time: thousands a
+# series (lab record, task 173). `progress` waits through a repetition's own events and
+# answers on anything else.
+
+
+def _repetition(owner: LocalOwner, handle: Handle, number: int) -> None:
+    """One repetition's events, in the loop's order."""
+    owner._report(FrameBegun(method_frame=1, repetition=number, frame_number=number,
+                             of=100), handle)
+    owner._report(wire.example(PhaseSent), handle)
+    owner._report(wire.example(BoxSaid), handle)
+    owner._report(wire.example(BatchSeen), handle)
+    owner._report(wire.example(GateChecked), handle)
+    owner._report(wire.example(FrameEnded), handle)
+
+
+@pytest.fixture
+def paced(tmp_path):
+    """A job that has started, on an owner that is never started, and a toolbox on it
+    whose audit log is in `tmp_path`."""
+    owner = LocalOwner(fake=True)
+    handle = owner.submit(Discover())  # never runs: the owner is not started
+    owner._report(JobStarted(handle=handle, job=Discover()), handle)
+    toolbox = Toolbox(owner, output=str(tmp_path),
+                      log=AuditLog.beside(str(tmp_path), via="test"))
+    return owner, handle, toolbox
+
+
+def _feeding(work) -> threading.Thread:
+    thread = threading.Thread(target=work, name="test feeder")
+    thread.start()
+    return thread
+
+
+def test_progress_waits_through_a_repetitions_events_and_returns_every_one(paced):
+    """A repetition's own events, and the bookkeeping a file does around its runs."""
+    owner, handle, toolbox = paced
+    after = owner.events(handle)[-1].seq
+
+    def feed() -> None:
+        owner._report(wire.example(LogsOpened), handle)
+        owner._report(wire.example(PusherPeriodChecked), handle)
+        for number in range(1, 11):
+            _repetition(owner, handle, number)
+            time.sleep(0.03)
+        owner._report(wire.example(Folding), handle)
+
+    feeder = _feeding(feed)
+    began = time.monotonic()
+    answer = toolbox.call("progress", {"job": handle.id, "after": after, "wait_s": 1.0})
+    took = time.monotonic() - began
+    feeder.join()
+    assert took >= 0.9, f"answered after {took:.2f} s, on a repetition's own event"
+    seqs = [event["seq"] for event in answer["events"]]
+    assert seqs == list(range(after + 1, after + 64))
+    assert answer["last"] == seqs[-1]
+
+
+@pytest.mark.parametrize("kind", [
+    Said, Noted, GuardChanged, Held, PauseAsked, Resumed, StopAsked, Warned, Retried,
+    BeamLost, RunBegun, RunDone, PointStarted, Folded])
+def test_anything_but_a_repetitions_own_events_answers_at_once(paced, kind):
+    owner, handle, toolbox = paced
+    after = owner.events(handle)[-1].seq
+
+    def feed() -> None:
+        for number in range(1, 4):
+            _repetition(owner, handle, number)
+            time.sleep(0.03)
+        owner._report(wire.example(kind), handle)
+
+    feeder = _feeding(feed)
+    began = time.monotonic()
+    answer = toolbox.call("progress", {"job": handle.id, "after": after, "wait_s": 10})
+    took = time.monotonic() - began
+    feeder.join()
+    assert took < 2.0, f"a {kind.__name__} waited {took:.2f} s for its answer"
+    kinds = [event["kind"] for event in answer["events"]]
+    assert kinds[-1] == kind.__name__ and len(kinds) == 19
+
+
+def test_an_event_of_a_kind_progress_has_not_met_answers_at_once(paced):
+    """The list is of what may wait; a new kind of event is not on it."""
+
+    @dataclass(frozen=True)
+    class Unheard(Event):
+        pass
+
+    owner, handle, toolbox = paced
+    after = owner.events(handle)[-1].seq
+    feeder = _feeding(lambda: (time.sleep(0.1), owner._report(Unheard(), handle)))
+    began = time.monotonic()
+    answer = toolbox.call("progress", {"job": handle.id, "after": after, "wait_s": 10})
+    feeder.join()
+    assert time.monotonic() - began < 2.0
+    assert [event["kind"] for event in answer["events"]] == ["Unheard"]
+
+
+def test_a_follower_asks_a_few_times_a_file_and_misses_no_event(paced, tmp_path):
+    """`progress --follow` over three files of twenty repetitions, each begun and ended as
+    the loop does: at most three answers a file (its `RunBegun`, its `Folded` and its
+    `RunDone`), each an audit line, and every event that is not the scan counter, in
+    order."""
+    owner, handle, toolbox = paced
+    files, repetitions = 3, 20
+
+    def feed() -> None:
+        for _ in range(files):
+            for began in (LogsOpened, PusherPeriodChecked, RunBegun):
+                owner._report(wire.example(began), handle)
+                time.sleep(0.02)
+            for number in range(1, repetitions + 1):
+                _repetition(owner, handle, number)
+                time.sleep(0.025)
+            for ended in (wire.example(Folding), wire.example(Folded), RunDone(run=_run())):
+                owner._report(ended, handle)
+                time.sleep(0.02)
+        owner._report(JobFinished(handle=handle, job=Discover(), result=None), handle)
+
+    out, err = io.StringIO(), io.StringIO()
+    feeder = _feeding(feed)
+    code = _follow(toolbox, {"job": handle.id}, out, err, "clockwork")
+    feeder.join()
+    assert code == 0, err.getvalue()
+    printed = [json.loads(line) for line in out.getvalue().splitlines()]
+    seqs = [line["seq"] for line in printed if "seq" in line]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+    wanted = [entry.seq for entry in owner.events(handle)
+              if not isinstance(entry.event, BatchSeen)]
+    assert set(wanted) <= set(seqs)
+    calls = [line for line in AuditLog.beside(str(tmp_path)).lines()
+             if line["tool"] == "progress"]
+    # Before task 173 this was one call every 50 ms poll, about 40.
+    assert len(calls) <= 3 * files + 2, [line["result"] for line in calls]

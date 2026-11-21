@@ -75,7 +75,22 @@ from .. import manifest as manifest_module
 from .. import method as method_module
 from .. import routine as routine_module
 from .. import series as series_module
-from ..acq import BatchSeen, Event, Run, Snapshot, Warned, cautions, refusals
+from ..acq import (
+    BatchSeen,
+    BoxSaid,
+    Event,
+    Folding,
+    FrameBegun,
+    FrameEnded,
+    GateChecked,
+    PhaseSent,
+    PusherPeriodChecked,
+    Run,
+    Snapshot,
+    Warned,
+    cautions,
+    refusals,
+)
 from ..acq.standing import RampStepped, StandDownDone
 from ..acq.uimf import RAW_SUFFIX, SUMMED_SUFFIX
 from ..app import methodlib
@@ -95,6 +110,7 @@ from ..owner import (
     JobFailed,
     JobFinished,
     JobStarted,
+    LogsOpened,
     PointStarted,
     Progress,
     ReadState,
@@ -150,6 +166,16 @@ PROGRESS_WAIT_MAX_S = 30.0
 """`progress` waits up to its `wait_s` for something new, never past this (Matt,
 2026-09-23): a session following a run makes one call every several seconds rather
 than spinning, and still hears about a finished run within one call."""
+ROUTINE = (BatchSeen, BoxSaid, PhaseSent, FrameBegun, FrameEnded, GateChecked,
+           LogsOpened, PusherPeriodChecked, Folding)
+"""The events `progress` waits through rather than answer on: a repetition's own, and
+the bookkeeping each file does at its start and end beside the file's own `RunBegun`
+and `Folded`.
+
+A `per_repetition` run makes several every repetition, and a follower answered on each
+asked the serve several times a second and wrote a line in the audit log each time (lab
+record, task 173). The list is what a progress call may hold back; anything not on it,
+a new kind of event included, answers at once."""
 
 ROUTINE_WAIT_S = 3600.0
 """How long `run_routine` waits for its acquisition before judging it could not judge.
@@ -875,9 +901,13 @@ class Toolbox:
         """What a job has done since event number `after`, waiting up to `wait_s` for news.
 
         Pass the `last` number of one answer as `after` in the next to read only what is
-        new. The call waits through the scan counter's ticks and answers when something
-        else happens or `wait_s` runs out (capped at 30 s; 0 answers at once), with the
-        counter's latest value only. `position` says how many files are done of how many
+        new. The call waits through a repetition's own events (frames begun and ended,
+        strings sent to the boxes and their replies, gate checks, the scan counter's
+        ticks) and a file's bookkeeping (its logs opened, the pusher period checked, the
+        fold begun), and answers when anything else happens, such as a file or point
+        starting or ending, or when `wait_s` runs out (capped at 30 s; 0 answers at once).
+        Either way it returns every event since `after`, the scan counter at its latest
+        value between other events. `position` says how many files are done of how many
         were asked for and how many scans the frame in progress has published. `done` is
         true once the job has finished or failed, whatever `after` is; a finished
         acquisition lists its files under `runs`, and a failed job says why under `failed`.
@@ -913,7 +943,7 @@ class Toolbox:
                 fresh = self._wait(handle, seen, max(0.0, deadline - time.monotonic()))
                 entries += fresh
                 if (not fresh or time.monotonic() >= deadline
-                        or any(not isinstance(entry.event, BatchSeen) for entry in fresh)):
+                        or any(not isinstance(entry.event, ROUTINE) for entry in fresh)):
                     break
             # The summary, not the whole history: a follower in a new process every few
             # seconds asked the daemon for all of it each time, and a long series' reply
@@ -944,11 +974,12 @@ class Toolbox:
         }
         if isinstance(started, SeriesJob):
             answer["series"] = _series_progress(started, kept.point)
-        hold = self._hold()
+        # One `status` for the pause and the guard: each is a round trip to the serve.
+        now = self.owner.status()  # type: ignore[attr-defined]
+        hold = getattr(now, "hold", None)
         if hold is not None and hold.job == job:
             answer["paused"] = _paused(hold)
-        answer["beam_guard"] = _guarded(getattr(self.owner.status(),  # type: ignore[attr-defined]
-                                                "guard", None))
+        answer["beam_guard"] = _guarded(getattr(now, "guard", None))
         # Off the summary, not the events after `after`: a job asked about past its end
         # -- `after` its last number, or any number larger -- answered `done: false` for
         # ever, with nothing running (on the rack, 2026-09-28; lab record, task 96).
