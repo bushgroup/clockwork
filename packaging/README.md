@@ -110,6 +110,12 @@ wording -- carries no promise.
   number, `X.Y.Zrc(N+1).dev0`, since PEP 440 orders `X.Y.Z.devN` below every `X.Y.ZrcN` and a
   development build must never sort below the candidate it follows (`1.1.0rc2.dev0` after
   `1.1.0rc1`); the stable release that ends the series moves it to `X.(Y+1).0.dev0` as usual.
+- **When the next minor's work must land before a candidate series ends**, `main` moves straight
+  to `X.(Y+1).0.dev0` after the candidate instead, and any later candidate and the stable release
+  are cut by the same steps on a `release/X.Y.x` branch made from the last candidate's tag when
+  one is needed, carrying only that series' fixes. Its first commit moves it to the next
+  candidate's development number, and the stable release cut there moves `main` nowhere, since
+  `main` is already past it (`1.3.0.dev0` after `1.2.1rc1`).
 - **A pushed tag is never moved or deleted.** A mistake in a release is fixed by the next patch
   or candidate number.
 
