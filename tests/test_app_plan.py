@@ -51,6 +51,27 @@ def test_a_file_counts_against_its_own_point_whatever_order_the_events_arrive_in
     assert [point.state for point in series.points] == ["failed", SKIPPED]
 
 
+def test_the_caption_names_the_point_in_flight_as_the_serve_said_it():
+    """Lab #30: where the followed list and the serve's `PointStarted` disagree, the caption
+    gives the event's number, planned index and knobs; the files are still the list's."""
+    from clockwork.app.planpanel import FollowedPoint, FollowedSeries
+    from clockwork.owner import PointStarted
+
+    series = FollowedSeries(label="a series", started_by="Claude", points=[
+        FollowedPoint(index=1, knobs={}, reference="start", minutes=1.0),
+        FollowedPoint(index=12, knobs={"amplitude_v": 46}, minutes=1.0),
+        FollowedPoint(index=6, knobs={"amplitude_v": 22}, minutes=1.0),
+        FollowedPoint(index=12, knobs={"amplitude_v": 46}, minutes=1.0)])
+    said = PointStarted(index=2, position=4, number=4, points=19,
+                        knobs={"amplitude_v": 6}, replicates=1)
+    series.point_started(4, said=said)
+    assert "point 4 of 19 (planned 2), amplitude_v 6, file 1 of 1" in series.caption
+    assert series.points[3].state == "running"
+    series.point_started(3)
+    assert "point 3 of 4 (planned 6), amplitude_v 22" in series.caption, \
+        "with no event for the point in flight, the list's own words"
+
+
 def test_a_plan_opened_at_the_window_shows_its_check_runs_and_is_followed(
         window, qtbot, tmp_path):  # noqa: F811
     library = tmp_path / "library"

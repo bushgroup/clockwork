@@ -2219,9 +2219,17 @@ class MainWindow(QMainWindow):
         self.run_panel.filter_to(series.tag if only and series is not None else None)
 
     def _follow_series(self, job: SeriesJob) -> None:
-        """A series has started, whoever started it: the followed table is its (R5)."""
-        self.followed = FollowedSeries.of(job, self.worker.origin(job),
-                                          tag=self.run_panel.job_tag)
+        """A series has started, whoever started it: the followed table is its (R5).
+
+        Another client's series, this window's own from before it was reopened among
+        them, says in the run log the order the table was built in, as planned indices,
+        for a sitting to set beside the record's `order` (lab #30)."""
+        origin = self.worker.origin(job)
+        self.followed = FollowedSeries.of(job, origin, tag=self.run_panel.job_tag)
+        if origin:
+            order = ", ".join(str(point.index) for point in self.followed.points)
+            self.run_panel.say(f"following {job.label}: {len(self.followed.points)} "
+                               f"points in the order acquired, as planned indices: {order}")
         self.follow.follow(self.followed)
         if self.follow.only.isChecked():
             self._filter_run_log(True)
@@ -2376,7 +2384,7 @@ class MainWindow(QMainWindow):
             if followed is not None and not followed.ended and isinstance(
                     event, (PointStarted, Warned, RecordBegun)):
                 if isinstance(event, PointStarted):
-                    followed.point_started(event.number, event.retake)
+                    followed.point_started(event.number, event.retake, said=event)
                     if self._own_queue_running():
                         self.queue.point_started(event.number, event.retake)
                         self.queue_panel.refresh()

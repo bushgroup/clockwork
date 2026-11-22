@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
 
 from ..method.template import format_number
 from ..owner.hold import Hold
+from ..owner.interface import PointStarted
 from ..planning import Checked
 
 __all__ = ["DONE", "FAILED", "HELD", "RUNNING", "SKIPPED", "STOPPED", "WAITING",
@@ -283,6 +284,10 @@ class FollowedSeries:
     hold: Hold | None = None
     """A person's pause on the series, asked for or in force, off its `PauseAsked` and
     `Held`; None once it is resumed, stopped or over (lab record, task 167)."""
+    said: PointStarted | None = None
+    """The newest `PointStarted` drained: the caption names the point in flight as the
+    serve said it, its number, planned index and knobs, not as `points` holds them
+    (lab #30)."""
 
     @property
     def held_at(self) -> int | None:
@@ -330,13 +335,16 @@ class FollowedSeries:
     def point(self) -> FollowedPoint | None:
         return self.points[self.current] if self.current is not None else None
 
-    def point_started(self, number: int, retake: int = 0) -> None:
+    def point_started(self, number: int, retake: int = 0,
+                      said: PointStarted | None = None) -> None:
         """Point `number` (its place in the order acquired, from 1) has begun; the one
         before it, if still running, ended with every file it was asked for. A retake,
-        after the beam guard ended one of its files, begins its files again."""
+        after the beam guard ended one of its files, begins its files again. `said` is
+        the event itself, which the caption reads."""
         if (self.point is not None and self.point.state == RUNNING
                 and self.current != number - 1):
             self.point.state = DONE
+        self.said = said
         if 1 <= number <= len(self.points):
             self.current = number - 1
             point = self.points[self.current]
@@ -415,8 +423,15 @@ class FollowedSeries:
         point = self.point
         where = "between points"
         if point is not None:
-            where = (f"point {self.current + 1} of {len(self.points)} (planned "
-                     f"{point.index}), {point.what}, file "
+            said = self.said
+            if said is not None and said.number == self.current + 1:
+                # The serve's own words for the point in flight (lab #30).
+                number, count, index = said.number, said.points, said.index
+                what = said.name or knob_text(said.knobs, said.reference)
+            else:
+                number, count, index = self.current + 1, len(self.points), point.index
+                what = point.what
+            where = (f"point {number} of {count} (planned {index}), {what}, file "
                      f"{min(point.files + 1, point.replicates)} of {point.replicates}")
         paused = f"; {self.hold.text}" if self.hold is not None else ""
         return (f"{head}: {where}; about {_minutes(self.minutes_left)} minutes left"
@@ -434,6 +449,8 @@ class SeriesFollow(QWidget):
         self.series: FollowedSeries | None = None
         self.caption = QLabel("")
         self.caption.setWordWrap(True)
+        # Selectable, so a sitting copies it rather than typing it as it changes (lab #30).
+        self.caption.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.tree = QTreeWidget()
         self.tree.setColumnCount(len(FOLLOW_HEADINGS))
         self.tree.setHeaderLabels(list(FOLLOW_HEADINGS))

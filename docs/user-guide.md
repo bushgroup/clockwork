@@ -552,7 +552,10 @@ The table under the two entries follows any series, started here or by an agent:
 state, in the order acquired, with the point in flight in bold, how many of its files are done,
 its minutes and how many warnings the run log gave while it ran. The line above it says who started
 the series, the point in flight with its knob values and which of its files is being acquired, and
-about how many minutes are left. Only a point that **failed**, was **stopped**, was **skipped** or
+about how many minutes are left; it can be selected and copied. When the window follows a series
+another client started, including one this window started before it was closed and opened again,
+the run log lists the points by planned index in the order acquired, the same list as the run
+record's `order`. Only a point that **failed**, was **stopped**, was **skipped** or
 is **held** is coloured. Tick **Show only this series in the run log** to hide every other job's
 lines, and untick it to see them again.
 
