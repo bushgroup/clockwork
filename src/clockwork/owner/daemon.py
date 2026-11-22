@@ -194,6 +194,8 @@ def _run(log: logging.Logger, *, fake: bool, output: str, library: str, console:
         log.error("%s", owner.refused)
         return 1
     owner.limits = sitting.limits
+    # A rehearsal under the instrument's document runs at the instrument's pusher.
+    owner.fake_pusher_period_us = sitting.instrument.pusher_period_us
 
     if not fake and clear_port:
         _clear_console_port(log)

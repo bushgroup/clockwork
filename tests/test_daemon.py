@@ -27,6 +27,8 @@ import zmq
 from clockwork import instrument as instrument_module
 from clockwork import method as method_module
 from clockwork.acq import FakeConsoleProcess, FrameEnded
+from clockwork.acq.fake import INSTRUMENT_PERIOD_SAMPLES
+from clockwork.acq.loop import PERIOD_AGREES, PusherPeriodChecked
 from clockwork.acq.process import Listener, listening_on, listening_pid
 from clockwork.mips import Discovery
 from clockwork.owner import (
@@ -249,6 +251,50 @@ def test_a_remote_owner_discovers_sends_and_acquires_two_replicates(served, tmp_
     log = (tmp_path / "serve.log").read_text(encoding="utf-8")
     assert f"submitted job {handle.id}: acquiring (Acquire)" in log
     assert f"job {handle.id}: acquiring: done" in log
+
+
+def test_a_fake_daemon_s_console_claims_the_pusher_its_instrument_document_declares(
+        tmp_path):
+    """A rehearsal under the instrument's own document is checked against the
+    instrument's pusher, not the stand-in's old 129 us (lab #35): a hand-written method
+    under a 62 us document acquires, and its pusher check agrees."""
+    document = tmp_path / "instrument.toml"
+    document.write_text(
+        "schema_version = 1\n\n[instrument]\nname = \"daemon test\"\n"
+        "pusher_period_us = 62.0\n\n[vertical]\nfull_scale_v = 0.5\n"
+        "offset_v = 0.251\ninverted = false\n", encoding="utf-8")
+    instrument = instrument_module.load(str(document))
+    made = Daemon(tmp_path, instrument=str(document))
+    client = RemoteOwner(made.endpoint, timeout=10)
+    try:
+        method = make_method(accumulations=1)
+        assert isinstance(ended(client, client.submit(Discover(method=method))),
+                          JobFinished)
+        assert wait_for(lambda: client.status().console.state == "ready")
+        assert made.server.owner.console.fake.measured_period_samples == 124_000
+        sent = ended(client, client.submit(Send(method=method, stem="260923_ZZ_001")))
+        assert isinstance(sent, JobFinished), sent
+        handle = client.submit(Acquire(method=method, instrument=instrument,
+                                       stem="260923_ZZ_001", initials="ZZ"))
+        finished = ended(client, handle, timeout=180)
+        assert isinstance(finished, JobFinished), finished
+        [checked] = [entry.event for entry in made.server.owner.events(handle)
+                     if isinstance(entry.event, PusherPeriodChecked)]
+        assert checked.declared_by == "the instrument document"
+        assert checked.measured_us == pytest.approx(62.0)
+        assert checked.verdict == PERIOD_AGREES
+    finally:
+        made.stop(client)
+        client.close()
+
+
+def test_a_fake_daemon_with_no_period_declared_keeps_the_stand_in_s_129_us(served):
+    made, client = served
+    assert isinstance(ended(client, client.submit(Discover(method=make_method()))),
+                      JobFinished)
+    assert wait_for(lambda: client.status().console.state == "ready")
+    assert (made.server.owner.console.fake.measured_period_samples
+            == INSTRUMENT_PERIOD_SAMPLES)
 
 
 def test_the_stream_keeps_the_client_s_copy_and_a_gap_sends_it_back_to_the_record(

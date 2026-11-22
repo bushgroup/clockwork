@@ -337,6 +337,13 @@ class LocalOwner:
         """The limits the sitting carries (`clockwork.sitting`), against which a window
         run's record says which knobs lie outside an agent's range; None for none. Set
         by the daemon from its flags, and read on this owner's thread."""
+        self.fake_pusher_period_us: float | None = None
+        """The pusher period a `--fake` console claims to measure, in microseconds; None
+        for `INSTRUMENT_PERIOD_SAMPLES`'s 129.0036 us. Set by the daemon from the
+        sitting's instrument document (`pusher_period_us`), so that a rehearsal under the
+        instrument's document and limits is checked against the instrument's pusher and
+        not a figure from when the instrument ran another tick (lab #35). Read at each
+        console start; ignored by a real console."""
         self.day: DayRecord | None = None
         """The day record this owner writes its console's starts and stops into, or None
         for none: the daemon's, in its output directory (`clockwork.dayrecord`)."""
@@ -1006,10 +1013,11 @@ class LocalOwner:
         self._set_status(ConsoleStatus(state="starting"))
         if self.fake:
             # Claiming the instrument's pusher, so a dry run of a method rendered for
-            # the instrument's 129 us tick is checked against 129 us and passes, rather
-            # than refused against the stand-in's own 4 us (lab record, task 88).
+            # the instrument's tick is checked against that tick and passes, rather
+            # than refused against the stand-in's own 4 us (lab record, task 88): the
+            # sitting's document's period where it declares one, else 129 us.
             self.console = FakeConsoleProcess(
-                open_batches=1, measured_period_samples=INSTRUMENT_PERIOD_SAMPLES)
+                open_batches=1, measured_period_samples=self._fake_period_samples())
         elif job.command:
             self.console = ConsoleProcess(job.command)
         else:
@@ -1028,6 +1036,14 @@ class LocalOwner:
         self._set_status(self._status_now(seconds))
         self._console_line("started", f"ready in {seconds:.1f} s")
         return self.console_status
+
+    def _fake_period_samples(self) -> int:
+        """The `measured_period_samples` a stand-in console is built with: the sitting's
+        pusher period at the SA220P's 2 GS/s, else `INSTRUMENT_PERIOD_SAMPLES`."""
+        period_us = self.fake_pusher_period_us
+        if period_us is None or period_us <= 0:
+            return INSTRUMENT_PERIOD_SAMPLES
+        return round(period_us * 1e-6 / SECONDS_PER_SAMPLE_2GSPS)
 
     def _hold_fake_frames(self) -> None:
         """Give a stand-in console the instrument's frame hold, on every start: a restart
