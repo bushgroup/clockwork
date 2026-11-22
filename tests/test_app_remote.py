@@ -30,6 +30,7 @@ from clockwork.app.window import MainWindow  # noqa: E402
 from clockwork.app.worker import SERVE, Discover, RemoteWorker  # noqa: E402
 from clockwork.owner import Acquire, Send, StartConsole  # noqa: E402
 from clockwork.owner.remote import RemoteOwner  # noqa: E402
+from test_closed_sitting import rc17  # noqa: E402
 from test_daemon import Daemon, make_instrument, make_method  # noqa: E402
 
 CLAUDE = "Claude, through clockwork mcp"
@@ -131,22 +132,28 @@ def test_no_daemon_and_one_that_exits_names_the_holder(qtbot, tmp_path):
     log = tmp_path / "serve.log"
     log.write_text("2026-09-26 14:02:11 the instrument is already owned by a bench "
                    "script (pid 7)\n", encoding="utf-8")
+    launched: list[Started] = []
     worker = RemoteWorker(endpoint=f"tcp://127.0.0.1:{free_port()}", connect_timeout=0.3,
-                          launch=lambda: Started(code=1), log=str(log))
+                          launch=lambda: launched.append(Started(code=1)) or launched[-1],
+                          log=str(log))
     worker.start()
     try:
-        qtbot.waitUntil(lambda: "bench script" in worker.refused, timeout=10_000)
-        assert worker.spawned is None and worker.hello is None
+        # Opened on no daemon: none started, nothing refused, the next job starts one.
+        qtbot.waitUntil(lambda: worker.absent, timeout=10_000)
+        assert launched == [] and worker.refused == "" and worker.may_start()
         failed = []
         worker.failed_job.connect(lambda job, message: failed.append(message))
         worker.submit(Discover())
         qtbot.waitUntil(lambda: bool(failed), timeout=10_000)
-        assert "bench script" in failed[0]
+        assert len(launched) == 1 and "bench script" in failed[0]
+        assert "bench script" in worker.refused and not worker.absent
+        assert worker.spawned is None and worker.hello is None
     finally:
         ended(worker)
 
 
-def test_the_window_starts_a_daemon_and_follows_its_own_start(qtbot, tmp_path):
+def test_the_window_starts_a_daemon_at_its_first_job_and_follows_its_own_start(
+        qtbot, tmp_path):
     port = free_port()
     endpoint = f"tcp://127.0.0.1:{port}"
     daemons: list[Daemon] = []
@@ -158,21 +165,48 @@ def test_the_window_starts_a_daemon_and_follows_its_own_start(qtbot, tmp_path):
 
     worker = RemoteWorker(endpoint=endpoint, connect_timeout=0.5, launch=launch,
                           poll_s=0.05)
-    connected, started = [], []
+    connected, started, said = [], [], []
     worker.connected.connect(lambda hello, spawned: connected.append(spawned))
     worker.started_job.connect(started.append)
+    worker.said.connect(said.append)
     worker.start()
     try:
+        qtbot.waitUntil(lambda: worker.absent, timeout=10_000)
+        assert daemons == [] and connected == []
+        # The first job starts it. A console start is the daemon's own start-up job, so
+        # it is followed as the daemon's and not submitted a second time.
+        worker.submit(StartConsole(command=""))
         qtbot.waitUntil(lambda: connected == [True], timeout=30_000)
         assert isinstance(worker.spawned, Started) and len(daemons) == 1
-        # The daemon's own start-up console, submitted before this client said hello,
-        # is followed all the same, and named as the daemon's.
         qtbot.waitUntil(lambda: bool(started), timeout=20_000)
         assert worker.origin(started[0]) == SERVE
         qtbot.waitUntil(lambda: worker.console_alive, timeout=20_000)
+        assert worker.status.issued == 1
+        assert any("starts the acquisition console as it starts" in line for line in said)
     finally:
         ended(worker)
         for made in daemons:
+            made.stop()
+
+
+def test_a_worker_that_found_none_joins_one_started_after_it(qtbot, tmp_path):
+    """An agent's warm-up, say, starts the serve after the window opened on none: the
+    window joins it as any join, and is not the one to stop it."""
+    endpoint = f"tcp://127.0.0.1:{free_port()}"
+    worker = RemoteWorker(endpoint=endpoint, connect_timeout=0.3, poll_s=0.05,
+                          rejoin_s=0.2, launch=lambda: pytest.fail("started a serve"))
+    connected: list[bool] = []
+    worker.connected.connect(lambda hello, spawned: connected.append(spawned))
+    worker.start()
+    made: Daemon | None = None
+    try:
+        qtbot.waitUntil(lambda: worker.absent, timeout=10_000)
+        made = Daemon(tmp_path, command=endpoint, events=f"tcp://127.0.0.1:{free_port()}")
+        qtbot.waitUntil(lambda: connected == [False], timeout=20_000)
+        assert worker.spawned is None and not worker.absent and worker.refused == ""
+    finally:
+        ended(worker)
+        if made is not None:
             made.stop()
 
 
@@ -313,16 +347,146 @@ def test_a_window_that_found_a_daemon_scans_and_leaves_it_running(
     assert not made.isVisible() and asked == []
 
 
+class Launcher:
+    """A window's `launch`: a test daemon on the window's endpoint, as `start_serve`
+    would have started a process."""
+
+    def __init__(self, tmp_path, endpoint: str) -> None:
+        self.tmp_path, self.endpoint = tmp_path, endpoint
+        self.daemons: list[Daemon] = []
+
+    def __call__(self) -> Started:
+        self.daemons.append(Daemon(self.tmp_path, command=self.endpoint,
+                                   events=f"tcp://127.0.0.1:{free_port()}"))
+        return Started()
+
+    def stop(self) -> None:
+        for made in self.daemons:
+            made.stop()
+
+
+@pytest.fixture
+def launcher(tmp_path):
+    made = Launcher(tmp_path, f"tcp://127.0.0.1:{free_port()}")
+    yield made
+    made.stop()
+
+
+def absent_window(qtbot, launcher: Launcher) -> MainWindow:
+    made = MainWindow(client=client_for(launcher.endpoint, launch=launcher,
+                                        connect_timeout=0.3))
+    qtbot.addWidget(made)
+    made.show()
+    qtbot.waitUntil(lambda: made.worker.absent, timeout=10_000)
+    return made
+
+
+def test_a_window_opened_on_no_serve_starts_none_and_closing_it_stops_none(
+        qtbot, scratch_settings, launcher, tmp_path):
+    """Lab #33: a window opened only to read Setup started a serve on the saved folder,
+    and the console with it, and stopped both when it closed."""
+    Settings(scratch_settings).output_dir = str(tmp_path / "today")
+    made = absent_window(qtbot, launcher)
+    assert launcher.daemons == [] and made.worker.refused == ""
+    # Said by the window's slot for the worker's signal, which arrives after `absent`.
+    qtbot.waitUntil(lambda: any(
+        line.startswith("no clockwork serve is running on this PC, and opening this "
+                        "window started none") and "today" in line
+        for line in log_lines(made)), timeout=10_000)
+    assert "Find boxes" in made.daemon_label.text()
+    assert "No clockwork serve is running" in made.sitting_status.text()
+    assert made.find_button.isEnabled() and made.console_button.isEnabled()
+    asked = []
+    made.worker.shutdown_daemon = lambda reason="": asked.append(reason)
+    made.close()
+    assert not made.isVisible() and asked == [] and launcher.daemons == []
+    assert not (tmp_path / "today" / "day-record.jsonl").exists()
+
+
 def test_closing_the_window_that_started_an_idle_daemon_stops_it(
-        qtbot, scratch_settings, daemon):
-    made = remote_window(qtbot, daemon.endpoint)
+        qtbot, scratch_settings, launcher, tmp_path):
+    Settings(scratch_settings).output_dir = str(tmp_path)
+    made = absent_window(qtbot, launcher)
+    made.find_boxes()
+    qtbot.waitUntil(lambda: made.worker.hello is not None, timeout=30_000)
+    assert len(launcher.daemons) == 1 and made.worker.spawned is not None
+    assert made._launch_command[made._launch_command.index("--output") + 1] == str(tmp_path)
     qtbot.waitUntil(lambda: made._job is None and made.worker.status is not None
-                    and made.worker.status.running is None, timeout=30_000)
-    made.worker.spawned = Started()
+                    and made.worker.status.running is None
+                    and not made.worker.status.queued, timeout=30_000)
     asked = []
     made.worker.shutdown_daemon = lambda reason="": asked.append(reason)
     made.close()
     assert not made.isVisible() and len(asked) == 1
+
+
+def test_a_closed_sittings_folder_is_asked_about_before_the_serve_starts(
+        qtbot, scratch_settings, launcher, tmp_path, monkeypatch):
+    """D2 (b): the saved folder is the rc17 sitting's, stood down; the first act asks,
+    and the folder chosen is the one saved, shown and given to the serve."""
+    closed = str(rc17(tmp_path / "261119-rc17-sitting"))
+    today = str(tmp_path / "261121-today")
+    Settings(scratch_settings).output_dir = closed
+    made = absent_window(qtbot, launcher)
+    asked: list[tuple[str, str]] = []
+    answers = ["cancel", "choose"]
+    monkeypatch.setattr(made, "_ask_closed_folder",
+                        lambda folder, why: asked.append((folder, why)) or answers.pop(0))
+    monkeypatch.setattr("clockwork.app.window.QFileDialog.getExistingDirectory",
+                        lambda *args, **kwargs: today)
+
+    made.find_boxes()  # cancelled: nothing started, nothing changed
+    assert asked[0][0] == closed and "13:33:44" in asked[0][1]
+    assert launcher.daemons == [] and made.worker.hello is None
+    assert Settings(scratch_settings).output_dir == closed
+
+    made.find_boxes()  # a folder chosen
+    assert len(asked) == 2
+    assert Settings(scratch_settings).output_dir == today and made.output_dir.text() == today
+    command = made._launch_command
+    assert command[command.index("--output") + 1] == today
+    qtbot.waitUntil(lambda: made.worker.hello is not None, timeout=30_000)
+    # Closed only once the serve's own start-up console is done: closing over another
+    # client's job puts up a modal message, which a test cannot answer.
+    qtbot.waitUntil(lambda: made._job is None and made.worker.status is not None
+                    and made.worker.status.running is None
+                    and not made.worker.status.queued, timeout=30_000)
+    made.worker.shutdown_daemon = lambda reason="": None
+    made.close()
+
+
+def test_starting_there_is_asked_once_and_the_serve_gets_the_closed_folder(
+        qtbot, scratch_settings, launcher, tmp_path, monkeypatch):
+    closed = str(rc17(tmp_path / "261119-rc17-sitting"))
+    Settings(scratch_settings).output_dir = closed
+    made = absent_window(qtbot, launcher)
+    asked: list[str] = []
+    monkeypatch.setattr(made, "_ask_closed_folder",
+                        lambda folder, why: asked.append(folder) or "here")
+    assert made._serve_ready() and made._serve_ready()
+    assert asked == [closed]
+    command = made._launch_command
+    assert command[command.index("--output") + 1] == closed
+    assert any(line.startswith(f"clockwork serve starts on {closed} as asked")
+               for line in log_lines(made))
+
+
+def test_a_send_built_after_the_question_carries_the_chosen_folder(
+        qtbot, scratch_settings, launcher, tmp_path, monkeypatch):
+    """The question comes before the job is built, so a run's own folder is the one
+    chosen, not the closed one the window opened on."""
+    closed = str(rc17(tmp_path / "261119-rc17-sitting"))
+    today = str(tmp_path / "261121-today")
+    Settings(scratch_settings).output_dir = closed
+    made = absent_window(qtbot, launcher)
+    monkeypatch.setattr(made, "_ask_closed_folder", lambda folder, why: "choose")
+    monkeypatch.setattr("clockwork.app.window.QFileDialog.getExistingDirectory",
+                        lambda *args, **kwargs: today)
+    monkeypatch.setattr(made, "build_method", lambda: make_method())
+    submitted: list[object] = []
+    monkeypatch.setattr(made.worker, "submit", submitted.append)
+    job = made.send()
+    assert job is not None and submitted == [job] and job.directory == today
 
 
 def test_claudes_acquisition_is_shown_and_survives_the_close(
@@ -544,6 +708,29 @@ def test_a_window_that_started_the_serve_keeps_to_its_folder_until_the_next_star
                for line in log_lines(made))
     made._refresh_stem()
     assert Settings(scratch_settings).output_dir == later
+
+
+def test_a_relaunch_after_a_lost_serve_takes_the_folder_picked_since(
+        qtbot, scratch_settings, tmp_path, monkeypatch):
+    """The launch command used to be built once, when the window opened, so a serve
+    started again after one was lost got the window's first folder (the window design's
+    FLAG, closed by lab record, task 175)."""
+    endpoint = f"tcp://127.0.0.1:{free_port()}"
+    first = Daemon(tmp_path, command=endpoint, events=f"tcp://127.0.0.1:{free_port()}")
+    try:
+        Settings(scratch_settings).output_dir = str(tmp_path)
+        made = remote_window(qtbot, endpoint, launch=Started, connect_timeout=0.5)
+        later = str(tmp_path / "later")
+        monkeypatch.setattr("clockwork.app.window.QFileDialog.getExistingDirectory",
+                            lambda *args, **kwargs: later)
+        made._pick_output_dir()
+        first.stop()
+        qtbot.waitUntil(lambda: made.worker.hello is None, timeout=20_000)
+        assert made._serve_ready()
+        command = made._launch_command
+        assert command[command.index("--output") + 1] == later
+    finally:
+        first.stop()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="the job object is Windows's")

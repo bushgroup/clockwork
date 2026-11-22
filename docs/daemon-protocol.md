@@ -16,15 +16,15 @@ clockwork serve [--fake] [--output DIR] [--library DIR] [--instrument PATH] [--l
                 [--detached]
 ```
 
-The window starts the daemon itself when it opens and none is answering (under The window as a
-client), so on a trainee's day nobody types this. To start one by hand, run that command at a
+The window starts the daemon itself at the first act that needs the instrument when none is
+answering (under The window as a client), so on a trainee's day nobody types this. To start one by hand, run that command at a
 terminal on the instrument PC. In order, it
 
 1. takes the instrument lock (below), and exits with the lock's sentence if another owner holds it;
 2. stops an acquisition console left running by an owner that died, if one is answering on the
    console's command port (under Failure modes);
 3. binds its two sockets, and exits with one sentence if either port is taken;
-4. finds the boxes, as the window does when it opens, and starts the acquisition console, found
+4. finds the boxes, as Find boxes in the window does, and starts the acquisition console, found
    through `--console`, then `$CLOCKWORK_CONSOLE`, then the directory the installer puts it in;
 5. serves until Ctrl-C at its terminal or a `shutdown` request from any client.
 
@@ -343,15 +343,32 @@ one of them is refused.
 
 The clockwork window is a client of the daemon like any other, and on an instrument PC it is the
 usual way a daemon starts. When it opens it asks `hello` on the command socket. If a daemon
-answers, the window follows it. If none does, the window starts `clockwork serve` itself, the
-installed executable with the subcommand, passing its output directory, method library, console,
-kept-files folder, error log and sitting (its instrument document, and the limits files where it
-has any) on the command line, and waits for `hello`. The daemon it starts
+answers, the window follows it. If none does, the window starts nothing: it says in its run log
+and status bar that no daemon is running, names the output directory one would write to, and
+asks `hello` again every 3 s, so that it joins a daemon another client starts as it joins any
+other. Opening the window to read the Setup tab therefore leaves no trace on the instrument or in
+any folder. The first act that needs the instrument (Find boxes, Read the boxes' state, Send,
+Acquire, the Start of a run queue or a plan, or a console start or restart) starts
+`clockwork serve`, the installed executable with the subcommand, passing the output directory,
+method library, console, kept-files folder, error log and sitting (the instrument document, and
+the limits files where there are any) that the window's settings hold at that moment, and waits
+for `hello`. A daemon already finds the boxes and starts the console as it starts, so a first
+Find boxes or console start is not sent a second time.
+
+Before that start, the window looks at the output directory. A folder whose day record ends a
+sitting with a stand-down, with no send logged in it since, belongs to a sitting that has ended,
+and the window asks whether to start the daemon there or choose another folder; the folder chosen
+is saved and is the one the daemon is given. A daemon that a window opened only to read Setup
+starts writes day-record lines and no send log, so it does not reopen the folder, whereas a
+warm-up or any run does. The daemon it starts
 has no console window, runs in a process group of its own, breaks away from any job the window is
 in, and logs to `serve.log` alone; it is stopped by `shutdown` and never by a console signal.
 `--detached` on its command line keeps its log out of the console of whatever started it, which
 matters when that is `clockwork warm-up` in a shortcut's console window: without it, the daemon's
-later lines printed after the verb's prompt. `warm-up` starts a daemon the same way. If
+later lines printed after the verb's prompt. `warm-up` and `snapshot` start a daemon the same
+way when none answers; given no `--output`, `warm-up` refuses to start one on the saved output
+directory when that directory belongs to an ended sitting, and `snapshot` says so on standard
+error and goes on. If
 the daemon ends before it answers, which is what happens when another program holds the
 instrument lock, the window shows the last line of `serve.log`, which names the holder.
 
@@ -387,7 +404,8 @@ own process and starts no daemon.
 Two verbs of the [command line](command-line.md#the-two-ends-of-a-day) start and stop a daemon
 the same way. `clockwork warm-up` starts one as the window does when none answers, with the
 window's saved output directory, library and console, and leaves it running, so a window opened
-later finds it and leaves it running when it closes. `clockwork stand-down` sends `shutdown` once
+later finds it and leaves it running when it closes, except on a saved output directory that an
+ended sitting stood down, where it refuses unless `--output` names a folder. `clockwork stand-down` sends `shutdown` once
 it has zeroed the boxes, then waits until `hello` goes unanswered, the daemon's process has ended,
 the instrument lock no longer names it and nothing listens on the console's command port.
 

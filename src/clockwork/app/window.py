@@ -74,6 +74,7 @@ from .. import method as method_module
 from .. import series as series_module
 from ..acq import BeamGuard, StateRead, Warned, find_console
 from ..acq.loop import WHEN_ARMED, RunBegun, cautions, refusals
+from ..dayrecord import closed_sitting
 from ..envelope import Limits
 from ..instrument import UNCALIBRATED, Instrument
 from ..mcp.audit import AuditLog
@@ -216,19 +217,15 @@ class MainWindow(QMainWindow):
                                  errors_log=errors.errors_log_path())
         else:
             # The instrument belongs to `clockwork serve`; the window is one of its
-            # clients, and starts it when it is not running (task 77). What the daemon
-            # needs of this window's settings goes on its command line.
-            command = serve_command(
-                output=self.settings.output_dir, library=self.settings.library_dir,
-                console=self.settings.console_path, kept=self.kept_root(),
-                errors_log=errors.errors_log_path(),
-                instrument=self.settings.instrument_path,
-                limits=self.settings.limits_path,
-                project_limits=self.settings.project_limits_path)
+            # clients (task 77), and starts it at its first act that needs the instrument
+            # when none is running (task 175). What the daemon needs of this window's
+            # settings goes on its command line, built as it is launched.
+            self._launch_command = self._serve_command()
             self.worker = client(self.mailbox) if client is not None else RemoteWorker(
-                mailbox=self.mailbox, launch=lambda: start_serve(command),
+                mailbox=self.mailbox, launch=lambda: start_serve(self._launch_command),
                 console_path=self.settings.console_path)
         self._close_when_idle = False
+        self._closed_when_idle = False
         self._scan_when_idle = False
         """Set by a join that found the daemon busy: the scan it put off, made by the
         first status that shows the daemon idle (lab record, task 96)."""
@@ -239,6 +236,9 @@ class MainWindow(QMainWindow):
         self.instrument_path = self.settings.instrument_path
         self.instrument: Instrument = UNCALIBRATED
         self.metadata = Metadata(name="untitled", created=_dt.date.today())
+        self._closed_ok = ""
+        """A closed sitting's folder the person at this window chose to start clockwork
+        serve on anyway, asked about once (lab record, task 175)."""
         self._serve_output = ""
         """The output folder of the `clockwork serve` this window is a client of, from its
         `hello`, or empty in process or for a serve from before it said one. Where set it
@@ -796,6 +796,7 @@ class MainWindow(QMainWindow):
         self.worker.said.connect(self.run_panel.say)
         self.worker.warned.connect(self._warn)
         self.worker.connected.connect(self._daemon_connected)
+        self.worker.no_serve.connect(self._no_serve)
         self.worker.status_changed.connect(self._owner_status)
 
         # `clicked` carries a `checked` flag, and every slot below takes none: bound
@@ -1349,6 +1350,10 @@ class MainWindow(QMainWindow):
             self.sitting_status.setText(
                 "The simulated instrument's sitting, in this window's own process."
                 if self.fake else
+                f"No clockwork serve is running. Find boxes, Send, Acquire or a Start "
+                f"starts one, given these documents and the output folder "
+                f"{self._next_output() or 'of its own default'}; nothing has been started "
+                "until then." if self._serve_absent() else
                 "Given to clockwork serve when this window starts it; a change takes "
                 "effect at its next start.")
         for button in (self.browse_instrument, self.browse_limits,
@@ -1422,7 +1427,9 @@ class MainWindow(QMainWindow):
             return
         hello = getattr(self.worker, "hello", None)
         if hello is None:
-            self.daemon_label.setText("no clockwork serve yet")
+            self.daemon_label.setText(
+                "no clockwork serve running: Find boxes, Send or Acquire starts one"
+                if self._serve_absent() else "no clockwork serve yet")
             return
         whose = "started by this window" if not self._joined() else "joined"
         self.daemon_label.setText(f"clockwork serve pid {getattr(hello, 'pid', '?')}, "
@@ -1472,6 +1479,8 @@ class MainWindow(QMainWindow):
     # -- the console ---------------------------------------------------------
 
     def start_console(self) -> None:
+        if not self._serve_ready():
+            return
         command = "" if self.fake else (
             self.settings.console_path or find_console() or "")
         if not self.fake and not command:
@@ -1484,6 +1493,8 @@ class MainWindow(QMainWindow):
         self.worker.submit(StartConsole(command=command))
 
     def restart_console(self) -> None:
+        if not self._serve_ready():
+            return
         self.worker.submit(RestartConsole())
 
     def console_settings(self) -> None:
@@ -1503,11 +1514,15 @@ class MainWindow(QMainWindow):
         if not values:
             self.statusBar().showMessage("nothing changed")
             return
+        if not self._serve_ready():
+            return
         self.worker.submit(RestartConsole(values=values))
 
     # -- the instrument ------------------------------------------------------
 
     def find_boxes(self) -> None:
+        if not self._serve_ready():
+            return
         self.worker.submit(Discover(method=self.build_method()))
 
     def read_state(self, box: str = "") -> None:
@@ -1517,6 +1532,8 @@ class MainWindow(QMainWindow):
         whole rack. Queued rather than called: forty round trips on the UI thread would
         freeze the window for the seconds they cost.
         """
+        if not self._serve_ready():
+            return
         self.worker.submit(ReadState(
             label=f"reading {box}" if box else "reading the boxes",
             names=(box,) if box else ()))
@@ -1526,7 +1543,7 @@ class MainWindow(QMainWindow):
         from what they were last sent, and nothing acquired (E7). `setup`, or the "send
         setup again" tick, sends it regardless. The job is handed back for a test."""
         method = self.build_method()
-        if method is None:
+        if method is None or not self._serve_ready():
             return None
         again = setup or self.setup_again.isChecked()
         job = Send(
@@ -1587,6 +1604,8 @@ class MainWindow(QMainWindow):
     def _submit_acquire(self, method: Method, *, label: str, method_path: str,
                         replicates: int, conditions: str, rendered: Rendered | None,
                         setup: bool = False) -> Acquire | None:
+        if not self._serve_ready():
+            return None
         person = self._starter()
         if not person:
             return None
@@ -1951,6 +1970,8 @@ class MainWindow(QMainWindow):
         with a hole in it is not the queue the table shows."""
         if (self.queue.running or self._job is not None or self._plan_job is not None):
             return None
+        if not self._serve_ready():
+            return None
         person = self._starter()
         if not person:
             return None
@@ -2147,6 +2168,8 @@ class MainWindow(QMainWindow):
         shown = self.plan_panel.checked
         if (shown is None or self._job is not None or self.queue.running
                 or self._plan_job is not None):
+            return None
+        if not self._serve_ready():
             return None
         person = self._starter()
         if not person:
@@ -2490,6 +2513,103 @@ class MainWindow(QMainWindow):
         panel that has been deleted."""
         self.run_panel.say(line, warn=True)
 
+    # -- starting clockwork serve on demand (lab record, task 175) ------------------
+
+    def _serve_absent(self) -> bool:
+        worker = self.worker
+        return isinstance(worker, RemoteWorker) and worker.hello is None and worker.absent
+
+    def _next_output(self) -> str:
+        """The folder the next serve this window starts writes to: the field's while no
+        serve has said one, the saved one, a folder picked since, under one that has."""
+        if not self._serve_output:
+            self.settings.output_dir = self.output_dir.text().strip()
+        return self.settings.output_dir
+
+    def _serve_command(self) -> list[str]:
+        """The command line of a serve started now, from the settings as they are now: a
+        relaunch takes a folder or a sitting picked since the window opened."""
+        return serve_command(
+            output=self._next_output() if hasattr(self, "output_dir")
+            else self.settings.output_dir,
+            library=self.settings.library_dir, console=self.settings.console_path,
+            kept=self.kept_root(), errors_log=errors.errors_log_path(),
+            instrument=self.settings.instrument_path, limits=self.settings.limits_path,
+            project_limits=self.settings.project_limits_path)
+
+    def _no_serve(self) -> None:
+        """No serve answered and this window started none: say so, where one would write
+        and what starts one. Nothing is started by opening the window (D1 (b))."""
+        folder = self._next_output()
+        self.run_panel.say(
+            "no clockwork serve is running on this PC, and opening this window started "
+            "none; Find boxes, Send, Acquire or a Start starts one, writing to "
+            + (folder or "its own default folder"))
+        self._show_daemon()
+        self._show_sitting()
+        self._refresh_actions()
+
+    def _serve_ready(self) -> bool:
+        """Before an act that needs the instrument: True to go on, False when the person
+        chose not to start clockwork serve. Where the act will start one, the command it
+        is started with is built now, from the settings as they are (D2 (b)): a closed
+        sitting's folder (`closed_sitting`, D3) is asked about first, start there or
+        choose another, and the folder chosen is saved and is the one the serve gets.
+        Asked before the job is built, so the job carries that folder too. On the UI
+        thread; nothing here waits on hardware."""
+        worker = self.worker
+        if not isinstance(worker, RemoteWorker) or not worker.may_start():
+            return True
+        folder = self._next_output()
+        accepted = bool(self._closed_ok) and bool(folder) and _same_folder(
+            folder, self._closed_ok)
+        why = "" if not folder or accepted else closed_sitting(folder)
+        if why:
+            answer = self._ask_closed_folder(folder, why)
+            if answer == "choose":
+                chosen = QFileDialog.getExistingDirectory(
+                    self, "Where the files go", os.path.dirname(folder) or folder)
+                if not chosen:
+                    answer = "cancel"
+                else:
+                    self.settings.output_dir = chosen
+                    if not self._serve_output:
+                        self.output_dir.setText(chosen)
+                    self._refresh_stem()
+                    self._show_sitting()
+                    self.run_panel.say(f"clockwork serve starts on {chosen}, chosen in "
+                                       f"place of {folder}")
+            elif answer == "here":
+                self._closed_ok = folder
+                self.run_panel.say(f"clockwork serve starts on {folder} as asked, though "
+                                   f"{why}")
+            if answer == "cancel":
+                self.run_panel.say(f"clockwork serve was not started, and nothing was "
+                                   f"done: {folder} is a closed sitting's folder", warn=True)
+                return False
+        self._launch_command = self._serve_command()
+        return True
+
+    def _ask_closed_folder(self, folder: str, why: str) -> str:
+        """Start there, choose a folder, or cancel: `"here"`, `"choose"` or `"cancel"`.
+        Choosing is the default, since the folder was saved by a sitting that has ended.
+        A method of its own so that a test can answer it."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("A closed sitting's folder")
+        box.setText(f"The output folder, {folder}, belongs to a sitting that has ended: "
+                    f"{why}.")
+        box.setInformativeText(
+            "Starting clockwork serve there writes this sitting's day record and runs "
+            "into it. Choose a folder for this sitting, or start there anyway.")
+        choose = box.addButton("Choose a folder…", QMessageBox.ButtonRole.AcceptRole)
+        here = box.addButton("Start there", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(choose)
+        box.exec()
+        clicked = box.clickedButton()
+        return "choose" if clicked is choose else "here" if clicked is here else "cancel"
+
     def _daemon_connected(self, hello: object, started: bool) -> None:
         """A daemon answered: say which, and name the panes for its boxes.
 
@@ -2730,6 +2850,9 @@ class MainWindow(QMainWindow):
         if not path:
             return
         self.settings.output_dir = path
+        # Written through at once: Warm up, run next from its shortcut, reads it from
+        # the saved settings (lab record, task 175).
+        self.settings.sync()
         if self._serve_output:
             self._show_sitting()
             self.run_panel.say(f"the output folder is {path} from the next start of "
@@ -3016,8 +3139,13 @@ class MainWindow(QMainWindow):
             worker.shutdown_daemon("the window that started it closed")
 
     def _close_if_asked(self) -> None:
-        if not self._close_when_idle or self._job is not None:
+        """Close a window whose close waited for its run, once. A scan put off at the
+        join is submitted by the same job end, and its own end arrives after `closeEvent`
+        has waited out the worker: without the latch it asked the daemon to shut down a
+        second time (lab record, task 175, where the window tests met it)."""
+        if not self._close_when_idle or self._job is not None or self._closed_when_idle:
             return
+        self._closed_when_idle = True
         if isinstance(self.worker, RemoteWorker):
             self._shutdown_if_mine()
         self.close()

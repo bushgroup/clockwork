@@ -454,15 +454,18 @@ def run(args: argparse.Namespace, *, out: TextIO | None = None,
     if verb.tool.name in STARTS:
         from ..app.serving import connect_or_start, serve_command
 
+        output = args.output or saved.get("output_dir", "")
         try:
             _, started = connect_or_start(endpoint, serve_command(
-                output=args.output or saved.get("output_dir", ""),
+                output=output,
                 library=args.library or saved.get("library_dir", ""),
                 console=args.console or saved.get("console_path", ""),
                 instrument=instrument_path,
                 limits=args.limits or saved.get("limits_path", ""),
                 project_limits=args.project_limits or saved.get("project_limits_path", "")),
-                say=lambda line: _say(err, line))
+                say=lambda line: _say(err, line),
+                before=lambda: _closed_folder(verb, output, given=bool(args.output),
+                                              err=err, program=program))
         except DaemonError as exc:
             _say(err, f"{program}: {exc}")
             return 1
@@ -570,6 +573,32 @@ class _NoDaemon:
         from ..owner.remote import DaemonError
 
         raise DaemonError("this verb asks no daemon")
+
+
+def _closed_folder(verb: Verb, output: str, *, given: bool, err: TextIO,
+                   program: str) -> None:
+    """Before a verb starts a daemon on the saved output folder: a closed sitting's
+    (`clockwork.dayrecord.closed_sitting`) refuses `warm-up`, whose daemon holds the
+    day and takes every client's runs, and is one line for `snapshot`, which an operator
+    reaches for when something has gone wrong and which belongs with that sitting (lab
+    record, task 175, D4). A folder named with `--output` is never questioned: naming
+    the closed one is how to start there anyway."""
+    if given or not output:
+        return
+    from ..dayrecord import closed_sitting
+    from ..owner.remote import DaemonError
+
+    why = closed_sitting(output)
+    if not why:
+        return
+    if verb.tool.name == "warm_up":
+        raise DaemonError(
+            f"no clockwork serve is running, and the saved output folder it would start "
+            f"on, {output}, is a closed sitting's: {why}. Choose this sitting's folder in "
+            "the window's Setup and run Warm up again, or name a folder with --output "
+            "(that one, to start there anyway)")
+    _say(err, f"{program}: the saved output folder, {output}, is a closed sitting's "
+              f"({why}); clockwork serve starts there all the same")
 
 
 def _run_local(verb: Verb, args: argparse.Namespace, arguments: Mapping[str, object],

@@ -9,8 +9,9 @@ owner was taken out of this module (lab record, task 67) so that a front end wit
 window at all -- the daemon, the MCP server -- drives exactly the same code.
 
 **Two adapters behind one set of signals** (lab record, task 77). `RemoteWorker` is the
-window on an instrument: a client of `clockwork serve`, which it starts when none is
-running, following every job the daemon issues -- its own, Claude's through the MCP
+window on an instrument: a client of `clockwork serve`, which it starts at its first act
+that needs the instrument when none is running (lab record, task 175), following every
+job the daemon issues -- its own, Claude's through the MCP
 server, a command line's -- so that the person at the instrument sees another client's
 work arrive exactly as their own does, labelled with whose it is. `Worker` is `--fake`:
 a `LocalOwner` in this process on a `QThread`, as the window always had, which is what
@@ -214,6 +215,9 @@ class _Signals(QThread):
     Never emitted under `--fake`."""
     status_changed = Signal(object)
     """An `OwnerStatus` that differs from the last one. Never emitted under `--fake`."""
+    no_serve = Signal()
+    """No daemon answers and none has been started: the next job submitted starts one.
+    Emitted once per stretch of absence. Never emitted under `--fake`."""
 
     def __init__(self, mailbox: Mailbox | None) -> None:
         super().__init__()
@@ -404,7 +408,8 @@ class Worker(_Signals):
 
 
 class RemoteWorker(_Signals):
-    """The window as a client of `clockwork serve`, starting one if none is running.
+    """The window as a client of `clockwork serve`, starting one at its first job if none
+    is running.
 
     One thread does everything that reaches the daemon -- connecting, starting it,
     submitting, stopping, and following -- so that the UI thread never waits on a
@@ -421,6 +426,13 @@ class RemoteWorker(_Signals):
     because the window asks `job is self._queue_job`; for another client's it is the
     daemon's copy, one object per job, and `origin(job)` names that client.
 
+    **Started on demand** (lab record, task 175). Opened with no daemon answering, it
+    starts none: it is `absent`, says so once, and asks `hello` again every `rejoin_s`,
+    joining a daemon another client starts as any join. The first job submitted starts
+    one, and a job the daemon's own start-up is already doing -- its scan, its console --
+    is not submitted a second time. A window opened only to read Setup used to start a
+    daemon, and the console with it, on its saved folder, and stop both when it closed.
+
     `launch` returns a started daemon process or is None for a window that must not
     start one; `connect_timeout` bounds one `hello`, `start_timeout` a daemon's start.
     """
@@ -435,6 +447,7 @@ class RemoteWorker(_Signals):
                  poll_s: float = 0.1,
                  connect_timeout: float = 2.0,
                  start_timeout: float = 45.0,
+                 rejoin_s: float = 3.0,
                  log: str | None = None) -> None:
         super().__init__(mailbox)
         self.fake = False
@@ -444,6 +457,7 @@ class RemoteWorker(_Signals):
         self.console_path = console_path
         self.poll_s = poll_s
         self.start_timeout = start_timeout
+        self.rejoin_s = rejoin_s
         self._log = log
         self.hello: Hello | None = None
         self.spawned: subprocess.Popen | None = None
@@ -457,6 +471,7 @@ class RemoteWorker(_Signals):
         """Over what the UI thread reads: the status, the jobs and their origins."""
         self._status: OwnerStatus | None = None
         self._unavailable = ""
+        self._absent = False
         self._busy_since: float | None = None
         """When the daemon, still running, last stopped answering in time; None while it
         answers."""
@@ -527,8 +542,22 @@ class RemoteWorker(_Signals):
             return self._status
 
     @property
+    def absent(self) -> bool:
+        """No daemon answers and none has been started or refused: the next job starts
+        one. Not a refusal, so nothing is greyed for it."""
+        with self._guard:
+            return self._absent
+
+    def may_start(self) -> bool:
+        """Whether the next job submitted would start a daemon: none answers, this window
+        may start one, and none it started is still on its way up. Read on the UI thread,
+        which asks its questions before the job is built (lab record, task 175)."""
+        return self.hello is None and self.launch is not None and self._launched is None
+
+    @property
     def refused(self) -> str:
-        """Why no hardware job can run: the daemon's lock refusal, or no daemon."""
+        """Why no hardware job can run: the daemon's lock refusal, or no daemon that can
+        be started; empty while one is merely `absent`."""
         with self._guard:
             if self._unavailable:
                 return self._unavailable
@@ -624,14 +653,20 @@ class RemoteWorker(_Signals):
 
     def run(self) -> None:  # noqa: D102 -- QThread's own entry point
         try:
-            self._connect(start=True)
+            self._connect(start=False)
+            rejoin = time.monotonic() + self.rejoin_s
             while True:
                 self._take_inbox()
                 if self._done.is_set():
                     self._take_inbox()
                     return
                 if self.hello is None:
-                    self._done.wait(0.5)
+                    # Another client may start one: join it, as any join, without a word
+                    # while none answers.
+                    if time.monotonic() >= rejoin and self._launched is None:
+                        self._connect(start=False, quiet=True)
+                        rejoin = time.monotonic() + self.rejoin_s
+                    self._done.wait(min(0.5, self.rejoin_s))
                     continue
                 try:
                     self._follow()
@@ -699,9 +734,13 @@ class RemoteWorker(_Signals):
                 self.warned.emit(f"clockwork serve could not be asked to {what}: {exc}")
 
     def _submit(self, job: Job) -> None:
-        if self.hello is None and not self._connect(start=True):
-            self.failed_job.emit(job, self._unavailable or "clockwork serve is not running")
-            return
+        if self.hello is None:
+            if not self._connect(start=True):
+                self.failed_job.emit(job, self._unavailable
+                                     or "clockwork serve is not running")
+                return
+            if self.spawned is not None and self._cursor == 0 and self._doing_already(job):
+                return
         try:
             handle = self.owner.submit(job)
         except DaemonError as exc:
@@ -711,11 +750,32 @@ class RemoteWorker(_Signals):
         self._own.add(handle.id)
         self._track(handle)
 
+    def _doing_already(self, job: Job) -> bool:
+        """Whether the daemon this job has just started is doing `job` already, as its
+        own start-up: a scan of every port, or the console. Then it is not asked twice,
+        and the start-up job is followed as the daemon's (lab record, task 175)."""
+        status = self.status
+        if status is None:
+            return False
+        pending = ([status.running] if status.running is not None else []) + list(
+            status.queued)
+        kinds = {handle.kind for handle in pending}
+        if isinstance(job, Discover) and job.ports is None and "Discover" in kinds:
+            self.said.emit("clockwork serve finds the boxes as it starts; that scan "
+                           "stands for this one")
+            return True
+        if isinstance(job, StartConsole) and "StartConsole" in kinds:
+            self.said.emit("clockwork serve starts the acquisition console as it starts")
+            return True
+        return False
+
     # -- connecting --------------------------------------------------------------------
 
-    def _connect(self, *, start: bool) -> bool:
-        """Say hello to the daemon, starting one first if none answers and `launch`
-        allows. True once connected; else `refused` says why."""
+    def _connect(self, *, start: bool, quiet: bool = False) -> bool:
+        """Say hello to the daemon, starting one first if none answers and `start` and
+        `launch` allow. True once connected; else `refused` says why, or `absent` that
+        none answers and the next job starts one. `quiet`: a daemon that does not answer
+        changes nothing, so a refusal already said stays said."""
         try:
             hello = self.owner.hello()
             # A daemon this window started that answered only after `_start` gave up on
@@ -724,8 +784,13 @@ class RemoteWorker(_Signals):
             if started:
                 self.spawned, self._launched = self._launched, None
         except DaemonUnavailable:
-            if not start or self.launch is None:
+            if quiet:
+                return False
+            if self.launch is None:
                 self._set_unavailable("no clockwork serve is running")
+                return False
+            if not start:
+                self._set_absent()
                 return False
             hello = self._start()
             if hello is None:
@@ -750,6 +815,7 @@ class RemoteWorker(_Signals):
             self._cursor = min(live) - 1 if live else status.issued
         with self._guard:
             self._unavailable = ""
+            self._absent = False
         self._set_status(status)
         self.connected.emit(hello, started)
         return True
@@ -780,10 +846,19 @@ class RemoteWorker(_Signals):
         self._set_unavailable(why_serve_stopped(None, self._log))
         return None
 
+    def _set_absent(self) -> None:
+        with self._guard:
+            changed = not self._absent or bool(self._unavailable)
+            self._absent, self._unavailable = True, ""
+        if changed:
+            self.no_serve.emit()
+            self.status_changed.emit(self.status)
+
     def _set_unavailable(self, message: str) -> None:
         with self._guard:
             changed = message != self._unavailable
             self._unavailable = message
+            self._absent = False
         if changed:
             self.warned.emit(message)
             self.status_changed.emit(self.status)

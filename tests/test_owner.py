@@ -656,6 +656,10 @@ def test_a_window_refused_the_lock_says_who_holds_it_and_greys_the_hardware(
         launch=Exited, log=str(log)))
     qtbot.addWidget(window)
     try:
+        # Opened on no daemon, the window starts none (lab record, task 175): its first
+        # act that needs the instrument does, and that start meets the lock.
+        qtbot.waitUntil(lambda: window.worker.absent, timeout=10_000)
+        window.find_boxes()
         qtbot.waitUntil(lambda: "bench script" in window.worker.refused, timeout=10_000)
         window._refresh_actions()
         assert window.lock_label.isVisibleTo(window)

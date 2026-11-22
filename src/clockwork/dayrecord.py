@@ -23,6 +23,10 @@ Neither name parses as a run's stem (`naming.parse_stem`), so a day record never
 file counter and is never one of a stem's files. A line that cannot be written is
 dropped and logged, never raised: the day record is the day's, never a reason to
 disturb a run. Qt-free.
+
+**A closed sitting's folder** (`closed_sitting`, lab record, task 175): a serve a window or
+`warm-up` starts asks before it writes into one, because a window opened only to read
+Setup used to start a serve on the saved folder of a sitting already stood down.
 """
 
 from __future__ import annotations
@@ -38,13 +42,23 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 
-__all__ = ["LIVE_NAME", "SEGMENTS", "DayRecord", "seal_order", "segments"]
+__all__ = ["LIVE_NAME", "SEGMENTS", "STAND_DOWN", "DayRecord", "closed_sitting", "seal_order",
+           "segments"]
 
 LIVE_NAME = "day-record.jsonl"
 """The live segment, the only one written to."""
 
 SEGMENTS = "day-record*.jsonl"
 """Every segment of a folder's day record, the live one among them."""
+
+STAND_DOWN = "the instrument's stand-down"
+"""The reason a stand-down gives the daemon it stops (`clockwork.mcp.tools`), and so the
+reason on the `daemon stopped` line that ends a stood-down sitting's day record."""
+
+SENT = "*.sent.txt"
+"""Every send log in a folder: each act that sends anything to a box writes one
+(`clockwork.transcript.send_log_name`), an acquisition, a warm-up, a stand-down, a
+snapshot alike."""
 
 SHARING_WAIT_S = 2.0
 SEAL_WAIT_S = 5.0
@@ -86,6 +100,40 @@ def segments(directory: str) -> list[str]:
              if os.path.isfile(path) and os.path.normcase(path) != os.path.normcase(live)]
     found.sort(key=lambda path: (_first_time(path), seal_order(path), os.path.basename(path)))
     return found + ([live] if os.path.isfile(live) else [])
+
+
+def closed_sitting(directory: str) -> str:
+    """Why `directory` reads as a closed sitting's folder, or empty where it does not.
+
+    Closed: its day record holds a stand-down's `daemon stopped` line (`STAND_DOWN`), and
+    no send log in the folder was written after the newest one (lab record, task 175, D3).
+    A serve started on it since that ran nothing -- a window opened only to read Setup --
+    writes day-record lines and no send log, so it leaves the folder closed; a warm-up or
+    any run reopens it. A seal alone (`seal_calls` mid-day) closes nothing, and neither
+    does a day that ended with no stand-down. The line's time is to the second, so a send
+    log counts as after it only from the next second on: the stand-down's own is written
+    just before its line. Never raises; a folder that cannot be read is not closed."""
+    if not directory or not os.path.isdir(directory):
+        return ""
+    stood = ""
+    for line in DayRecord(directory).lines():
+        if (line.get("kind") == "daemon" and line.get("event") == "stopped"
+                and line.get("reason") == STAND_DOWN):
+            stood = str(line.get("time") or "")
+    if not stood:
+        return ""
+    try:
+        after = _dt.datetime.fromisoformat(stood).timestamp() + 1.0
+    except ValueError:
+        return ""
+    for path in glob.glob(os.path.join(glob.escape(directory), SENT)):
+        try:
+            if os.path.getmtime(path) >= after:
+                return ""
+        except OSError:
+            continue
+    return (f"it was stood down at {stood.replace('T', ' ')}, and no send has been logged "
+            "in it since")
 
 
 class DayRecord:

@@ -147,12 +147,15 @@ def connect_or_start(endpoint: str, command: list[str], *,
                      timeout: float = START_TIMEOUT_S,
                      say: Callable[[str], None] | None = None,
                      launch: Callable[[list[str]], subprocess.Popen] | None = None,
+                     before: Callable[[], None] | None = None,
                      ) -> tuple[object, bool]:
     """`hello` from the daemon at `endpoint`, starting `command` first if none answers.
 
     Answers the `Hello` and whether this call started the daemon. `DaemonError` with
     one sentence for a daemon that would not start, or that answered and is not one this
-    client can talk to."""
+    client can talk to. `before` is called only when one is about to be started, and
+    may refuse the start by raising `DaemonError` (a closed sitting's folder, lab
+    record, task 175)."""
     from ..owner.remote import DaemonError, DaemonUnavailable, RemoteOwner
 
     probe = RemoteOwner(endpoint, timeout=2.0)
@@ -163,6 +166,8 @@ def connect_or_start(endpoint: str, command: list[str], *,
             pass
     finally:
         probe.close()
+    if before is not None:
+        before()
     if say is not None:
         say("no clockwork serve is running on this PC; starting one")
     try:

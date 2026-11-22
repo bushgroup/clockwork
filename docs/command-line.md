@@ -229,7 +229,12 @@ ramped from what each box reads back, in the instrument file's `steps`, `dwell_s
 and each step is written to standard error as it is sent. The boxes are then read back and
 compared with the method as a stack audit compares them, and the answer's `ok` is true when every
 declared setting reads back as declared. When no daemon answers, `warm-up` starts one, which stays
-running for the day; the window opened later joins it and leaves it running when it closes.
+running for the day; the window opened later joins it and leaves it running when it closes. Given
+no `--output`, `warm-up` refuses to start one on a saved output directory whose day record ends
+with a stand-down and in which nothing has been sent since, naming the directory and the
+stand-down, because that daemon would take the whole day's runs into an ended sitting's folder.
+Choose the day's folder in the window's Setup tab and run it again, or pass `--output`; naming the
+stood-down folder there starts the daemon on it.
 
 `stand-down` puts the instrument to rest in the evening. It takes every box out of table mode,
 ramps every DC bias channel, RF drive level and ARB range the boxes report to zero in the same
@@ -282,6 +287,8 @@ box was read.
 The snapshot is refused while a send or an acquisition is running or queued, and names the job:
 stop the queue first. Given no options it takes the output directory and the instrument file
 from the window's saved settings, and when no daemon answers it starts one, as `warm-up` does.
+On a saved output directory that an earlier sitting stood down, it says so on standard error and
+goes on, since a snapshot belongs with the sitting whose boxes it reads.
 Two snapshots, one before a box is power-cycled and one after, record what the cycle changed.
 
 ## Reporting a problem or requesting a feature

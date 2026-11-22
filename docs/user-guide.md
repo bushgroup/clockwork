@@ -93,8 +93,10 @@ on the PC:
 
 The instrument document and the two limits files are the **sitting**, and clockwork's background
 service, `clockwork serve`, carries one sitting for every client: the window, an agent and the
-command line are shown and held to the same limits. A window that starts the service hands it the
-sitting in the Setup tab, and a change takes effect when the service next starts. A window that
+command line are shown and held to the same limits. Opening the window starts nothing: with no
+service running, the status bar says so, and the first Find boxes, Send, Acquire or Start starts
+the service, handing it the sitting in the Setup tab as it stands at that moment. A change takes
+effect when the service next starts. A window that
 finds the service already running shows that service's sitting instead, without the browse
 buttons, and its runs carry that service's instrument document.
 
@@ -105,6 +107,12 @@ that directory; the window does not remember it, so a window opened later with n
 has the directory it last saved. A window that starts the service hands it the saved directory and
 shows it. Choosing another with the browse button saves it for the service's next start, and until
 then the window's runs go where the service writes.
+
+To keep one sitting's files out of another's folder, the window checks the saved directory before
+it starts the service. When that directory was stood down at the end of an earlier sitting and
+nothing has been sent from it since, the window asks whether to start there or choose a folder,
+and the folder chosen becomes the saved directory. Choosing a folder is the usual answer at the
+start of a new sitting.
 
 The rest of the Setup tab holds what is used less often. **Find boxes** asks every MIPS-class port
 which box is behind it, and **Read the boxes' state** reads every box for the state panels.
@@ -129,7 +137,9 @@ default, each printed as it is sent, about fifteen seconds in all. The window it
 line saying whether every box holds the stack as declared, and lists any setting that does not.
 Warm up loads no table and arms nothing, so the first **Acquire** of the day sends every phase
 before it acquires. It also starts clockwork's background service when none is running, and the
-window opened afterwards uses that service and leaves it running when the window closes. That
+window opened afterwards uses that service and leaves it running when the window closes. Warm up
+refuses to start the service on a saved output directory that an earlier sitting stood down, and
+says so: open the window, choose this sitting's folder in the Setup tab, and run Warm up again. That
 window asks the service for the boxes as it opens, or as soon as the service's current job ends,
 so nothing needs **Find boxes** first.
 
@@ -147,8 +157,8 @@ console with it. Its window ends by saying whether every setting reached zero an
 service and the console have stopped; after that, Task Manager shows neither, and the front panels
 read zero. Stand down refuses to start while an acquisition is running, and names it: wait for the
 run to finish, or stop it from the window. A window left open sees the service go and says so in
-its status bar; it has nothing to reconnect to until the next Warm up, or until **Find boxes**
-starts the service again.
+its status bar, and joins the service again once Warm up or any other client starts one, or starts
+one itself at its next **Find boxes**, Send or Acquire.
 
 Either can be interrupted with Ctrl-C in its window. The ramp stops after the step it is on, and
 running the same shortcut again carries on from what the boxes then read back.

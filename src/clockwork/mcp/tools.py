@@ -94,7 +94,7 @@ from ..acq import (
 from ..acq.standing import RampStepped, StandDownDone
 from ..acq.uimf import RAW_SUFFIX, SUMMED_SUFFIX
 from ..app import methodlib
-from ..dayrecord import DayRecord
+from ..dayrecord import STAND_DOWN, DayRecord
 from ..envelope import Limits
 from ..instrument import UNCALIBRATED, Instrument
 from ..method import Method, MethodError
@@ -1505,7 +1505,7 @@ class Toolbox:
         if not isinstance(result, StandingResult):
             return self._unfinished(handle, event)
         not_zero = _not_at_rest(result.snapshot.after)
-        gone = self._shut_down_daemon("the instrument's stand-down")
+        gone = self._shut_down_daemon(STAND_DOWN)
         stopped = not any(gone.values())
         return {
             "ok": not not_zero and stopped,
