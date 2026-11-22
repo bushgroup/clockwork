@@ -2437,6 +2437,16 @@ class MainWindow(QMainWindow):
             self.run_panel.say(f"{job.label}: {result.shortfall}", warn=True)
             ending = (f"{job.label}: stopped short, {result.points_done} of "
                       f"{result.points} points complete")
+        elif isinstance(result, SeriesResult):
+            # A line, not only the caption: a window that joined the series scans the
+            # rack the moment it ends, and that job's caption replaced the only "done"
+            # the window had written (lab #32). Said before `idle`, under the series' tag.
+            files = len(result.runs)
+            replaced = (f", {len(result.replaced)} of them failed and replaced by a "
+                        "retake" if result.replaced else "")
+            self.run_panel.say(
+                f"{job.label}: complete, {result.points_done} of {result.points} points, "
+                f"{files} file{'' if files == 1 else 's'}{replaced}")
         self.run_panel.idle(ending)
         self.statusBar().showMessage(ending)
         # After the log lines and before the buttons are re-read: the next row of a

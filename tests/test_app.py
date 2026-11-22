@@ -87,6 +87,7 @@ from clockwork.app.panes import MARGIN_TAGS, BoxPane  # noqa: E402
 from clockwork.app.queuepanel import BeamGuardDialog, QueuePanel  # noqa: E402
 from clockwork.app.runlog import (  # noqa: E402
     _IS_WARNING,
+    _JOB,
     RunPanel,
     is_left_as_found,
     names_it_elsewhere,
@@ -3206,3 +3207,27 @@ def test_a_series_that_stopped_short_does_not_end_the_run_log_on_done(window):
     assert "Never acquired: planned 3 (the end reference)." in said.text(1)
     message = window.statusBar().currentMessage()
     assert "stopped short, 1 of 3 points complete" in message and "done" not in message
+    assert not [line for line in lines if ": complete," in line.text(1)]
+
+
+def test_a_series_that_ran_to_its_end_says_so_in_the_run_log(window):
+    """A complete series leaves a line in the run log, not only a caption the next job
+    replaces: a window that joined the series scans the rack as it ends (lab #32)."""
+    from clockwork.owner import SeriesJob, SeriesResult, wire
+
+    job = wire.example(SeriesJob)
+    runs = tuple(a_run(f"261119_ZZ_00{number}") for number in (1, 2, 3))
+    window.run_panel.begin(job.label)
+    tag = window.run_panel.job_tag
+    window._job_finished(job, SeriesResult(runs=runs, points=2, points_done=2,
+                                           replaced=("261119_ZZ_002",)))
+    log = window.run_panel.log
+    lines = [log.topLevelItem(number) for number in range(log.topLevelItemCount())]
+    [said] = [line for line in lines if ": complete," in line.text(1)]
+    assert said.text(1) == (f"{job.label}: complete, 2 of 2 points, 3 files, 1 of them "
+                            "failed and replaced by a retake")
+    assert not said.data(0, _IS_WARNING)
+    assert said.data(0, _JOB) == tag, "said under the series, before the window idles"
+    # The caption goes as the put-off scan begins; the line stays.
+    window.run_panel.begin("Find boxes")
+    assert said.text(1).startswith(f"{job.label}: complete")
