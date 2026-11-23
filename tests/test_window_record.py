@@ -320,6 +320,37 @@ def test_the_daemon_carries_the_sitting_and_hello_reports_it(tmp_path):
     assert console["by"] == "clockwork serve"
 
 
+def test_a_daemon_started_again_in_a_live_segment_writes_its_own_sitting(tmp_path):
+    # rc17: serves started again in one folder, with no seal between them, wrote no
+    # sitting line, so one started on other limits left the day record silent about them.
+    library = tmp_path / "library"
+    library.mkdir()
+    (library / "line-b.toml").write_text(TEMPLATE, encoding="utf-8")
+    limits = tmp_path / "limits.toml"
+    limits.write_text(limits_text(str(library)), encoding="utf-8")
+    output = tmp_path / "runs"
+    output.mkdir()
+    for given in ({}, {"limits": str(limits)}):
+        made = Daemon(output, **given)
+        client = RemoteOwner(made.endpoint, timeout=10)
+        try:
+            client.hello()
+        finally:
+            made.stop(client)
+            client.close()
+
+    assert [os.path.basename(path) for path in segments(str(output))] == [LIVE_NAME]
+    lines = list(DayRecord.beside(str(output)).lines())
+    starts = [index for index, line in enumerate(lines)
+              if (line["kind"], line.get("event")) == ("daemon", "started")]
+    sittings = [index for index, line in enumerate(lines) if line["kind"] == "sitting"]
+    assert len(starts) == 2 and sittings == [start - 1 for start in starts]
+    first, second = (lines[index] for index in sittings)
+    assert first["limits"] is None
+    assert second["limits"]["path"] == str(limits)
+    assert second["session"] == lines[starts[1]]["session"] != first["session"]
+
+
 def test_a_daemon_whose_limits_do_not_load_says_so_and_exits(tmp_path):
     bad = tmp_path / "limits.toml"
     bad.write_text("schema_version = 99\n", encoding="utf-8")

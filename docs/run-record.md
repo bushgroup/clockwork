@@ -207,7 +207,7 @@ line has `time` and `kind`, and `by` where a person or a client caused it:
 
 | `kind` | When | What else the line holds |
 |---|---|---|
-| `sitting` | First in every segment of the day record | `version`, `session`, `pid`, `fake`, `output`, `library`, and `instrument`, `limits` and `project_limits`, each `{path, sha256}` of the document in force, or null for none |
+| `sitting` | First in every segment of the day record, and again just before each `daemon` `started` line, so that a daemon started again in the same segment records what it carries | `version`, `session`, `pid`, `fake`, `output`, `library`, and `instrument`, `limits` and `project_limits`, each `{path, sha256}` of the document in force, or null for none |
 | `daemon` | The daemon started or stopped | `event` (`started` or `stopped`), `session`, `reason` |
 | `console` | The acquisition console started, restarted or stopped | `event` (`started`, `restarted`, `stopped` or `failed`), `job`, `by` (the client whose job it was, or the daemon itself), `detail` |
 | `note` | A person typed a note at the window with no job running, or while a job with no run record ran | `text`, `by` (the person's initials), `client` (the window), `job` (the job running, or null) |

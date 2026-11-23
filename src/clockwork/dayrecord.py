@@ -14,7 +14,8 @@ beam-guard change made with nothing running.
 that a listed day folder never changes: `seal` renames the live file
 `day-record.<YYYYMMDD-HHMMSS>.jsonl`, and the next line starts a new live file. Every
 segment opens with the sitting, written by whichever line finds no live file, so each can
-be read alone. The seal is made by the client that seals the audit log (`seal_calls`,
+be read alone; a daemon also writes it at every start, so a serve started again inside a
+live segment says what it carries (lab #36). The seal is made by the client that seals the audit log (`seal_calls`,
 `stand_down`), in its own process; the daemon opens the live name per line, as the audit
 log's writers do, so a rename between two lines costs nothing, and a line that meets a
 rename under way (Windows' sharing refusal) is retried for `SHARING_WAIT_S`.

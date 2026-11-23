@@ -220,10 +220,15 @@ def _run(log: logging.Logger, *, fake: bool, output: str, library: str, console:
     log.info("instrument %s, limits %s%s", sitting.instrument_path or "(none)",
              sitting.limits_path or "(none)",
              f" with {sitting.project_limits_path}" if sitting.project_limits_path else "")
-    day = DayRecord(output, sitting=lambda: {
-        "version": __version__, "session": server.session, "pid": os.getpid(),
-        "fake": fake, "output": output, "library": library, **sitting.entry()})
+    def carried() -> dict[str, object]:
+        return {"version": __version__, "session": server.session, "pid": os.getpid(),
+                "fake": fake, "output": output, "library": library, **sitting.entry()}
+
+    day = DayRecord(output, sitting=carried)
     owner.day = day
+    # Written every start, not only by the line that opens a segment: a serve started again
+    # in a live segment, perhaps on other documents, says what it carries (lab #36).
+    day.write("sitting", **carried())
     day.write("daemon", event="started", session=server.session, by=PROGRAM,
               reason="")
     # Said once, here: a variable that names nothing whatever library was given, and no
